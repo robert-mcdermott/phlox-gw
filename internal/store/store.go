@@ -63,16 +63,21 @@ type APIKeyWindowUsage struct {
 }
 
 type Provider struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	Type      string    `json:"type"`
-	BaseURL   string    `json:"base_url"`
-	APIKey    string    `json:"-"`
-	APIKeyEnv string    `json:"api_key_env"`
-	AWSRegion string    `json:"aws_region"`
-	Enabled   bool      `json:"enabled"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID                  string     `json:"id"`
+	Name                string     `json:"name"`
+	Type                string     `json:"type"`
+	BaseURL             string     `json:"base_url"`
+	APIKey              string     `json:"-"`
+	APIKeyEnv           string     `json:"api_key_env"`
+	AWSRegion           string     `json:"aws_region"`
+	Enabled             bool       `json:"enabled"`
+	HealthStatus        string     `json:"health_status"`
+	ConsecutiveFailures int        `json:"consecutive_failures"`
+	LastHealthCheckAt   *time.Time `json:"last_health_check_at,omitempty"`
+	LastError           string     `json:"last_error"`
+	CircuitOpenUntil    *time.Time `json:"circuit_open_until,omitempty"`
+	CreatedAt           time.Time  `json:"created_at"`
+	UpdatedAt           time.Time  `json:"updated_at"`
 }
 
 type Model struct {
@@ -244,6 +249,11 @@ func (s *Store) migrate(ctx context.Context) error {
 		{table: "api_keys", column: "rpm_limit", spec: "INTEGER NOT NULL DEFAULT 0"},
 		{table: "api_keys", column: "tpm_limit", spec: "INTEGER NOT NULL DEFAULT 0"},
 		{table: "api_keys", column: "model_allowlist", spec: "TEXT NOT NULL DEFAULT ''"},
+		{table: "providers", column: "health_status", spec: "TEXT NOT NULL DEFAULT 'unknown'"},
+		{table: "providers", column: "consecutive_failures", spec: "INTEGER NOT NULL DEFAULT 0"},
+		{table: "providers", column: "last_health_check_at", spec: "TEXT"},
+		{table: "providers", column: "last_error", spec: "TEXT NOT NULL DEFAULT ''"},
+		{table: "providers", column: "circuit_open_until", spec: "TEXT"},
 	}
 	for _, migration := range migrations {
 		if err := s.ensureColumn(ctx, migration.table, migration.column, migration.spec); err != nil {
@@ -559,7 +569,7 @@ func (s *Store) APIKeyWindowUsage(ctx context.Context, keyID string, since time.
 }
 
 func (s *Store) ListProviders(ctx context.Context) ([]Provider, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, name, type, base_url, api_key, api_key_env, aws_region, enabled, created_at, updated_at FROM providers ORDER BY name`)
+	rows, err := s.db.QueryContext(ctx, `SELECT `+providerColumns+` FROM providers ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
@@ -573,6 +583,10 @@ func (s *Store) ListProviders(ctx context.Context) ([]Provider, error) {
 		providers = append(providers, p)
 	}
 	return providers, rows.Err()
+}
+
+func (s *Store) GetProvider(ctx context.Context, id string) (Provider, error) {
+	return scanProvider(s.db.QueryRowContext(ctx, `SELECT `+providerColumns+` FROM providers WHERE id = ?`, id))
 }
 
 func (s *Store) CreateProvider(ctx context.Context, p Provider) error {
@@ -612,6 +626,65 @@ func (s *Store) UpdateProvider(ctx context.Context, p Provider, updateAPIKey boo
 		return ErrNotFound
 	}
 	return nil
+}
+
+func (s *Store) RecordProviderSuccess(ctx context.Context, providerID string, now time.Time) error {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE providers
+		SET health_status = 'healthy', consecutive_failures = 0, last_error = '', circuit_open_until = NULL,
+		    last_health_check_at = ?, updated_at = ?
+		WHERE id = ?`,
+		formatTime(now), formatTime(now), providerID)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) RecordProviderFailure(ctx context.Context, providerID string, threshold int, cooldown time.Duration, now time.Time, errText string) (Provider, error) {
+	if threshold <= 0 {
+		threshold = 3
+	}
+	if cooldown <= 0 {
+		cooldown = 5 * time.Minute
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Provider{}, err
+	}
+	defer tx.Rollback()
+
+	var failures int
+	err = tx.QueryRowContext(ctx, `SELECT consecutive_failures FROM providers WHERE id = ?`, providerID).Scan(&failures)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Provider{}, ErrNotFound
+	}
+	if err != nil {
+		return Provider{}, err
+	}
+	failures++
+	status := "degraded"
+	var circuit any
+	if failures >= threshold {
+		status = "down"
+		circuit = formatTime(now.Add(cooldown))
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE providers
+		SET health_status = ?, consecutive_failures = ?, last_error = ?, circuit_open_until = ?,
+		    last_health_check_at = ?, updated_at = ?
+		WHERE id = ?`,
+		status, failures, limitProviderError(errText), circuit, formatTime(now), formatTime(now), providerID); err != nil {
+		return Provider{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Provider{}, err
+	}
+	return s.GetProvider(ctx, providerID)
 }
 
 func (s *Store) DeleteProvider(ctx context.Context, id string) error {
@@ -1113,11 +1186,16 @@ const apiKeyColumns = `id, user_id, name, prefix, key_hash, is_active, expires_a
 
 const apiKeyColumnsAliased = `k.id, k.user_id, k.name, k.prefix, k.key_hash, k.is_active, k.expires_at, k.last_used_at, k.created_at, k.budget_usd, k.rpm_limit, k.tpm_limit, k.model_allowlist`
 
+const providerColumns = `id, name, type, base_url, api_key, api_key_env, aws_region, enabled, health_status, consecutive_failures, last_health_check_at, last_error, circuit_open_until, created_at, updated_at`
+
+const providerColumnsAliased = `p.id, p.name, p.type, p.base_url, p.api_key, p.api_key_env, p.aws_region, p.enabled, p.health_status, p.consecutive_failures, p.last_health_check_at, p.last_error, p.circuit_open_until, p.created_at, p.updated_at`
+
 func scanProvider(row scanner) (Provider, error) {
 	var p Provider
 	var enabled int
+	var lastCheck, circuitOpen sql.NullString
 	var created, updated string
-	err := row.Scan(&p.ID, &p.Name, &p.Type, &p.BaseURL, &p.APIKey, &p.APIKeyEnv, &p.AWSRegion, &enabled, &created, &updated)
+	err := row.Scan(&p.ID, &p.Name, &p.Type, &p.BaseURL, &p.APIKey, &p.APIKeyEnv, &p.AWSRegion, &enabled, &p.HealthStatus, &p.ConsecutiveFailures, &lastCheck, &p.LastError, &circuitOpen, &created, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Provider{}, ErrNotFound
 	}
@@ -1125,6 +1203,17 @@ func scanProvider(row scanner) (Provider, error) {
 		return Provider{}, err
 	}
 	p.Enabled = enabled == 1
+	if p.HealthStatus == "" {
+		p.HealthStatus = "unknown"
+	}
+	if lastCheck.Valid {
+		t := parseTime(lastCheck.String)
+		p.LastHealthCheckAt = &t
+	}
+	if circuitOpen.Valid {
+		t := parseTime(circuitOpen.String)
+		p.CircuitOpenUntil = &t
+	}
 	p.CreatedAt = parseTime(created)
 	p.UpdatedAt = parseTime(updated)
 	return p, nil
@@ -1150,7 +1239,7 @@ func scanModel(row scanner) (Model, error) {
 
 const routedModelQuery = `
 	SELECT m.id, m.provider_id, m.model_id, m.route, m.display_name, m.input_cost_per_million, m.output_cost_per_million, m.context_window, m.supports_streaming, m.enabled, m.created_at, m.updated_at,
-	       p.id, p.name, p.type, p.base_url, p.api_key, p.api_key_env, p.aws_region, p.enabled, p.created_at, p.updated_at
+	       ` + providerColumnsAliased + `
 	FROM models m
 	JOIN providers p ON p.id = m.provider_id`
 
@@ -1158,9 +1247,10 @@ func scanRoutedModel(row scanner) (RoutedModel, error) {
 	var m Model
 	var p Provider
 	var mStreaming, mEnabled, pEnabled int
+	var pLastCheck, pCircuitOpen sql.NullString
 	var mCreated, mUpdated, pCreated, pUpdated string
 	err := row.Scan(&m.ID, &m.ProviderID, &m.ModelID, &m.Route, &m.DisplayName, &m.InputCostPerMillion, &m.OutputCostPerMillion, &m.ContextWindow, &mStreaming, &mEnabled, &mCreated, &mUpdated,
-		&p.ID, &p.Name, &p.Type, &p.BaseURL, &p.APIKey, &p.APIKeyEnv, &p.AWSRegion, &pEnabled, &pCreated, &pUpdated)
+		&p.ID, &p.Name, &p.Type, &p.BaseURL, &p.APIKey, &p.APIKeyEnv, &p.AWSRegion, &pEnabled, &p.HealthStatus, &p.ConsecutiveFailures, &pLastCheck, &p.LastError, &pCircuitOpen, &pCreated, &pUpdated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return RoutedModel{}, ErrNotFound
 	}
@@ -1172,6 +1262,17 @@ func scanRoutedModel(row scanner) (RoutedModel, error) {
 	m.CreatedAt = parseTime(mCreated)
 	m.UpdatedAt = parseTime(mUpdated)
 	p.Enabled = pEnabled == 1
+	if p.HealthStatus == "" {
+		p.HealthStatus = "unknown"
+	}
+	if pLastCheck.Valid {
+		t := parseTime(pLastCheck.String)
+		p.LastHealthCheckAt = &t
+	}
+	if pCircuitOpen.Valid {
+		t := parseTime(pCircuitOpen.String)
+		p.CircuitOpenUntil = &t
+	}
 	p.CreatedAt = parseTime(pCreated)
 	p.UpdatedAt = parseTime(pUpdated)
 	return RoutedModel{Model: m, Provider: p}, nil
@@ -1245,6 +1346,14 @@ func normalizeList(v string) string {
 	return strings.Join(out, "\n")
 }
 
+func limitProviderError(v string) string {
+	v = strings.TrimSpace(v)
+	if len(v) <= 1000 {
+		return v
+	}
+	return v[:1000]
+}
+
 func isUniqueErr(err error) bool {
 	return err != nil && strings.Contains(strings.ToLower(err.Error()), "unique")
 }
@@ -1289,6 +1398,11 @@ var schema = []string{
 		api_key_env TEXT NOT NULL DEFAULT '',
 		aws_region TEXT NOT NULL DEFAULT '',
 		enabled INTEGER NOT NULL DEFAULT 1,
+		health_status TEXT NOT NULL DEFAULT 'unknown',
+		consecutive_failures INTEGER NOT NULL DEFAULT 0,
+		last_health_check_at TEXT,
+		last_error TEXT NOT NULL DEFAULT '',
+		circuit_open_until TEXT,
 		created_at TEXT NOT NULL,
 		updated_at TEXT NOT NULL
 	)`,

@@ -49,7 +49,9 @@ Core tables:
 - `users`: local users, role, department, auth provider, active flag.
 - `api_keys`: user-owned keys, hash, prefix, expiry, active flag, last used timestamp,
   model allowlist, monthly budget, RPM limit, and TPM limit.
-- `providers`: provider type, base URL, API key or environment variable reference.
+- `providers`: provider type, base URL, API key or environment variable reference,
+  health status, consecutive failure count, last health check, last error, and circuit
+  open-until timestamp.
 - `models`: provider-owned models, route id, enabled flag, pricing, context metadata.
 - `usage_ledger`: append-only request metadata for chargeback and reporting.
 - `budgets`: active user or department monthly budget definitions.
@@ -67,10 +69,12 @@ billable if users are later deleted or moved.
 3. The requested model route is resolved against the enabled model catalog.
 4. The API key policy gate checks model allowlists, key monthly budget, RPM, and TPM.
 5. The budget gate checks applicable user and department budgets for priced models.
-6. The provider adapter rewrites only the routing fields needed by the upstream provider.
-7. The request is dispatched with a bounded HTTP client.
-8. Latency, status, tokens, and cost are appended to the usage ledger.
-9. The provider response is returned in the original API shape.
+6. The provider health gate blocks dispatch when the provider circuit is still open.
+7. The provider adapter rewrites only the routing fields needed by the upstream provider.
+8. The request is dispatched with a bounded HTTP client.
+9. Provider success/failure state is updated from the upstream response.
+10. Latency, status, tokens, and cost are appended to the usage ledger.
+11. The provider response is returned in the original API shape.
 
 ## Provider Strategy
 
@@ -84,6 +88,12 @@ Provider adapters are deliberately thin:
 
 The model route format is `provider_id/model_id`. Bare model IDs are accepted only when
 they resolve unambiguously.
+
+Provider health state is persisted on the provider row. Successful upstream responses reset
+the provider to `healthy`. Provider transport errors, 429, 401/403, and 5xx responses
+increment consecutive failures; after three consecutive failures, the provider is marked
+`down` and its circuit is opened for five minutes. Admin model health tests also update
+the same health state.
 
 ## Budget Semantics
 
@@ -125,6 +135,8 @@ Current implementation:
   limits.
 - Immutable audit log for local login, admin configuration changes, model health tests,
   and API key lifecycle events.
+- Persisted provider health state and circuit-open blocking after repeated provider
+  failures.
 - No prompt content stored in the ledger.
 
 Planned:

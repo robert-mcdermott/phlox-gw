@@ -35,6 +35,8 @@ This is the first implementation scaffold. It includes:
   request-per-minute limits, token-per-minute limits, and revocation.
 - Immutable audit log for local login, admin configuration changes, model tests, and API
   key lifecycle events.
+- Provider health state with automatic failure tracking and circuit-open blocking after
+  repeated provider failures.
 - `/v1/models`, `/v1/chat/completions`, and `/anthropic/v1/messages` gateway surfaces.
 - Streaming OpenAI-compatible calls are proxied through while recording usage when the
   upstream stream includes a final usage chunk.

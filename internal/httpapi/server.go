@@ -40,6 +40,9 @@ type Server struct {
 	frontend   fs.FS
 }
 
+const providerFailureThreshold = 3
+const providerCircuitCooldown = 5 * time.Minute
+
 func New(opts Options) (http.Handler, error) {
 	if opts.Store == nil {
 		return nil, errors.New("store is required")
@@ -644,6 +647,7 @@ func (s *Server) testModel(w http.ResponseWriter, r *http.Request, admin store.U
 		return
 	}
 	result := s.runModelHealthCheck(r.Context(), route)
+	s.recordProviderHealthCheck(r.Context(), route.Provider.ID, result)
 	status := http.StatusOK
 	if !result.OK {
 		status = http.StatusBadGateway
@@ -884,6 +888,10 @@ func (s *Server) openAIChatCompletions(w http.ResponseWriter, r *http.Request, u
 		openAIError(w, http.StatusNotImplemented, "model is not on an OpenAI-compatible provider", "unsupported_provider")
 		return
 	}
+	if open, reason := providerCircuitOpen(route.Provider, time.Now().UTC()); open {
+		openAIError(w, http.StatusServiceUnavailable, reason, "provider_unavailable")
+		return
+	}
 	if blocked, status, reason, typ := s.checkAPIKeyPolicy(r.Context(), key, route); blocked {
 		openAIError(w, status, reason, typ)
 		return
@@ -900,6 +908,7 @@ func (s *Server) openAIChatCompletions(w http.ResponseWriter, r *http.Request, u
 	statusCode, responseBody, errText := s.proxyOpenAI(w, r, route, body, raw)
 	latency := time.Since(start).Milliseconds()
 	usage := parseOpenAIUsage(responseBody)
+	s.recordProviderOutcome(r.Context(), route.Provider.ID, statusCode, errText)
 	s.recordUsage(r.Context(), requestID, user, key, route, "openai", usage, latency, statusCode, errText)
 }
 
@@ -918,6 +927,10 @@ func (s *Server) anthropicMessages(w http.ResponseWriter, r *http.Request, user 
 		anthropicError(w, http.StatusNotImplemented, "model is not on an Anthropic-compatible provider")
 		return
 	}
+	if open, reason := providerCircuitOpen(route.Provider, time.Now().UTC()); open {
+		anthropicError(w, http.StatusServiceUnavailable, reason)
+		return
+	}
 	if blocked, status, reason, _ := s.checkAPIKeyPolicy(r.Context(), key, route); blocked {
 		anthropicError(w, status, reason)
 		return
@@ -933,6 +946,7 @@ func (s *Server) anthropicMessages(w http.ResponseWriter, r *http.Request, user 
 	statusCode, responseBody, errText := s.proxyAnthropic(w, r, route, body)
 	latency := time.Since(start).Milliseconds()
 	usage := parseAnthropicUsage(responseBody)
+	s.recordProviderOutcome(r.Context(), route.Provider.ID, statusCode, errText)
 	s.recordUsage(r.Context(), requestID, user, key, route, "anthropic", usage, latency, statusCode, errText)
 }
 
@@ -1125,6 +1139,50 @@ func (s *Server) checkBudget(ctx context.Context, user store.User, model store.M
 		return true, "budget exceeded"
 	}
 	return false, ""
+}
+
+func (s *Server) recordProviderOutcome(ctx context.Context, providerID string, statusCode int, errText string) {
+	now := time.Now().UTC()
+	if providerStatusIsFailure(statusCode) {
+		if _, err := s.store.RecordProviderFailure(ctx, providerID, providerFailureThreshold, providerCircuitCooldown, now, errText); err != nil {
+			s.logger.Warn("provider failure update failed", "provider_id", providerID, "error", err)
+		}
+		return
+	}
+	if err := s.store.RecordProviderSuccess(ctx, providerID, now); err != nil {
+		s.logger.Warn("provider success update failed", "provider_id", providerID, "error", err)
+	}
+}
+
+func (s *Server) recordProviderHealthCheck(ctx context.Context, providerID string, result modelHealthResult) {
+	now := time.Now().UTC()
+	if result.OK {
+		if err := s.store.RecordProviderSuccess(ctx, providerID, now); err != nil {
+			s.logger.Warn("provider health success update failed", "provider_id", providerID, "error", err)
+		}
+		return
+	}
+	reason := result.Error
+	if reason == "" {
+		reason = result.Snippet
+	}
+	if reason == "" {
+		reason = fmt.Sprintf("health check failed with status %d", result.StatusCode)
+	}
+	if _, err := s.store.RecordProviderFailure(ctx, providerID, providerFailureThreshold, providerCircuitCooldown, now, reason); err != nil {
+		s.logger.Warn("provider health failure update failed", "provider_id", providerID, "error", err)
+	}
+}
+
+func providerStatusIsFailure(statusCode int) bool {
+	return statusCode == http.StatusTooManyRequests || statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden || statusCode >= 500
+}
+
+func providerCircuitOpen(p store.Provider, now time.Time) (bool, string) {
+	if p.CircuitOpenUntil == nil || !p.CircuitOpenUntil.After(now) {
+		return false, ""
+	}
+	return true, "provider circuit is open until " + p.CircuitOpenUntil.UTC().Format(time.RFC3339)
 }
 
 func (s *Server) audit(r *http.Request, actor store.User, action, targetType, targetID, targetDisplay string, details map[string]any) {

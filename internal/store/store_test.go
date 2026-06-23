@@ -112,6 +112,47 @@ func TestProviderAndModelCRUD(t *testing.T) {
 	}
 }
 
+func TestProviderHealthCircuitState(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+
+	provider := Provider{
+		ID:      "local-vllm",
+		Name:    "Local vLLM",
+		Type:    "openai",
+		BaseURL: "http://127.0.0.1:8000/v1",
+		Enabled: true,
+	}
+	if err := s.CreateProvider(ctx, provider); err != nil {
+		t.Fatalf("CreateProvider: %v", err)
+	}
+	now := time.Now().UTC()
+	if _, err := s.RecordProviderFailure(ctx, provider.ID, 2, time.Minute, now, "upstream failed"); err != nil {
+		t.Fatalf("RecordProviderFailure first: %v", err)
+	}
+	down, err := s.RecordProviderFailure(ctx, provider.ID, 2, time.Minute, now.Add(time.Second), "upstream failed again")
+	if err != nil {
+		t.Fatalf("RecordProviderFailure second: %v", err)
+	}
+	if down.HealthStatus != "down" || down.ConsecutiveFailures != 2 || down.CircuitOpenUntil == nil {
+		t.Fatalf("expected open circuit after threshold, got %#v", down)
+	}
+	if err := s.RecordProviderSuccess(ctx, provider.ID, now.Add(2*time.Second)); err != nil {
+		t.Fatalf("RecordProviderSuccess: %v", err)
+	}
+	healthy, err := s.GetProvider(ctx, provider.ID)
+	if err != nil {
+		t.Fatalf("GetProvider: %v", err)
+	}
+	if healthy.HealthStatus != "healthy" || healthy.ConsecutiveFailures != 0 || healthy.CircuitOpenUntil != nil || healthy.LastError != "" {
+		t.Fatalf("expected reset health after success, got %#v", healthy)
+	}
+}
+
 func TestAPIKeyGovernanceControlsAndUsage(t *testing.T) {
 	ctx := context.Background()
 	s, err := Open(filepath.Join(t.TempDir(), "test.db"))

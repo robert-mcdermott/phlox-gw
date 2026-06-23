@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -80,6 +81,19 @@ func TestCheckAPIKeyPolicy(t *testing.T) {
 	blocked, status, _, typ = s.checkAPIKeyPolicy(ctx, key, route)
 	if !blocked || status != http.StatusTooManyRequests || typ != "rate_limit_exceeded" {
 		t.Fatalf("expected rpm block, got blocked=%v status=%d type=%q", blocked, status, typ)
+	}
+}
+
+func TestProviderCircuitOpen(t *testing.T) {
+	now := time.Now().UTC()
+	openUntil := now.Add(time.Minute)
+	open, reason := providerCircuitOpen(store.Provider{CircuitOpenUntil: &openUntil}, now)
+	if !open || !strings.Contains(reason, openUntil.UTC().Format(time.RFC3339)) {
+		t.Fatalf("expected open circuit reason, got open=%v reason=%q", open, reason)
+	}
+	open, reason = providerCircuitOpen(store.Provider{CircuitOpenUntil: &openUntil}, now.Add(2*time.Minute))
+	if open || reason != "" {
+		t.Fatalf("expected closed circuit after expiry, got open=%v reason=%q", open, reason)
 	}
 }
 

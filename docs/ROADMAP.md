@@ -15,6 +15,7 @@
 - [x] OpenAI-compatible streaming pass-through with usage capture when upstream emits usage chunks.
 - [x] Admin API key inventory with per-key model allowlists, monthly budgets, RPM limits, and TPM limits.
 - [x] Immutable audit log for local login, admin, and API key lifecycle events.
+- [x] Persisted provider health state with automatic failure tracking and circuit-open blocking.
 
 ## Next
 
@@ -22,7 +23,7 @@
 - Add Entra ID/OIDC login and department claim mapping.
 - Add API key rotation workflow and self-service expiration controls.
 - Add user, department, provider, and model-level rate limits.
-- Add provider health checks, retries, circuit breakers, and failover.
+- Add provider retries, weighted routing, and failover policies.
 - Add richer dashboards for latency, error rate, token volume, and budget burn-down.
 - Add Anthropic streaming support and streamed usage capture where compatible endpoints expose it.
 

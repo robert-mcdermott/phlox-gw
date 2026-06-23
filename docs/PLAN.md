@@ -33,12 +33,11 @@ not complicate the first gateway release.
 ## Enterprise Features To Add
 
 - Rate limits by user, department, provider, and model.
-- Provider failover policies and weighted load balancing.
+- Provider failover policies, retries, and weighted load balancing.
 - Request policy engine: model allowlists, data classification labels, prompt/response
   guardrails, and optional PII redaction.
 - Prometheus metrics and OpenTelemetry traces.
 - Request log search with latency, token, status, and provider error dimensions.
-- Provider health checks and circuit breakers.
 - Secret management through environment references first, then external vaults.
 - SCIM or Graph sync for departments/groups after Entra ID SSO.
 - Multi-node mode with Postgres or another shared database after SQLite reaches its limit.
@@ -57,13 +56,14 @@ not complicate the first gateway release.
 - Enforce API-key model allowlists, monthly key budgets, RPM limits, and TPM limits.
 - Provide admin API key inventory and governance controls.
 - Record admin, login, and API key lifecycle events in an immutable audit log.
+- Track provider health and block dispatch while a provider circuit is open.
 
 ### Phase 2: Production Controls
 
 - Add Entra ID/OIDC login.
 - Add API key rotation workflow and self-service expiration controls.
 - Add rate limits by user, department, provider, and model.
-- Add provider health checks, retries, circuit breakers, and weighted routing.
+- Add provider retries, failover policies, and weighted routing.
 - Add request and response metadata search without storing prompt content by default.
 - Add CSV exports and richer dashboard charts.
 

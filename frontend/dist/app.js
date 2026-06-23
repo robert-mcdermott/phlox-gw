@@ -327,7 +327,7 @@ function providerRows() {
   return `
     <div class="table-scroll">
       <table>
-        <thead><tr><th>ID</th><th>Name</th><th>Type</th><th>Base URL</th><th>Key env</th><th>Direct key</th><th>AWS region</th><th>Enabled</th><th>Actions</th></tr></thead>
+        <thead><tr><th>ID</th><th>Name</th><th>Type</th><th>Base URL</th><th>Key env</th><th>Direct key</th><th>AWS region</th><th>Enabled</th><th>Health</th><th>Failures</th><th>Last check</th><th>Circuit open</th><th>Last error</th><th>Actions</th></tr></thead>
         <tbody>
           ${state.providers.map(p => `
             <tr data-provider-row="${esc(p.id)}">
@@ -339,6 +339,11 @@ function providerRows() {
               <td><input data-provider-field="api_key" type="password" placeholder="leave blank to keep" /></td>
               <td><input data-provider-field="aws_region" value="${attr(p.aws_region)}" /></td>
               <td><input data-provider-field="enabled" type="checkbox" ${p.enabled ? 'checked' : ''} /></td>
+              <td>${statusPill(p.health_status || 'unknown')}</td>
+              <td>${Number(p.consecutive_failures || 0)}</td>
+              <td>${fmt(p.last_health_check_at)}</td>
+              <td>${fmt(p.circuit_open_until)}</td>
+              <td class="wrap">${esc(p.last_error || '')}</td>
               <td><div class="actions"><button class="btn" data-save-provider="${esc(p.id)}">Save</button><button class="btn danger" data-delete-provider="${esc(p.id)}">Delete</button></div></td>
             </tr>
           `).join('')}
@@ -722,6 +727,12 @@ function usageTable(rows) {
 
 function pill(on) {
   return `<span class="pill ${on ? 'on' : 'off'}">${on ? 'on' : 'off'}</span>`;
+}
+
+function statusPill(status) {
+  const normalized = String(status || 'unknown').toLowerCase();
+  const cls = normalized === 'healthy' ? 'on' : normalized === 'unknown' ? '' : 'off';
+  return `<span class="pill ${cls}">${esc(normalized)}</span>`;
 }
 
 function money(v) {
