@@ -12,6 +12,7 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"strconv"
@@ -92,6 +93,7 @@ func New(opts Options) (http.Handler, error) {
 	mux.HandleFunc("GET /api/admin/api-keys", s.requireAdmin(s.adminAPIKeys))
 	mux.HandleFunc("PATCH /api/admin/api-keys/{id}", s.requireAdmin(s.updateAPIKeyControls))
 	mux.HandleFunc("DELETE /api/admin/api-keys/{id}", s.requireAdmin(s.revokeAPIKeyAdmin))
+	mux.HandleFunc("GET /api/admin/audit-log", s.requireAdmin(s.auditLog))
 	mux.HandleFunc("GET /api/admin/usage/summary", s.requireAdmin(s.adminUsage))
 	mux.HandleFunc("GET /api/admin/usage/export.csv", s.requireAdmin(s.adminUsageCSV))
 	mux.HandleFunc("GET /v1/models", s.requireAPIKey(s.openAIModels))
@@ -148,6 +150,10 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = s.store.TouchLogin(r.Context(), user.ID, now)
+	s.audit(r, user, "auth.login", "user", user.ID, user.Username, map[string]any{
+		"auth_provider": user.AuthProvider,
+		"role":          user.Role,
+	})
 	respondJSON(w, http.StatusOK, map[string]any{"token": token, "user": publicUser(user)})
 }
 
@@ -168,7 +174,7 @@ func (s *Server) listUsers(w http.ResponseWriter, r *http.Request, _ store.User)
 	respondJSON(w, http.StatusOK, out)
 }
 
-func (s *Server) createUser(w http.ResponseWriter, r *http.Request, _ store.User) {
+func (s *Server) createUser(w http.ResponseWriter, r *http.Request, admin store.User) {
 	var req struct {
 		Username    string `json:"username"`
 		Password    string `json:"password"`
@@ -221,6 +227,12 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request, _ store.User
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	s.audit(r, admin, "user.create", "user", user.ID, user.Username, map[string]any{
+		"username":   user.Username,
+		"email":      user.Email,
+		"department": user.Department,
+		"role":       user.Role,
+	})
 	respondJSON(w, http.StatusCreated, publicUser(user))
 }
 
@@ -264,10 +276,16 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, admin store.
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	s.audit(r, admin, "user.update", "user", updated.ID, updated.Username, map[string]any{
+		"email":      updated.Email,
+		"department": updated.Department,
+		"role":       updated.Role,
+		"is_active":  updated.IsActive,
+	})
 	respondJSON(w, http.StatusOK, publicUser(updated))
 }
 
-func (s *Server) resetUserPassword(w http.ResponseWriter, r *http.Request, _ store.User) {
+func (s *Server) resetUserPassword(w http.ResponseWriter, r *http.Request, admin store.User) {
 	var req struct {
 		Password string `json:"password"`
 	}
@@ -291,6 +309,12 @@ func (s *Server) resetUserPassword(w http.ResponseWriter, r *http.Request, _ sto
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	target, err := s.store.GetUserByID(r.Context(), r.PathValue("id"))
+	targetDisplay := r.PathValue("id")
+	if err == nil {
+		targetDisplay = target.Username
+	}
+	s.audit(r, admin, "user.password_reset", "user", r.PathValue("id"), targetDisplay, nil)
 	respondJSON(w, http.StatusOK, map[string]any{"status": "ok"})
 }
 
@@ -300,6 +324,7 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, admin store.
 		respondError(w, http.StatusBadRequest, "cannot delete your current admin session")
 		return
 	}
+	target, targetErr := s.store.GetUserByID(r.Context(), id)
 	if err := s.store.DeleteUser(r.Context(), id); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			respondError(w, http.StatusNotFound, "user not found")
@@ -308,6 +333,15 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request, admin store.
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	targetDisplay := id
+	details := map[string]any{}
+	if targetErr == nil {
+		targetDisplay = target.Username
+		details["username"] = target.Username
+		details["department"] = target.Department
+		details["role"] = target.Role
+	}
+	s.audit(r, admin, "user.delete", "user", id, targetDisplay, details)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -355,11 +389,17 @@ func (s *Server) createAPIKey(w http.ResponseWriter, r *http.Request, user store
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	s.audit(r, user, "api_key.create", "api_key", key.ID, key.Prefix, map[string]any{
+		"name":       key.Name,
+		"prefix":     key.Prefix,
+		"expires_at": key.ExpiresAt,
+	})
 	respondJSON(w, http.StatusCreated, map[string]any{"key": plain, "record": key})
 }
 
 func (s *Server) revokeAPIKey(w http.ResponseWriter, r *http.Request, user store.User) {
-	if err := s.store.RevokeAPIKey(r.Context(), user.ID, r.PathValue("id")); err != nil {
+	keyID := r.PathValue("id")
+	if err := s.store.RevokeAPIKey(r.Context(), user.ID, keyID); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			respondError(w, http.StatusNotFound, "key not found")
 			return
@@ -367,6 +407,9 @@ func (s *Server) revokeAPIKey(w http.ResponseWriter, r *http.Request, user store
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	s.audit(r, user, "api_key.revoke", "api_key", keyID, keyID, map[string]any{
+		"scope": "self",
+	})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -379,7 +422,7 @@ func (s *Server) adminAPIKeys(w http.ResponseWriter, r *http.Request, _ store.Us
 	respondJSON(w, http.StatusOK, keys)
 }
 
-func (s *Server) updateAPIKeyControls(w http.ResponseWriter, r *http.Request, _ store.User) {
+func (s *Server) updateAPIKeyControls(w http.ResponseWriter, r *http.Request, admin store.User) {
 	var req struct {
 		Name           string  `json:"name"`
 		IsActive       bool    `json:"is_active"`
@@ -427,11 +470,21 @@ func (s *Server) updateAPIKeyControls(w http.ResponseWriter, r *http.Request, _ 
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	s.audit(r, admin, "api_key.update_controls", "api_key", key.ID, key.Name, map[string]any{
+		"name":                key.Name,
+		"is_active":           key.IsActive,
+		"budget_usd":          key.BudgetUSD,
+		"rpm_limit":           key.RPMLimit,
+		"tpm_limit":           key.TPMLimit,
+		"has_model_allowlist": strings.TrimSpace(key.ModelAllowlist) != "",
+		"expires_at":          key.ExpiresAt,
+	})
 	respondJSON(w, http.StatusOK, map[string]any{"status": "ok"})
 }
 
-func (s *Server) revokeAPIKeyAdmin(w http.ResponseWriter, r *http.Request, _ store.User) {
-	if err := s.store.RevokeAPIKeyAdmin(r.Context(), r.PathValue("id")); err != nil {
+func (s *Server) revokeAPIKeyAdmin(w http.ResponseWriter, r *http.Request, admin store.User) {
+	keyID := r.PathValue("id")
+	if err := s.store.RevokeAPIKeyAdmin(r.Context(), keyID); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			respondError(w, http.StatusNotFound, "key not found")
 			return
@@ -439,6 +492,9 @@ func (s *Server) revokeAPIKeyAdmin(w http.ResponseWriter, r *http.Request, _ sto
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	s.audit(r, admin, "api_key.revoke", "api_key", keyID, keyID, map[string]any{
+		"scope": "admin",
+	})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -456,7 +512,7 @@ func (s *Server) providers(w http.ResponseWriter, r *http.Request, _ store.User)
 	respondJSON(w, http.StatusOK, providers)
 }
 
-func (s *Server) createProvider(w http.ResponseWriter, r *http.Request, _ store.User) {
+func (s *Server) createProvider(w http.ResponseWriter, r *http.Request, admin store.User) {
 	p, updateSecret, ok := s.providerFromRequest(w, r, "")
 	if !ok {
 		return
@@ -472,10 +528,11 @@ func (s *Server) createProvider(w http.ResponseWriter, r *http.Request, _ store.
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	s.audit(r, admin, "provider.create", "provider", p.ID, p.Name, providerAuditDetails(p, updateSecret))
 	respondJSON(w, http.StatusCreated, p)
 }
 
-func (s *Server) updateProvider(w http.ResponseWriter, r *http.Request, _ store.User) {
+func (s *Server) updateProvider(w http.ResponseWriter, r *http.Request, admin store.User) {
 	p, updateSecret, ok := s.providerFromRequest(w, r, r.PathValue("id"))
 	if !ok {
 		return
@@ -488,11 +545,13 @@ func (s *Server) updateProvider(w http.ResponseWriter, r *http.Request, _ store.
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	s.audit(r, admin, "provider.update", "provider", p.ID, p.Name, providerAuditDetails(p, updateSecret))
 	respondJSON(w, http.StatusOK, p)
 }
 
-func (s *Server) deleteProvider(w http.ResponseWriter, r *http.Request, _ store.User) {
-	if err := s.store.DeleteProvider(r.Context(), r.PathValue("id")); err != nil {
+func (s *Server) deleteProvider(w http.ResponseWriter, r *http.Request, admin store.User) {
+	id := r.PathValue("id")
+	if err := s.store.DeleteProvider(r.Context(), id); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			respondError(w, http.StatusNotFound, "provider not found")
 			return
@@ -500,6 +559,7 @@ func (s *Server) deleteProvider(w http.ResponseWriter, r *http.Request, _ store.
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	s.audit(r, admin, "provider.delete", "provider", id, id, nil)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -521,7 +581,7 @@ func (s *Server) adminModels(w http.ResponseWriter, r *http.Request, _ store.Use
 	respondJSON(w, http.StatusOK, models)
 }
 
-func (s *Server) createModel(w http.ResponseWriter, r *http.Request, _ store.User) {
+func (s *Server) createModel(w http.ResponseWriter, r *http.Request, admin store.User) {
 	m, ok := s.modelFromRequest(w, r, "")
 	if !ok {
 		return
@@ -534,10 +594,11 @@ func (s *Server) createModel(w http.ResponseWriter, r *http.Request, _ store.Use
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	s.audit(r, admin, "model.create", "model", m.ID, m.Route, modelAuditDetails(m))
 	respondJSON(w, http.StatusCreated, m)
 }
 
-func (s *Server) updateModel(w http.ResponseWriter, r *http.Request, _ store.User) {
+func (s *Server) updateModel(w http.ResponseWriter, r *http.Request, admin store.User) {
 	m, ok := s.modelFromRequest(w, r, r.PathValue("id"))
 	if !ok {
 		return
@@ -554,11 +615,13 @@ func (s *Server) updateModel(w http.ResponseWriter, r *http.Request, _ store.Use
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	s.audit(r, admin, "model.update", "model", m.ID, m.Route, modelAuditDetails(m))
 	respondJSON(w, http.StatusOK, m)
 }
 
-func (s *Server) deleteModel(w http.ResponseWriter, r *http.Request, _ store.User) {
-	if err := s.store.DeleteModel(r.Context(), r.PathValue("id")); err != nil {
+func (s *Server) deleteModel(w http.ResponseWriter, r *http.Request, admin store.User) {
+	id := r.PathValue("id")
+	if err := s.store.DeleteModel(r.Context(), id); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			respondError(w, http.StatusNotFound, "model not found")
 			return
@@ -566,10 +629,11 @@ func (s *Server) deleteModel(w http.ResponseWriter, r *http.Request, _ store.Use
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	s.audit(r, admin, "model.delete", "model", id, id, nil)
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (s *Server) testModel(w http.ResponseWriter, r *http.Request, _ store.User) {
+func (s *Server) testModel(w http.ResponseWriter, r *http.Request, admin store.User) {
 	route, err := s.store.ResolveModelByID(r.Context(), r.PathValue("id"), true)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -584,6 +648,12 @@ func (s *Server) testModel(w http.ResponseWriter, r *http.Request, _ store.User)
 	if !result.OK {
 		status = http.StatusBadGateway
 	}
+	s.audit(r, admin, "model.test", "model", route.Model.ID, route.Model.Route, map[string]any{
+		"ok":          result.OK,
+		"status_code": result.StatusCode,
+		"latency_ms":  result.LatencyMS,
+		"provider_id": result.ProviderID,
+	})
 	respondJSON(w, status, result)
 }
 
@@ -603,6 +673,24 @@ func (s *Server) adminUsage(w http.ResponseWriter, r *http.Request, _ store.User
 		return
 	}
 	respondJSON(w, http.StatusOK, summary)
+}
+
+func (s *Server) auditLog(w http.ResponseWriter, r *http.Request, _ store.User) {
+	limit := 200
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed <= 0 {
+			respondError(w, http.StatusBadRequest, "limit must be a positive integer")
+			return
+		}
+		limit = parsed
+	}
+	items, err := s.store.ListAuditLogs(r.Context(), limit)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	respondJSON(w, http.StatusOK, items)
 }
 
 func (s *Server) adminUsageCSV(w http.ResponseWriter, r *http.Request, _ store.User) {
@@ -659,7 +747,7 @@ func (s *Server) listBudgets(w http.ResponseWriter, r *http.Request, _ store.Use
 	respondJSON(w, http.StatusOK, budgets)
 }
 
-func (s *Server) createBudget(w http.ResponseWriter, r *http.Request, _ store.User) {
+func (s *Server) createBudget(w http.ResponseWriter, r *http.Request, admin store.User) {
 	var req struct {
 		ScopeType  string  `json:"scope_type"`
 		ScopeValue string  `json:"scope_value"`
@@ -694,10 +782,11 @@ func (s *Server) createBudget(w http.ResponseWriter, r *http.Request, _ store.Us
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	s.audit(r, admin, "budget.create", "budget", b.ID, budgetDisplay(b), budgetAuditDetails(b))
 	respondJSON(w, http.StatusCreated, b)
 }
 
-func (s *Server) updateBudget(w http.ResponseWriter, r *http.Request, _ store.User) {
+func (s *Server) updateBudget(w http.ResponseWriter, r *http.Request, admin store.User) {
 	var req struct {
 		ScopeType  string  `json:"scope_type"`
 		ScopeValue string  `json:"scope_value"`
@@ -732,11 +821,13 @@ func (s *Server) updateBudget(w http.ResponseWriter, r *http.Request, _ store.Us
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	s.audit(r, admin, "budget.update", "budget", b.ID, budgetDisplay(b), budgetAuditDetails(b))
 	respondJSON(w, http.StatusOK, b)
 }
 
-func (s *Server) deleteBudget(w http.ResponseWriter, r *http.Request, _ store.User) {
-	if err := s.store.DeleteBudget(r.Context(), r.PathValue("id")); err != nil {
+func (s *Server) deleteBudget(w http.ResponseWriter, r *http.Request, admin store.User) {
+	id := r.PathValue("id")
+	if err := s.store.DeleteBudget(r.Context(), id); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			respondError(w, http.StatusNotFound, "budget not found")
 			return
@@ -744,6 +835,7 @@ func (s *Server) deleteBudget(w http.ResponseWriter, r *http.Request, _ store.Us
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	s.audit(r, admin, "budget.delete", "budget", id, id, nil)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -1035,6 +1127,51 @@ func (s *Server) checkBudget(ctx context.Context, user store.User, model store.M
 	return false, ""
 }
 
+func (s *Server) audit(r *http.Request, actor store.User, action, targetType, targetID, targetDisplay string, details map[string]any) {
+	id, err := auth.RandomID("audit")
+	if err != nil {
+		s.logger.Warn("audit id failed", "error", err)
+		return
+	}
+	detailText := "{}"
+	if details != nil {
+		if body, err := json.Marshal(details); err == nil {
+			detailText = string(body)
+		}
+	}
+	item := store.AuditLog{
+		ID:            id,
+		ActorUserID:   actor.ID,
+		ActorUsername: actor.Username,
+		Action:        action,
+		TargetType:    targetType,
+		TargetID:      targetID,
+		TargetDisplay: targetDisplay,
+		Details:       limitString(detailText, 2000),
+		IPAddress:     requestIP(r),
+		UserAgent:     limitString(r.UserAgent(), 500),
+		CreatedAt:     time.Now().UTC(),
+	}
+	if err := s.store.InsertAuditLog(r.Context(), item); err != nil {
+		s.logger.Warn("audit insert failed", "error", err, "action", action, "target_type", targetType, "target_id", targetID)
+	}
+}
+
+func requestIP(r *http.Request) string {
+	if forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); forwarded != "" {
+		parts := strings.Split(forwarded, ",")
+		return strings.TrimSpace(parts[0])
+	}
+	if realIP := strings.TrimSpace(r.Header.Get("X-Real-IP")); realIP != "" {
+		return realIP
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err == nil {
+		return host
+	}
+	return r.RemoteAddr
+}
+
 func (s *Server) checkAPIKeyPolicy(ctx context.Context, key store.APIKey, route store.RoutedModel) (bool, int, string, string) {
 	if !apiKeyAllowsModel(key, route.Model) {
 		return true, http.StatusForbidden, "API key is not allowed to use this model", "permission_error"
@@ -1304,6 +1441,48 @@ func (s *Server) modelFromRequest(w http.ResponseWriter, r *http.Request, pathID
 		SupportsStreaming:    req.SupportsStreaming,
 		Enabled:              req.Enabled,
 	}, true
+}
+
+func providerAuditDetails(p store.Provider, directSecretUpdated bool) map[string]any {
+	return map[string]any{
+		"id":                    p.ID,
+		"name":                  p.Name,
+		"type":                  p.Type,
+		"base_url":              p.BaseURL,
+		"api_key_env":           p.APIKeyEnv,
+		"direct_secret_updated": directSecretUpdated,
+		"aws_region":            p.AWSRegion,
+		"enabled":               p.Enabled,
+	}
+}
+
+func modelAuditDetails(m store.Model) map[string]any {
+	return map[string]any{
+		"id":                      m.ID,
+		"provider_id":             m.ProviderID,
+		"model_id":                m.ModelID,
+		"route":                   m.Route,
+		"display_name":            m.DisplayName,
+		"input_cost_per_million":  m.InputCostPerMillion,
+		"output_cost_per_million": m.OutputCostPerMillion,
+		"context_window":          m.ContextWindow,
+		"supports_streaming":      m.SupportsStreaming,
+		"enabled":                 m.Enabled,
+	}
+}
+
+func budgetAuditDetails(b store.Budget) map[string]any {
+	return map[string]any{
+		"scope_type":  b.ScopeType,
+		"scope_value": b.ScopeValue,
+		"limit_usd":   b.LimitUSD,
+		"warn_pct":    b.WarnPct,
+		"is_active":   b.IsActive,
+	}
+}
+
+func budgetDisplay(b store.Budget) string {
+	return b.ScopeType + ":" + b.ScopeValue
 }
 
 func (s *Server) requireSession(next func(http.ResponseWriter, *http.Request, store.User)) http.HandlerFunc {

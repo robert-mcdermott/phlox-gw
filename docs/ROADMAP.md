@@ -14,6 +14,7 @@
 - [x] Model health-test action for enabled OpenAI/Anthropic-compatible models.
 - [x] OpenAI-compatible streaming pass-through with usage capture when upstream emits usage chunks.
 - [x] Admin API key inventory with per-key model allowlists, monthly budgets, RPM limits, and TPM limits.
+- [x] Immutable audit log for local login, admin, and API key lifecycle events.
 
 ## Next
 
@@ -30,6 +31,6 @@
 - Prometheus metrics and OpenTelemetry traces.
 - Guardrail plugin layer and PII redaction.
 - Semantic response cache.
-- Audit log and signed admin configuration export.
+- Request metadata search and signed admin configuration export.
 - Cluster mode with Postgres.
 - External secrets management.

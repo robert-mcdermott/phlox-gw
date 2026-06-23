@@ -180,6 +180,20 @@ type UsageExportRow struct {
 	ErrorText    string    `json:"error_text"`
 }
 
+type AuditLog struct {
+	ID            string    `json:"id"`
+	ActorUserID   string    `json:"actor_user_id"`
+	ActorUsername string    `json:"actor_username"`
+	Action        string    `json:"action"`
+	TargetType    string    `json:"target_type"`
+	TargetID      string    `json:"target_id"`
+	TargetDisplay string    `json:"target_display"`
+	Details       string    `json:"details"`
+	IPAddress     string    `json:"ip_address"`
+	UserAgent     string    `json:"user_agent"`
+	CreatedAt     time.Time `json:"created_at"`
+}
+
 func Open(path string) (*Store, error) {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
@@ -916,6 +930,43 @@ func (s *Store) usageSummary(ctx context.Context, where string, args ...any) (Us
 	return summary, rows.Err()
 }
 
+func (s *Store) InsertAuditLog(ctx context.Context, item AuditLog) error {
+	now := item.CreatedAt
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO audit_log
+		(id, actor_user_id, actor_username, action, target_type, target_id, target_display, details, ip_address, user_agent, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		item.ID, item.ActorUserID, item.ActorUsername, item.Action, item.TargetType, item.TargetID, item.TargetDisplay, item.Details, item.IPAddress, item.UserAgent, formatTime(now))
+	return err
+}
+
+func (s *Store) ListAuditLogs(ctx context.Context, limit int) ([]AuditLog, error) {
+	if limit <= 0 || limit > 1000 {
+		limit = 200
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, actor_user_id, actor_username, action, target_type, target_id, target_display, details, ip_address, user_agent, created_at
+		FROM audit_log
+		ORDER BY created_at DESC
+		LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []AuditLog
+	for rows.Next() {
+		item, err := scanAuditLog(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) spendForBudget(ctx context.Context, b Budget, start, end time.Time) (float64, error) {
 	var field string
 	switch b.ScopeType {
@@ -1143,6 +1194,20 @@ func scanBudget(row scanner) (Budget, error) {
 	return b, nil
 }
 
+func scanAuditLog(row scanner) (AuditLog, error) {
+	var item AuditLog
+	var created string
+	err := row.Scan(&item.ID, &item.ActorUserID, &item.ActorUsername, &item.Action, &item.TargetType, &item.TargetID, &item.TargetDisplay, &item.Details, &item.IPAddress, &item.UserAgent, &created)
+	if errors.Is(err, sql.ErrNoRows) {
+		return AuditLog{}, ErrNotFound
+	}
+	if err != nil {
+		return AuditLog{}, err
+	}
+	item.CreatedAt = parseTime(created)
+	return item, nil
+}
+
 func formatTime(t time.Time) string {
 	return t.UTC().Format(time.RFC3339Nano)
 }
@@ -1276,4 +1341,19 @@ var schema = []string{
 	`CREATE INDEX IF NOT EXISTS idx_usage_api_key_created ON usage_ledger(api_key_id, created_at)`,
 	`CREATE INDEX IF NOT EXISTS idx_usage_department_created ON usage_ledger(department, created_at)`,
 	`CREATE INDEX IF NOT EXISTS idx_usage_model_created ON usage_ledger(model, created_at)`,
+	`CREATE TABLE IF NOT EXISTS audit_log (
+		id TEXT PRIMARY KEY,
+		actor_user_id TEXT NOT NULL DEFAULT '',
+		actor_username TEXT NOT NULL DEFAULT '',
+		action TEXT NOT NULL,
+		target_type TEXT NOT NULL DEFAULT '',
+		target_id TEXT NOT NULL DEFAULT '',
+		target_display TEXT NOT NULL DEFAULT '',
+		details TEXT NOT NULL DEFAULT '',
+		ip_address TEXT NOT NULL DEFAULT '',
+		user_agent TEXT NOT NULL DEFAULT '',
+		created_at TEXT NOT NULL
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_audit_log_created ON audit_log(created_at)`,
+	`CREATE INDEX IF NOT EXISTS idx_audit_log_target ON audit_log(target_type, target_id, created_at)`,
 }

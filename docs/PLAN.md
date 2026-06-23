@@ -36,7 +36,6 @@ not complicate the first gateway release.
 - Provider failover policies and weighted load balancing.
 - Request policy engine: model allowlists, data classification labels, prompt/response
   guardrails, and optional PII redaction.
-- Audit log for admin actions and key lifecycle events.
 - Prometheus metrics and OpenTelemetry traces.
 - Request log search with latency, token, status, and provider error dimensions.
 - Provider health checks and circuit breakers.
@@ -57,6 +56,7 @@ not complicate the first gateway release.
 - Enforce user and department monthly budgets before dispatch.
 - Enforce API-key model allowlists, monthly key budgets, RPM limits, and TPM limits.
 - Provide admin API key inventory and governance controls.
+- Record admin, login, and API key lifecycle events in an immutable audit log.
 
 ### Phase 2: Production Controls
 
@@ -64,7 +64,7 @@ not complicate the first gateway release.
 - Add API key rotation workflow and self-service expiration controls.
 - Add rate limits by user, department, provider, and model.
 - Add provider health checks, retries, circuit breakers, and weighted routing.
-- Add request and response audit logs without storing prompt content by default.
+- Add request and response metadata search without storing prompt content by default.
 - Add CSV exports and richer dashboard charts.
 
 ### Phase 3: Enterprise Operations

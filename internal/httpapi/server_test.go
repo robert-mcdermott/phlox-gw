@@ -1,12 +1,19 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"testing"
+	"testing/fstest"
 	"time"
 
+	"github.com/robert-mcdermott/phlox-gw/internal/auth"
+	"github.com/robert-mcdermott/phlox-gw/internal/config"
 	"github.com/robert-mcdermott/phlox-gw/internal/store"
 )
 
@@ -73,5 +80,96 @@ func TestCheckAPIKeyPolicy(t *testing.T) {
 	blocked, status, _, typ = s.checkAPIKeyPolicy(ctx, key, route)
 	if !blocked || status != http.StatusTooManyRequests || typ != "rate_limit_exceeded" {
 		t.Fatalf("expected rpm block, got blocked=%v status=%d type=%q", blocked, status, typ)
+	}
+}
+
+func TestAdminActionCreatesAuditLog(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer st.Close()
+	hash, err := auth.HashPassword("admin")
+	if err != nil {
+		t.Fatalf("HashPassword: %v", err)
+	}
+	if err := st.EnsureSeedData(hash); err != nil {
+		t.Fatalf("EnsureSeedData: %v", err)
+	}
+	handler, err := New(Options{
+		Config: config.Config{SessionSecret: "test-secret"},
+		Store:  st,
+		Frontend: fstest.MapFS{
+			"frontend/dist/index.html": &fstest.MapFile{Data: []byte("<html></html>")},
+		},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	loginResp := jsonRequest(t, handler, http.MethodPost, "/api/auth/login", "", map[string]any{"username": "admin", "password": "admin"})
+	var login struct {
+		Token string `json:"token"`
+	}
+	decodeRecorder(t, loginResp, &login)
+	if login.Token == "" {
+		t.Fatal("missing login token")
+	}
+
+	username := "audit_user"
+	createResp := jsonRequest(t, handler, http.MethodPost, "/api/admin/users", login.Token, map[string]any{
+		"username":     username,
+		"password":     "Passw0rd!",
+		"email":        "audit_user@localhost",
+		"display_name": "Audit User",
+		"department":   "Audit",
+		"role":         "user",
+	})
+	if createResp.Code != http.StatusCreated {
+		t.Fatalf("create user status = %d body = %s", createResp.Code, createResp.Body.String())
+	}
+
+	resp := jsonRequest(t, handler, http.MethodGet, "/api/admin/audit-log?limit=20", login.Token, nil)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("audit status = %d body = %s", resp.Code, resp.Body.String())
+	}
+	var items []store.AuditLog
+	decodeRecorder(t, resp, &items)
+	found := false
+	for _, item := range items {
+		if item.Action == "user.create" && item.TargetDisplay == username && item.ActorUsername == "admin" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("did not find user.create audit event in %#v", items)
+	}
+}
+
+func jsonRequest(t *testing.T, handler http.Handler, method, path, token string, body any) *httptest.ResponseRecorder {
+	t.Helper()
+	var reader io.Reader
+	if body != nil {
+		payload, err := json.Marshal(body)
+		if err != nil {
+			t.Fatalf("Marshal: %v", err)
+		}
+		reader = bytes.NewReader(payload)
+	}
+	req := httptest.NewRequest(method, path, reader)
+	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	return rec
+}
+
+func decodeRecorder(t *testing.T, resp *httptest.ResponseRecorder, dest any) {
+	t.Helper()
+	if err := json.NewDecoder(resp.Body).Decode(dest); err != nil {
+		t.Fatalf("Decode: %v", err)
 	}
 }

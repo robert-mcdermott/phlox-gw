@@ -33,6 +33,8 @@ This is the first implementation scaffold. It includes:
   users/providers/models, testing enabled models, and exporting usage to CSV.
 - Admin API key governance for owner inventory, model allowlists, monthly key budgets,
   request-per-minute limits, token-per-minute limits, and revocation.
+- Immutable audit log for local login, admin configuration changes, model tests, and API
+  key lifecycle events.
 - `/v1/models`, `/v1/chat/completions`, and `/anthropic/v1/messages` gateway surfaces.
 - Streaming OpenAI-compatible calls are proxied through while recording usage when the
   upstream stream includes a final usage chunk.

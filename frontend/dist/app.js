@@ -12,6 +12,7 @@ const state = {
   budgets: [],
   adminKeys: [],
   adminModels: [],
+  auditLogs: [],
   secret: '',
   error: '',
   notice: ''
@@ -48,13 +49,14 @@ async function refresh() {
       state.keys = keys || [];
       state.usage = usage;
       if (state.user.role === 'admin') {
-        const [providers, users, budgets, adminUsage, adminModels, adminKeys] = await Promise.all([
+        const [providers, users, budgets, adminUsage, adminModels, adminKeys, auditLogs] = await Promise.all([
           api('/api/admin/providers'),
           api('/api/admin/users'),
           api('/api/admin/budgets'),
           api('/api/admin/usage/summary'),
           api('/api/admin/models'),
-          api('/api/admin/api-keys')
+          api('/api/admin/api-keys'),
+          api('/api/admin/audit-log?limit=100')
         ]);
         state.providers = providers || [];
         state.users = users || [];
@@ -62,6 +64,7 @@ async function refresh() {
         state.adminUsage = adminUsage;
         state.adminModels = adminModels || [];
         state.adminKeys = adminKeys || [];
+        state.auditLogs = auditLogs || [];
       }
     }
   } catch (err) {
@@ -237,6 +240,7 @@ function adminView() {
       ${card('Providers', state.providers.length, 'Configured providers')}
       ${card('Budgets', state.budgets.length, 'Monthly limits')}
       ${card('API keys', state.adminKeys.length, 'User-owned credentials')}
+      ${card('Audit events', state.auditLogs.length, 'Recent admin activity')}
       ${card('Total spend', money(usage.cost_usd || 0), `${usage.requests || 0} requests`)}
     </section>
     <section class="panel">
@@ -310,6 +314,10 @@ function adminView() {
     <section class="panel">
       <h3>Budgets</h3>
       ${budgetRows()}
+    </section>
+    <section class="panel">
+      <div class="section-head"><h3>Audit log</h3><span>Recent local auth, admin, and API key lifecycle events.</span></div>
+      ${auditLogRows()}
     </section>
   `;
 }
@@ -438,6 +446,29 @@ function budgetRows() {
               <td><input data-budget-field="warn_pct" type="number" min="1" max="100" step="1" value="${attr(b.warn_pct)}" /></td>
               <td><input data-budget-field="is_active" type="checkbox" ${b.is_active ? 'checked' : ''} /></td>
               <td><div class="actions"><button class="btn" data-save-budget="${esc(b.id)}">Save</button><button class="btn danger" data-delete-budget="${esc(b.id)}">Delete</button></div></td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function auditLogRows() {
+  if (!state.auditLogs.length) return '<p>No audit events yet.</p>';
+  return `
+    <div class="table-scroll">
+      <table>
+        <thead><tr><th>Time</th><th>Actor</th><th>Action</th><th>Target</th><th>Details</th><th>IP</th></tr></thead>
+        <tbody>
+          ${state.auditLogs.map(item => `
+            <tr>
+              <td>${fmt(item.created_at)}</td>
+              <td class="mono">${esc(item.actor_username || item.actor_user_id || '')}</td>
+              <td class="mono">${esc(item.action)}</td>
+              <td><span class="mono">${esc(item.target_type)}</span> ${esc(item.target_display || item.target_id || '')}</td>
+              <td class="wrap">${esc(auditDetails(item.details))}</td>
+              <td class="mono">${esc(item.ip_address || '')}</td>
             </tr>
           `).join('')}
         </tbody>
@@ -749,6 +780,16 @@ function budgetLabel(b) {
     return `user: ${esc(user ? `${user.username} (${b.scope_value})` : b.scope_value)}`;
   }
   return `department: ${esc(b.scope_value)}`;
+}
+
+function auditDetails(details) {
+  if (!details) return '';
+  try {
+    const parsed = JSON.parse(details);
+    return Object.entries(parsed).map(([key, value]) => `${key}: ${value === null ? '' : value}`).join(', ');
+  } catch (_) {
+    return details;
+  }
 }
 
 function titleForTab() {

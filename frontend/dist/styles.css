@@ -375,6 +375,12 @@ th {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
 }
 
+.wrap {
+  max-width: 420px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 @media (max-width: 900px) {
   .app {
     grid-template-columns: 1fr;

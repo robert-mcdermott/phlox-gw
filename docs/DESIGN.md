@@ -53,6 +53,8 @@ Core tables:
 - `models`: provider-owned models, route id, enabled flag, pricing, context metadata.
 - `usage_ledger`: append-only request metadata for chargeback and reporting.
 - `budgets`: active user or department monthly budget definitions.
+- `audit_log`: append-only local login, admin, and API key lifecycle events with
+  sanitized details, client IP, and user agent.
 
 The usage ledger snapshots username and department at write time so chargeback rows remain
 billable if users are later deleted or moved.
@@ -121,12 +123,14 @@ Current implementation:
 - API-key-only gateway routes.
 - Admin API key inventory with model allowlists, monthly budgets, RPM limits, and TPM
   limits.
+- Immutable audit log for local login, admin configuration changes, model health tests,
+  and API key lifecycle events.
 - No prompt content stored in the ledger.
 
 Planned:
 
 - Entra ID/OIDC and group/department claim mapping.
-- Audit log for admin changes and key lifecycle.
+- Request metadata search across gateway calls.
 - Provider secret encryption or external vault integration.
 - Guardrails and redaction policies.
 - TLS termination guidance and secure cookie mode.
