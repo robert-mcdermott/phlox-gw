@@ -47,7 +47,8 @@ dashboard so the production artifact can be distributed as one executable.
 Core tables:
 
 - `users`: local users, role, department, auth provider, active flag.
-- `api_keys`: user-owned keys, hash, prefix, expiry, active flag, last used timestamp.
+- `api_keys`: user-owned keys, hash, prefix, expiry, active flag, last used timestamp,
+  model allowlist, monthly budget, RPM limit, and TPM limit.
 - `providers`: provider type, base URL, API key or environment variable reference.
 - `models`: provider-owned models, route id, enabled flag, pricing, context metadata.
 - `usage_ledger`: append-only request metadata for chargeback and reporting.
@@ -62,11 +63,12 @@ billable if users are later deleted or moved.
 2. The gateway hashes the key, resolves the owner, checks expiry/active status, and updates
    `last_used_at`.
 3. The requested model route is resolved against the enabled model catalog.
-4. The budget gate checks applicable user and department budgets for priced models.
-5. The provider adapter rewrites only the routing fields needed by the upstream provider.
-6. The request is dispatched with a bounded HTTP client.
-7. Latency, status, tokens, and cost are appended to the usage ledger.
-8. The provider response is returned in the original API shape.
+4. The API key policy gate checks model allowlists, key monthly budget, RPM, and TPM.
+5. The budget gate checks applicable user and department budgets for priced models.
+6. The provider adapter rewrites only the routing fields needed by the upstream provider.
+7. The request is dispatched with a bounded HTTP client.
+8. Latency, status, tokens, and cost are appended to the usage ledger.
+9. The provider response is returned in the original API shape.
 
 ## Provider Strategy
 
@@ -86,6 +88,12 @@ they resolve unambiguously.
 Budgets are monthly UTC windows. A request is blocked before dispatch when a priced model
 is requested and either the user's own budget or the user's department budget is already
 at or above its hard limit.
+
+API key budgets use the same monthly UTC window and block priced requests when the key is
+at or above its monthly spend limit. Key RPM/TPM limits use a rolling one-minute ledger
+window. TPM enforcement is based on completed requests already recorded in the ledger, so
+the request that crosses a token-per-minute boundary can finish before the next request is
+blocked.
 
 Because exact token cost is known only after provider response, the request that crosses a
 budget can finish. The next priced request is blocked.
@@ -111,6 +119,8 @@ Current implementation:
 - SHA-256 API key storage.
 - Admin-gated configuration and reporting APIs.
 - API-key-only gateway routes.
+- Admin API key inventory with model allowlists, monthly budgets, RPM limits, and TPM
+  limits.
 - No prompt content stored in the ledger.
 
 Planned:
@@ -118,7 +128,5 @@ Planned:
 - Entra ID/OIDC and group/department claim mapping.
 - Audit log for admin changes and key lifecycle.
 - Provider secret encryption or external vault integration.
-- Model allowlists and scoped keys.
 - Guardrails and redaction policies.
 - TLS termination guidance and secure cookie mode.
-

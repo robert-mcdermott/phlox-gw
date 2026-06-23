@@ -10,6 +10,7 @@ const state = {
   adminUsage: null,
   users: [],
   budgets: [],
+  adminKeys: [],
   adminModels: [],
   secret: '',
   error: '',
@@ -26,7 +27,7 @@ function api(path, options = {}) {
       let message = `${res.status} ${res.statusText}`;
       try {
         const body = await res.json();
-        message = body?.error?.message || message;
+        message = body?.error?.message || body?.error || body?.message || body?.snippet || message;
       } catch (_) {}
       throw new Error(message);
     }
@@ -47,18 +48,20 @@ async function refresh() {
       state.keys = keys || [];
       state.usage = usage;
       if (state.user.role === 'admin') {
-        const [providers, users, budgets, adminUsage, adminModels] = await Promise.all([
+        const [providers, users, budgets, adminUsage, adminModels, adminKeys] = await Promise.all([
           api('/api/admin/providers'),
           api('/api/admin/users'),
           api('/api/admin/budgets'),
           api('/api/admin/usage/summary'),
-          api('/api/admin/models')
+          api('/api/admin/models'),
+          api('/api/admin/api-keys')
         ]);
         state.providers = providers || [];
         state.users = users || [];
         state.budgets = budgets || [];
         state.adminUsage = adminUsage;
         state.adminModels = adminModels || [];
+        state.adminKeys = adminKeys || [];
       }
     }
   } catch (err) {
@@ -216,7 +219,10 @@ function usageView() {
       ${card('Cost', money(u.cost_usd || 0), 'Priced models only')}
     </section>
     <section class="panel">
-      <h3>Usage by model</h3>
+      <div class="section-head">
+        <h3>Usage by model</h3>
+        ${state.user?.role === 'admin' ? '<button class="btn" id="csv-export">Export CSV</button>' : ''}
+      </div>
       ${usageTable(u.by_model || [])}
     </section>
   `;
@@ -230,6 +236,7 @@ function adminView() {
       ${card('Users', state.users.length, 'Local accounts')}
       ${card('Providers', state.providers.length, 'Configured providers')}
       ${card('Budgets', state.budgets.length, 'Monthly limits')}
+      ${card('API keys', state.adminKeys.length, 'User-owned credentials')}
       ${card('Total spend', money(usage.cost_usd || 0), `${usage.requests || 0} requests`)}
     </section>
     <section class="panel">
@@ -283,9 +290,11 @@ function adminView() {
     </section>
     <section class="panel">
       <h3>Users</h3>
-      ${table(['Username', 'Role', 'Department', 'User budget id', 'Active'], state.users.map(u => [
-        esc(u.username), esc(u.role), esc(u.department), `<span class="mono">${esc(u.id)}</span>`, pill(u.is_active)
-      ]))}
+      ${userRows()}
+    </section>
+    <section class="panel">
+      <div class="section-head"><h3>API key governance</h3><span>Empty allowlist means all enabled models. Limits of 0 are unlimited.</span></div>
+      ${keyGovernanceRows()}
     </section>
     <section class="panel">
       <div class="section-head"><h3>Add budget</h3><span>User budgets use the user id shown above; department budgets use the department name.</span></div>
@@ -300,9 +309,7 @@ function adminView() {
     </section>
     <section class="panel">
       <h3>Budgets</h3>
-      ${table(['Scope', 'Limit', 'Warn', 'Active', ''], state.budgets.map(b => [
-        budgetLabel(b), money(b.limit_usd), `${b.warn_pct}%`, pill(b.is_active), `<button class="btn danger" data-delete-budget="${esc(b.id)}">Delete</button>`
-      ]))}
+      ${budgetRows()}
     </section>
   `;
 }
@@ -312,7 +319,7 @@ function providerRows() {
   return `
     <div class="table-scroll">
       <table>
-        <thead><tr><th>ID</th><th>Name</th><th>Type</th><th>Base URL</th><th>Key env</th><th>Direct key</th><th>AWS region</th><th>Enabled</th><th></th></tr></thead>
+        <thead><tr><th>ID</th><th>Name</th><th>Type</th><th>Base URL</th><th>Key env</th><th>Direct key</th><th>AWS region</th><th>Enabled</th><th>Actions</th></tr></thead>
         <tbody>
           ${state.providers.map(p => `
             <tr data-provider-row="${esc(p.id)}">
@@ -324,7 +331,7 @@ function providerRows() {
               <td><input data-provider-field="api_key" type="password" placeholder="leave blank to keep" /></td>
               <td><input data-provider-field="aws_region" value="${attr(p.aws_region)}" /></td>
               <td><input data-provider-field="enabled" type="checkbox" ${p.enabled ? 'checked' : ''} /></td>
-              <td><button class="btn" data-save-provider="${esc(p.id)}">Save</button></td>
+              <td><div class="actions"><button class="btn" data-save-provider="${esc(p.id)}">Save</button><button class="btn danger" data-delete-provider="${esc(p.id)}">Delete</button></div></td>
             </tr>
           `).join('')}
         </tbody>
@@ -338,7 +345,7 @@ function modelRows() {
   return `
     <div class="table-scroll">
       <table>
-        <thead><tr><th>Route</th><th>Provider</th><th>Model id</th><th>Name</th><th>Input</th><th>Output</th><th>Context</th><th>Streaming</th><th>Enabled</th><th></th></tr></thead>
+        <thead><tr><th>Route</th><th>Provider</th><th>Model id</th><th>Name</th><th>Input</th><th>Output</th><th>Context</th><th>Streaming</th><th>Enabled</th><th>Actions</th></tr></thead>
         <tbody>
           ${state.adminModels.map(m => `
             <tr data-model-row="${esc(m.id)}">
@@ -351,7 +358,86 @@ function modelRows() {
               <td><input data-model-field="context_window" type="number" min="0" step="1" value="${attr(m.context_window)}" /></td>
               <td><input data-model-field="supports_streaming" type="checkbox" ${m.supports_streaming ? 'checked' : ''} /></td>
               <td><input data-model-field="enabled" type="checkbox" ${m.enabled ? 'checked' : ''} /></td>
-              <td><button class="btn" data-save-model="${esc(m.id)}">Save</button></td>
+              <td><div class="actions"><button class="btn" data-test-model="${esc(m.id)}">Test</button><button class="btn" data-save-model="${esc(m.id)}">Save</button><button class="btn danger" data-delete-model="${esc(m.id)}">Delete</button></div></td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function userRows() {
+  if (!state.users.length) return '<p>No users yet.</p>';
+  return `
+    <div class="table-scroll">
+      <table>
+        <thead><tr><th>Username</th><th>Email</th><th>Display</th><th>Department</th><th>Role</th><th>Active</th><th>User budget id</th><th>Reset password</th><th>Actions</th></tr></thead>
+        <tbody>
+          ${state.users.map(u => `
+            <tr data-user-row="${esc(u.id)}">
+              <td class="mono">${esc(u.username)}</td>
+              <td><input data-user-field="email" value="${attr(u.email)}" /></td>
+              <td><input data-user-field="display_name" value="${attr(u.display_name)}" /></td>
+              <td><input data-user-field="department" value="${attr(u.department)}" /></td>
+              <td><select data-user-field="role">${option('user', 'User', u.role)}${option('admin', 'Admin', u.role)}</select></td>
+              <td><input data-user-field="is_active" type="checkbox" ${u.is_active ? 'checked' : ''} /></td>
+              <td class="mono">${esc(u.id)}</td>
+              <td><input data-reset-password type="password" placeholder="new password" /></td>
+              <td><div class="actions"><button class="btn" data-save-user="${esc(u.id)}">Save</button><button class="btn" data-reset-user="${esc(u.id)}">Reset</button><button class="btn danger" data-delete-user="${esc(u.id)}">Delete</button></div></td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function keyGovernanceRows() {
+  if (!state.adminKeys.length) return '<p>No API keys yet.</p>';
+  return `
+    <div class="table-scroll">
+      <table>
+        <thead><tr><th>Owner</th><th>Department</th><th>Prefix</th><th>Name</th><th>Active</th><th>Monthly budget</th><th>RPM</th><th>TPM</th><th>Model allowlist</th><th>Month spend</th><th>Expires</th><th>Last used</th><th>Actions</th></tr></thead>
+        <tbody>
+          ${state.adminKeys.map(k => `
+            <tr data-key-row="${esc(k.id)}">
+              <td class="mono">${esc(k.username || k.user_id)}</td>
+              <td>${esc(k.department || '')}</td>
+              <td class="mono">${esc(k.prefix)}</td>
+              <td><input data-key-field="name" value="${attr(k.name)}" /></td>
+              <td><input data-key-field="is_active" type="checkbox" ${k.is_active ? 'checked' : ''} /></td>
+              <td><input data-key-field="budget_usd" type="number" min="0" step="0.01" value="${attr(k.budget_usd)}" /></td>
+              <td><input data-key-field="rpm_limit" type="number" min="0" step="1" value="${attr(k.rpm_limit)}" /></td>
+              <td><input data-key-field="tpm_limit" type="number" min="0" step="1" value="${attr(k.tpm_limit)}" /></td>
+              <td><textarea data-key-field="model_allowlist" rows="2" placeholder="provider/model, one per line">${esc(k.model_allowlist || '')}</textarea></td>
+              <td>${money(k.monthly_spend_usd || 0)}</td>
+              <td><input data-key-field="expires_at" value="${attr(k.expires_at || '')}" placeholder="RFC3339 or blank" /></td>
+              <td>${fmt(k.last_used_at)}</td>
+              <td><div class="actions"><button class="btn" data-save-key="${esc(k.id)}">Save</button><button class="btn danger" data-revoke-admin-key="${esc(k.id)}">Revoke</button></div></td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function budgetRows() {
+  if (!state.budgets.length) return '<p>No records yet.</p>';
+  return `
+    <div class="table-scroll">
+      <table>
+        <thead><tr><th>Scope</th><th>Scope value</th><th>Limit</th><th>Warn</th><th>Active</th><th>Actions</th></tr></thead>
+        <tbody>
+          ${state.budgets.map(b => `
+            <tr data-budget-row="${esc(b.id)}">
+              <td><select data-budget-field="scope_type">${option('department', 'Department', b.scope_type)}${option('user', 'User', b.scope_type)}</select></td>
+              <td><input data-budget-field="scope_value" value="${attr(b.scope_value)}" list="budget-values" /></td>
+              <td><input data-budget-field="limit_usd" type="number" min="0" step="0.01" value="${attr(b.limit_usd)}" /></td>
+              <td><input data-budget-field="warn_pct" type="number" min="1" max="100" step="1" value="${attr(b.warn_pct)}" /></td>
+              <td><input data-budget-field="is_active" type="checkbox" ${b.is_active ? 'checked' : ''} /></td>
+              <td><div class="actions"><button class="btn" data-save-budget="${esc(b.id)}">Save</button><button class="btn danger" data-delete-budget="${esc(b.id)}">Delete</button></div></td>
             </tr>
           `).join('')}
         </tbody>
@@ -404,6 +490,14 @@ function afterRender() {
       await refresh();
     };
   });
+  document.querySelectorAll('[data-delete-provider]').forEach((btn) => {
+    btn.onclick = async () => {
+      if (!confirm(`Delete provider ${btn.dataset.deleteProvider}? Models under it will also be removed.`)) return;
+      await api(`/api/admin/providers/${encodeURIComponent(btn.dataset.deleteProvider)}`, { method: 'DELETE' });
+      state.notice = 'Provider deleted.';
+      await refresh();
+    };
+  });
   const createModel = document.getElementById('create-model');
   if (createModel) {
     createModel.onclick = async () => {
@@ -436,6 +530,28 @@ function afterRender() {
       await refresh();
     };
   });
+  document.querySelectorAll('[data-test-model]').forEach((btn) => {
+    btn.onclick = async () => {
+      state.notice = 'Testing model...';
+      render();
+      try {
+        const result = await api(`/api/admin/models/${encodeURIComponent(btn.dataset.testModel)}/test`, { method: 'POST', body: '{}' });
+        state.notice = `Model test ${result.ok ? 'passed' : 'failed'} in ${result.latency_ms || 0}ms (${result.status_code || 'n/a'}).`;
+      } catch (err) {
+        state.notice = '';
+        state.error = `Model test failed: ${err.message}`;
+      }
+      render();
+    };
+  });
+  document.querySelectorAll('[data-delete-model]').forEach((btn) => {
+    btn.onclick = async () => {
+      if (!confirm(`Delete model ${btn.dataset.deleteModel}?`)) return;
+      await api(`/api/admin/models/${encodeURIComponent(btn.dataset.deleteModel)}`, { method: 'DELETE' });
+      state.notice = 'Model deleted.';
+      await refresh();
+    };
+  });
   const createUser = document.getElementById('create-user');
   if (createUser) {
     createUser.onclick = async () => {
@@ -451,6 +567,58 @@ function afterRender() {
       await refresh();
     };
   }
+  document.querySelectorAll('[data-save-user]').forEach((btn) => {
+    btn.onclick = async () => {
+      const row = btn.closest('[data-user-row]');
+      const id = btn.dataset.saveUser;
+      const body = collectFields(row, 'user');
+      await api(`/api/admin/users/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(body) });
+      state.notice = 'User saved.';
+      await refresh();
+    };
+  });
+  document.querySelectorAll('[data-reset-user]').forEach((btn) => {
+    btn.onclick = async () => {
+      const row = btn.closest('[data-user-row]');
+      const password = row.querySelector('[data-reset-password]').value.trim();
+      if (!password) {
+        state.error = 'Enter a new password before resetting.';
+        render();
+        return;
+      }
+      await api(`/api/admin/users/${encodeURIComponent(btn.dataset.resetUser)}/reset-password`, { method: 'POST', body: JSON.stringify({ password }) });
+      state.notice = 'Password reset.';
+      await refresh();
+    };
+  });
+  document.querySelectorAll('[data-delete-user]').forEach((btn) => {
+    btn.onclick = async () => {
+      if (!confirm(`Delete user ${btn.dataset.deleteUser}? API keys will be revoked and usage ledger rows will remain for chargeback.`)) return;
+      await api(`/api/admin/users/${encodeURIComponent(btn.dataset.deleteUser)}`, { method: 'DELETE' });
+      state.notice = 'User deleted.';
+      await refresh();
+    };
+  });
+  document.querySelectorAll('[data-save-key]').forEach((btn) => {
+    btn.onclick = async () => {
+      const row = btn.closest('[data-key-row]');
+      const body = collectFields(row, 'key');
+      body.budget_usd = Number(body.budget_usd || 0);
+      body.rpm_limit = Number.parseInt(body.rpm_limit || '0', 10);
+      body.tpm_limit = Number.parseInt(body.tpm_limit || '0', 10);
+      await api(`/api/admin/api-keys/${encodeURIComponent(btn.dataset.saveKey)}`, { method: 'PATCH', body: JSON.stringify(body) });
+      state.notice = 'API key controls saved.';
+      await refresh();
+    };
+  });
+  document.querySelectorAll('[data-revoke-admin-key]').forEach((btn) => {
+    btn.onclick = async () => {
+      if (!confirm(`Revoke API key ${btn.dataset.revokeAdminKey}?`)) return;
+      await api(`/api/admin/api-keys/${encodeURIComponent(btn.dataset.revokeAdminKey)}`, { method: 'DELETE' });
+      state.notice = 'API key revoked.';
+      await refresh();
+    };
+  });
   const createBudget = document.getElementById('create-budget');
   if (createBudget) {
     createBudget.onclick = async () => {
@@ -464,6 +632,17 @@ function afterRender() {
       await refresh();
     };
   }
+  document.querySelectorAll('[data-save-budget]').forEach((btn) => {
+    btn.onclick = async () => {
+      const row = btn.closest('[data-budget-row]');
+      const body = collectFields(row, 'budget');
+      body.limit_usd = Number(body.limit_usd || 0);
+      body.warn_pct = Number(body.warn_pct || 90);
+      await api(`/api/admin/budgets/${encodeURIComponent(btn.dataset.saveBudget)}`, { method: 'PATCH', body: JSON.stringify(body) });
+      state.notice = 'Budget saved.';
+      await refresh();
+    };
+  });
   document.querySelectorAll('[data-delete-budget]').forEach((btn) => {
     btn.onclick = async () => {
       await api(`/api/admin/budgets/${encodeURIComponent(btn.dataset.deleteBudget)}`, { method: 'DELETE' });
@@ -471,6 +650,22 @@ function afterRender() {
       await refresh();
     };
   });
+  const csvExport = document.getElementById('csv-export');
+  if (csvExport) {
+    csvExport.onclick = async () => {
+      const res = await fetch('/api/admin/usage/export.csv', { headers: { Authorization: `Bearer ${state.token}` } });
+      if (!res.ok) throw new Error(`CSV export failed: ${res.status}`);
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `phlox-gw-usage-${new Date().toISOString().slice(0, 10)}.csv`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    };
+  }
 }
 
 const oldRender = render;

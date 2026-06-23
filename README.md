@@ -14,6 +14,7 @@ ideas from Phlox, but narrows the product to a high-performance gateway:
 - Provider/model catalog with administrator-owned pricing.
 - Usage ledger for per-user and per-department chargeback.
 - Monthly user and department budgets with warning thresholds and hard limits.
+- Per-key model allowlists, monthly budgets, RPM limits, and TPM limits.
 - Embedded dashboard served from the same Go binary.
 - SQLite database stored in the application data directory.
 
@@ -28,7 +29,13 @@ This is the first implementation scaffold. It includes:
   and usage ledger schema.
 - Dashboard workflows to create users, mint user API keys, add/update providers, add/update
   models and token prices, and create/delete budgets.
+- Admin lifecycle controls for enabling/disabling users, resetting passwords, deleting
+  users/providers/models, testing enabled models, and exporting usage to CSV.
+- Admin API key governance for owner inventory, model allowlists, monthly key budgets,
+  request-per-minute limits, token-per-minute limits, and revocation.
 - `/v1/models`, `/v1/chat/completions`, and `/anthropic/v1/messages` gateway surfaces.
+- Streaming OpenAI-compatible calls are proxied through while recording usage when the
+  upstream stream includes a final usage chunk.
 - Embedded dashboard assets under `frontend/dist`.
 
 Bedrock, Entra ID, advanced load balancing, guardrails, semantic caching, and full

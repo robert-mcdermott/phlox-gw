@@ -32,8 +32,7 @@ not complicate the first gateway release.
 
 ## Enterprise Features To Add
 
-- Rate limits by user, key, department, provider, and model.
-- Per-key budgets and spend limits in addition to user/department budgets.
+- Rate limits by user, department, provider, and model.
 - Provider failover policies and weighted load balancing.
 - Request policy engine: model allowlists, data classification labels, prompt/response
   guardrails, and optional PII redaction.
@@ -56,11 +55,14 @@ not complicate the first gateway release.
 - Implement OpenAI-compatible and Anthropic-compatible pass-through routes.
 - Record usage and cost from provider response metadata when available.
 - Enforce user and department monthly budgets before dispatch.
+- Enforce API-key model allowlists, monthly key budgets, RPM limits, and TPM limits.
+- Provide admin API key inventory and governance controls.
 
 ### Phase 2: Production Controls
 
 - Add Entra ID/OIDC login.
-- Add API key expiration, rotation, scoped model allowlists, and per-key budgets.
+- Add API key rotation workflow and self-service expiration controls.
+- Add rate limits by user, department, provider, and model.
 - Add provider health checks, retries, circuit breakers, and weighted routing.
 - Add request and response audit logs without storing prompt content by default.
 - Add CSV exports and richer dashboard charts.
@@ -72,4 +74,3 @@ not complicate the first gateway release.
 - Add semantic cache as an optional cost/latency optimization.
 - Add cluster-safe database option and migration tooling.
 - Add secrets backends and signed configuration bundles.
-

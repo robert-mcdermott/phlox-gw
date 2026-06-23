@@ -2,21 +2,28 @@
 
 ## Now
 
-- Go single-binary scaffold with embedded dashboard.
-- SQLite schema and migrations.
-- Local auth, seeded admin, users, API keys.
-- Provider and model catalog.
-- OpenAI-compatible and Anthropic-compatible gateway endpoints.
-- Usage ledger, pricing, and budget enforcement.
+- [x] Go single-binary scaffold with embedded dashboard.
+- [x] SQLite schema and migrations.
+- [x] Local auth, seeded admin, users, API keys.
+- [x] Provider and model catalog.
+- [x] Admin UI for users, providers, models, model pricing, budgets, API keys, and usage.
+- [x] Admin lifecycle controls: disable/delete users, reset passwords, delete providers/models.
+- [x] OpenAI-compatible and Anthropic-compatible gateway endpoints.
+- [x] Usage ledger, pricing, and budget enforcement.
+- [x] CSV usage export for chargeback.
+- [x] Model health-test action for enabled OpenAI/Anthropic-compatible models.
+- [x] OpenAI-compatible streaming pass-through with usage capture when upstream emits usage chunks.
+- [x] Admin API key inventory with per-key model allowlists, monthly budgets, RPM limits, and TPM limits.
 
 ## Next
 
-- Complete provider administration in the dashboard.
 - Add Bedrock adapter with AWS credential chain support.
 - Add Entra ID/OIDC login and department claim mapping.
-- Add per-key budgets, model allowlists, and request rate limits.
+- Add API key rotation workflow and self-service expiration controls.
+- Add user, department, provider, and model-level rate limits.
 - Add provider health checks, retries, circuit breakers, and failover.
-- Add CSV export for usage and budget reports.
+- Add richer dashboards for latency, error rate, token volume, and budget burn-down.
+- Add Anthropic streaming support and streamed usage capture where compatible endpoints expose it.
 
 ## Later
 
@@ -26,4 +33,3 @@
 - Audit log and signed admin configuration export.
 - Cluster mode with Postgres.
 - External secrets management.
-

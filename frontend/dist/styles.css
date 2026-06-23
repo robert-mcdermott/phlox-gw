@@ -30,7 +30,8 @@ body {
 }
 
 button,
-input {
+input,
+textarea {
   font: inherit;
 }
 
@@ -185,6 +186,13 @@ button {
   flex-wrap: wrap;
 }
 
+.actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
 .section-head {
   display: flex;
   align-items: baseline;
@@ -260,13 +268,20 @@ td input[type="checkbox"] {
   font-size: 13px;
 }
 
-input {
+input,
+textarea {
   width: 100%;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: #100817;
   color: var(--text);
   padding: 10px 12px;
+}
+
+textarea {
+  min-height: 66px;
+  min-width: 220px;
+  resize: vertical;
 }
 
 select {
@@ -326,6 +341,7 @@ td {
 }
 
 td input,
+td textarea,
 td select {
   min-width: 130px;
 }
