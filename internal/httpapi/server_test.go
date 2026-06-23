@@ -13,6 +13,9 @@ import (
 	"testing/fstest"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime"
+	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime/types"
 	"github.com/robert-mcdermott/phlox-gw/internal/auth"
 	"github.com/robert-mcdermott/phlox-gw/internal/config"
 	"github.com/robert-mcdermott/phlox-gw/internal/store"
@@ -95,6 +98,169 @@ func TestProviderCircuitOpen(t *testing.T) {
 	if open || reason != "" {
 		t.Fatalf("expected closed circuit after expiry, got open=%v reason=%q", open, reason)
 	}
+}
+
+func TestBedrockConverseInputFromOpenAI(t *testing.T) {
+	input, err := bedrockConverseInput("anthropic.claude-3-5-sonnet-20240620-v1:0", map[string]any{
+		"messages": []any{
+			map[string]any{"role": "system", "content": "You are concise."},
+			map[string]any{"role": "user", "content": []any{
+				map[string]any{"type": "text", "text": "Hello"},
+				map[string]any{"type": "text", "text": "World"},
+			}},
+			map[string]any{"role": "assistant", "content": "Hi"},
+		},
+		"max_tokens":  float64(64),
+		"temperature": float64(0.25),
+		"top_p":       float64(0.9),
+		"stop":        []any{"END"},
+	})
+	if err != nil {
+		t.Fatalf("bedrockConverseInput: %v", err)
+	}
+	if got := *input.ModelId; got != "anthropic.claude-3-5-sonnet-20240620-v1:0" {
+		t.Fatalf("model id = %q", got)
+	}
+	if len(input.System) != 1 || input.System[0].(*types.SystemContentBlockMemberText).Value != "You are concise." {
+		t.Fatalf("unexpected system blocks: %#v", input.System)
+	}
+	if len(input.Messages) != 2 {
+		t.Fatalf("messages len = %d", len(input.Messages))
+	}
+	if input.Messages[0].Role != types.ConversationRoleUser || input.Messages[0].Content[0].(*types.ContentBlockMemberText).Value != "Hello\nWorld" {
+		t.Fatalf("unexpected user message: %#v", input.Messages[0])
+	}
+	if input.InferenceConfig == nil || *input.InferenceConfig.MaxTokens != 64 || *input.InferenceConfig.Temperature != 0.25 || *input.InferenceConfig.TopP != 0.9 {
+		t.Fatalf("unexpected inference config: %#v", input.InferenceConfig)
+	}
+	if len(input.InferenceConfig.StopSequences) != 1 || input.InferenceConfig.StopSequences[0] != "END" {
+		t.Fatalf("unexpected stop sequences: %#v", input.InferenceConfig.StopSequences)
+	}
+}
+
+func TestOpenAIChatCompletionsRoutesToBedrockAndRecordsUsage(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer st.Close()
+	hash, err := auth.HashPassword("pass")
+	if err != nil {
+		t.Fatalf("HashPassword: %v", err)
+	}
+	user := store.User{
+		ID:           "user_bedrock",
+		Username:     "bedrock-user",
+		Department:   "AI",
+		Role:         "user",
+		PasswordHash: hash,
+		AuthProvider: "local",
+		IsActive:     true,
+	}
+	if err := st.CreateUser(ctx, user); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	plain, prefix, keyHash, err := auth.NewAPIKey()
+	if err != nil {
+		t.Fatalf("NewAPIKey: %v", err)
+	}
+	if err := st.CreateAPIKey(ctx, store.APIKey{ID: "key_bedrock", UserID: user.ID, Name: "Bedrock key", Prefix: prefix, KeyHash: keyHash}); err != nil {
+		t.Fatalf("CreateAPIKey: %v", err)
+	}
+	provider := store.Provider{ID: "aws-bedrock-test", Name: "AWS Bedrock Test", Type: "bedrock", AWSRegion: "us-west-2", Enabled: true}
+	if err := st.CreateProvider(ctx, provider); err != nil {
+		t.Fatalf("CreateProvider: %v", err)
+	}
+	model := store.Model{
+		ID:                   "model_bedrock_test",
+		ProviderID:           provider.ID,
+		ModelID:              "anthropic.claude-3-5-sonnet-20240620-v1:0",
+		Route:                "aws-bedrock-test/claude-sonnet",
+		DisplayName:          "Bedrock Sonnet",
+		InputCostPerMillion:  1,
+		OutputCostPerMillion: 2,
+		Enabled:              true,
+	}
+	if err := st.CreateModel(ctx, model); err != nil {
+		t.Fatalf("CreateModel: %v", err)
+	}
+	fake := &fakeBedrockClient{}
+	handler, err := New(Options{
+		Config: config.Config{SessionSecret: "test-secret"},
+		Store:  st,
+		Frontend: fstest.MapFS{
+			"frontend/dist/index.html": &fstest.MapFile{Data: []byte("<html></html>")},
+		},
+		BedrockClientFactory: func(_ context.Context, p store.Provider) (BedrockConverseClient, error) {
+			if p.ID != provider.ID || p.AWSRegion != "us-west-2" {
+				t.Fatalf("unexpected provider passed to factory: %#v", p)
+			}
+			return fake, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	resp := jsonRequest(t, handler, http.MethodPost, "/v1/chat/completions", plain, map[string]any{
+		"model":       model.Route,
+		"messages":    []map[string]string{{"role": "user", "content": "Hello"}},
+		"max_tokens":  16,
+		"temperature": 0,
+	})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", resp.Code, resp.Body.String())
+	}
+	if fake.input == nil || *fake.input.ModelId != model.ModelID {
+		t.Fatalf("fake input not captured correctly: %#v", fake.input)
+	}
+	var body struct {
+		Model   string `json:"model"`
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+		Usage struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+			TotalTokens      int `json:"total_tokens"`
+		} `json:"usage"`
+	}
+	decodeRecorder(t, resp, &body)
+	if body.Model != model.Route || len(body.Choices) != 1 || body.Choices[0].Message.Content != "bedrock says hi" {
+		t.Fatalf("unexpected response body: %#v", body)
+	}
+	if body.Usage.PromptTokens != 10 || body.Usage.CompletionTokens != 5 || body.Usage.TotalTokens != 15 {
+		t.Fatalf("unexpected usage: %#v", body.Usage)
+	}
+	usage, err := st.UsageForUser(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("UsageForUser: %v", err)
+	}
+	if usage.Requests != 1 || usage.InputTokens != 10 || usage.OutputTokens != 5 || usage.TotalTokens != 15 || usage.CostUSD != 0.00002 {
+		t.Fatalf("unexpected stored usage: %#v", usage)
+	}
+}
+
+type fakeBedrockClient struct {
+	input *bedrockruntime.ConverseInput
+}
+
+func (f *fakeBedrockClient) Converse(_ context.Context, input *bedrockruntime.ConverseInput, _ ...func(*bedrockruntime.Options)) (*bedrockruntime.ConverseOutput, error) {
+	f.input = input
+	return &bedrockruntime.ConverseOutput{
+		Output: &types.ConverseOutputMemberMessage{Value: types.Message{
+			Role:    types.ConversationRoleAssistant,
+			Content: []types.ContentBlock{&types.ContentBlockMemberText{Value: "bedrock says hi"}},
+		}},
+		StopReason: types.StopReasonEndTurn,
+		Usage: &types.TokenUsage{
+			InputTokens:  aws.Int32(10),
+			OutputTokens: aws.Int32(5),
+			TotalTokens:  aws.Int32(15),
+		},
+	}, nil
 }
 
 func TestAdminActionCreatesAuditLog(t *testing.T) {

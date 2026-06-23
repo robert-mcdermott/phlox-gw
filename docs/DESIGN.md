@@ -83,8 +83,10 @@ Provider adapters are deliberately thin:
 - `openai`: forwards to `{base_url}/chat/completions`. This covers OpenAI, Ollama,
   OpenRouter, LiteLLM, vLLM, LM Studio, and similar endpoints.
 - `anthropic`: forwards to `{base_url}/v1/messages` and preserves Anthropic headers.
-- `bedrock`: uses the same model catalog and budget/accounting gate; the AWS adapter is
-  planned for the next implementation slice.
+- `bedrock`: uses the AWS SDK default credential chain and the provider `aws_region` to
+  call Bedrock Converse. Bedrock models are exposed through the OpenAI-compatible
+  `/v1/chat/completions` surface for non-streaming text chat, then normalized back to the
+  OpenAI response shape for clients and usage accounting.
 
 The model route format is `provider_id/model_id`. Bare model IDs are accepted only when
 they resolve unambiguously.

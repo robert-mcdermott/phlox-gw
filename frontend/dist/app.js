@@ -251,7 +251,7 @@ function adminView() {
       ${monitoringView()}
     </section>
     <section class="panel">
-      <div class="section-head"><h3>Add provider</h3><span>OpenAI-compatible covers Ollama, vLLM, LM Studio, OpenRouter, and LiteLLM.</span></div>
+      <div class="section-head"><h3>Add provider</h3><span>OpenAI-compatible covers Ollama, vLLM, LM Studio, OpenRouter, and LiteLLM. Bedrock uses AWS region and the AWS credential chain.</span></div>
       <div class="form-grid">
         <input id="provider-id" placeholder="provider id, e.g. local-vllm" />
         <input id="provider-name" placeholder="Display name" />
@@ -259,7 +259,7 @@ function adminView() {
         <input id="provider-base-url" placeholder="Base URL, e.g. http://localhost:8000/v1" />
         <input id="provider-api-key-env" placeholder="API key env var, e.g. OPENAI_API_KEY" />
         <input id="provider-api-key" placeholder="Direct API key (optional)" type="password" />
-        <input id="provider-aws-region" placeholder="AWS region for Bedrock" />
+        <input id="provider-aws-region" placeholder="AWS region for Bedrock, e.g. us-east-1" />
         <label class="check"><input id="provider-enabled" type="checkbox" checked /> Enabled</label>
         <button class="btn primary" id="create-provider">Add provider</button>
       </div>
@@ -269,7 +269,7 @@ function adminView() {
       ${providerRows()}
     </section>
     <section class="panel">
-      <div class="section-head"><h3>Add model</h3><span>Route defaults to provider/model. Prices are USD per 1M tokens.</span></div>
+      <div class="section-head"><h3>Add model</h3><span>Route defaults to provider/model. Prices are USD per 1M tokens. Bedrock streaming is not enabled yet.</span></div>
       <div class="form-grid">
         <select id="model-provider">${state.providers.map(p => `<option value="${esc(p.id)}">${esc(p.id)} · ${esc(p.name)}</option>`).join('')}</select>
         <input id="model-model-id" placeholder="Upstream model id" />

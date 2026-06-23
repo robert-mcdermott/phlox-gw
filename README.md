@@ -11,6 +11,7 @@ ideas from Phlox, but narrows the product to a high-performance gateway:
 - OpenAI-compatible gateway endpoints for OpenAI, Ollama, OpenRouter, LiteLLM, vLLM,
   LM Studio, and compatible local runtimes.
 - Anthropic-compatible gateway endpoint support.
+- AWS Bedrock access through the OpenAI-compatible chat endpoint using Bedrock Converse.
 - Provider/model catalog with administrator-owned pricing.
 - Usage ledger for per-user and per-department chargeback.
 - Monthly user and department budgets with warning thresholds and hard limits.
@@ -39,11 +40,13 @@ This is the first implementation scaffold. It includes:
   repeated provider failures.
 - Admin operations charts for 30-day cost, tokens, requests, errors, and average latency.
 - `/v1/models`, `/v1/chat/completions`, and `/anthropic/v1/messages` gateway surfaces.
+- Bedrock models can be exposed through `/v1/chat/completions` for non-streaming text chat,
+  with usage captured from Bedrock token metadata.
 - Streaming OpenAI-compatible calls are proxied through while recording usage when the
   upstream stream includes a final usage chunk.
 - Embedded dashboard assets under `frontend/dist`.
 
-Bedrock, Entra ID, advanced load balancing, guardrails, semantic caching, and full
+Entra ID, advanced load balancing, guardrails, semantic caching, and full
 Prometheus/OpenTelemetry integrations are documented in the roadmap and will be added
 behind the existing provider, policy, and usage seams.
 
@@ -67,6 +70,11 @@ PHLOX_GW_SESSION_SECRET='replace-this-with-a-long-random-secret'
 Provider secrets can be stored directly for local development, but production deployments
 should prefer environment variable references. The database stores the provider
 `api_key_env` field and resolves it at request time.
+
+Bedrock providers use the configured `aws_region` and the AWS SDK default credential
+chain. That means standard sources such as `AWS_PROFILE`, `AWS_ACCESS_KEY_ID`,
+`AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, SSO-backed profiles, ECS task roles, and EC2
+instance roles can be used without storing AWS secrets in Phlox-GW.
 
 ## Repository Map
 

@@ -51,6 +51,7 @@ not complicate the first gateway release.
 - Store users, API keys, providers, models, budgets, and usage in SQLite.
 - Implement local auth, admin bootstrap, user-owned API key minting, and model catalog.
 - Implement OpenAI-compatible and Anthropic-compatible pass-through routes.
+- Implement Bedrock Converse routing through the OpenAI-compatible chat endpoint.
 - Record usage and cost from provider response metadata when available.
 - Enforce user and department monthly budgets before dispatch.
 - Enforce API-key model allowlists, monthly key budgets, RPM limits, and TPM limits.
@@ -67,6 +68,7 @@ not complicate the first gateway release.
 - Add provider retries, failover policies, and weighted routing.
 - Add request and response metadata search without storing prompt content by default.
 - Add budget burn-down, provider drilldowns, and model drilldowns.
+- Add Bedrock streaming, multimodal input mapping, and tool-call mapping.
 
 ### Phase 3: Enterprise Operations
 

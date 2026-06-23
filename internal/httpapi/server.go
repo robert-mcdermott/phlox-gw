@@ -12,6 +12,7 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -19,29 +20,42 @@ import (
 	"strings"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime"
+	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime/types"
+	smithy "github.com/aws/smithy-go"
 	"github.com/robert-mcdermott/phlox-gw/internal/auth"
 	"github.com/robert-mcdermott/phlox-gw/internal/config"
 	"github.com/robert-mcdermott/phlox-gw/internal/store"
 )
 
 type Options struct {
-	Config     config.Config
-	Store      *store.Store
-	Frontend   fs.FS
-	Logger     *slog.Logger
-	HTTPClient *http.Client
+	Config               config.Config
+	Store                *store.Store
+	Frontend             fs.FS
+	Logger               *slog.Logger
+	HTTPClient           *http.Client
+	BedrockClientFactory BedrockClientFactory
 }
 
 type Server struct {
-	cfg        config.Config
-	store      *store.Store
-	logger     *slog.Logger
-	httpClient *http.Client
-	frontend   fs.FS
+	cfg                  config.Config
+	store                *store.Store
+	logger               *slog.Logger
+	httpClient           *http.Client
+	frontend             fs.FS
+	bedrockClientFactory BedrockClientFactory
 }
 
 const providerFailureThreshold = 3
 const providerCircuitCooldown = 5 * time.Minute
+
+type BedrockConverseClient interface {
+	Converse(context.Context, *bedrockruntime.ConverseInput, ...func(*bedrockruntime.Options)) (*bedrockruntime.ConverseOutput, error)
+}
+
+type BedrockClientFactory func(context.Context, store.Provider) (BedrockConverseClient, error)
 
 func New(opts Options) (http.Handler, error) {
 	if opts.Store == nil {
@@ -58,11 +72,12 @@ func New(opts Options) (http.Handler, error) {
 		return nil, err
 	}
 	s := &Server{
-		cfg:        opts.Config,
-		store:      opts.Store,
-		logger:     opts.Logger,
-		httpClient: opts.HTTPClient,
-		frontend:   sub,
+		cfg:                  opts.Config,
+		store:                opts.Store,
+		logger:               opts.Logger,
+		httpClient:           opts.HTTPClient,
+		frontend:             sub,
+		bedrockClientFactory: opts.BedrockClientFactory,
 	}
 
 	mux := http.NewServeMux()
@@ -903,8 +918,8 @@ func (s *Server) openAIChatCompletions(w http.ResponseWriter, r *http.Request, u
 		openAIError(w, http.StatusBadRequest, "unknown or disabled model", "invalid_request_error")
 		return
 	}
-	if route.Provider.Type != "openai" {
-		openAIError(w, http.StatusNotImplemented, "model is not on an OpenAI-compatible provider", "unsupported_provider")
+	if route.Provider.Type != "openai" && route.Provider.Type != "bedrock" {
+		openAIError(w, http.StatusNotImplemented, "model is not on an OpenAI-compatible or Bedrock provider", "unsupported_provider")
 		return
 	}
 	if open, reason := providerCircuitOpen(route.Provider, time.Now().UTC()); open {
@@ -917,6 +932,20 @@ func (s *Server) openAIChatCompletions(w http.ResponseWriter, r *http.Request, u
 	}
 	if blocked, reason := s.checkBudget(r.Context(), user, route.Model); blocked {
 		openAIError(w, http.StatusPaymentRequired, reason, "insufficient_quota")
+		return
+	}
+	if route.Provider.Type == "bedrock" {
+		if stream, _ := raw["stream"].(bool); stream {
+			openAIError(w, http.StatusNotImplemented, "Bedrock streaming is not implemented yet", "unsupported_provider")
+			return
+		}
+		start := time.Now()
+		requestID := requestID()
+		statusCode, responseBody, errText := s.proxyBedrockOpenAI(w, r, route, raw)
+		latency := time.Since(start).Milliseconds()
+		usage := parseOpenAIUsage(responseBody)
+		s.recordProviderOutcome(r.Context(), route.Provider.ID, statusCode, errText)
+		s.recordUsage(r.Context(), requestID, user, key, route, "bedrock", usage, latency, statusCode, errText)
 		return
 	}
 
@@ -1114,6 +1143,52 @@ func (s *Server) proxyAnthropic(w http.ResponseWriter, r *http.Request, route st
 		return resp.StatusCode, responseBody, string(responseBody)
 	}
 	return resp.StatusCode, responseBody, ""
+}
+
+func (s *Server) proxyBedrockOpenAI(w http.ResponseWriter, r *http.Request, route store.RoutedModel, raw map[string]any) (int, []byte, string) {
+	input, err := bedrockConverseInput(route.Model.ModelID, raw)
+	if err != nil {
+		openAIError(w, http.StatusBadRequest, err.Error(), "invalid_request_error")
+		return http.StatusBadRequest, nil, err.Error()
+	}
+	client, err := s.bedrockClient(r.Context(), route.Provider)
+	if err != nil {
+		msg := "Bedrock configuration failed: " + err.Error()
+		openAIError(w, http.StatusBadGateway, msg, "provider_error")
+		return http.StatusBadGateway, nil, msg
+	}
+	output, err := client.Converse(r.Context(), input)
+	if err != nil {
+		status := bedrockErrorStatus(err)
+		msg := bedrockErrorMessage(err)
+		openAIError(w, status, msg, "provider_error")
+		return status, nil, msg
+	}
+	response := openAIResponseFromBedrock(route, output)
+	body, err := json.Marshal(response)
+	if err != nil {
+		openAIError(w, http.StatusInternalServerError, err.Error(), "server_error")
+		return http.StatusInternalServerError, nil, err.Error()
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body)
+	return http.StatusOK, body, ""
+}
+
+func (s *Server) bedrockClient(ctx context.Context, p store.Provider) (BedrockConverseClient, error) {
+	if s.bedrockClientFactory != nil {
+		return s.bedrockClientFactory(ctx, p)
+	}
+	opts := []func(*awsconfig.LoadOptions) error{awsconfig.WithHTTPClient(s.httpClient)}
+	if strings.TrimSpace(p.AWSRegion) != "" {
+		opts = append(opts, awsconfig.WithRegion(strings.TrimSpace(p.AWSRegion)))
+	}
+	cfg, err := awsconfig.LoadDefaultConfig(ctx, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return bedrockruntime.NewFromConfig(cfg), nil
 }
 
 func (s *Server) recordUsage(ctx context.Context, requestID string, user store.User, key store.APIKey, route store.RoutedModel, protocol string, usage tokenUsage, latencyMS int64, status int, errText string) {
@@ -1335,8 +1410,7 @@ func (s *Server) runModelHealthCheck(parent context.Context, route store.RoutedM
 		Protocol:   route.Provider.Type,
 	}
 	if route.Provider.Type == "bedrock" {
-		result.Error = "Bedrock health checks are not implemented yet"
-		return result
+		return s.runBedrockHealthCheck(parent, route, result)
 	}
 
 	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
@@ -1415,6 +1489,40 @@ func (s *Server) runModelHealthCheck(parent context.Context, route store.RoutedM
 	if !result.OK && result.Error == "" {
 		result.Error = result.Snippet
 	}
+	return result
+}
+
+func (s *Server) runBedrockHealthCheck(parent context.Context, route store.RoutedModel, result modelHealthResult) modelHealthResult {
+	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
+	defer cancel()
+	input, err := bedrockConverseInput(route.Model.ModelID, map[string]any{
+		"messages": []any{
+			map[string]any{"role": "user", "content": "Reply with exactly: OK"},
+		},
+		"max_tokens":  float64(8),
+		"temperature": float64(0),
+	})
+	if err != nil {
+		result.Error = err.Error()
+		return result
+	}
+	client, err := s.bedrockClient(ctx, route.Provider)
+	if err != nil {
+		result.StatusCode = http.StatusBadGateway
+		result.Error = err.Error()
+		return result
+	}
+	start := time.Now()
+	output, err := client.Converse(ctx, input)
+	result.LatencyMS = time.Since(start).Milliseconds()
+	if err != nil {
+		result.StatusCode = bedrockErrorStatus(err)
+		result.Error = bedrockErrorMessage(err)
+		return result
+	}
+	result.StatusCode = http.StatusOK
+	result.Snippet = limitString(bedrockOutputText(output), 800)
+	result.OK = true
 	return result
 }
 
@@ -1698,6 +1806,259 @@ type tokenUsage struct {
 	Input  int
 	Output int
 	Total  int
+}
+
+func bedrockConverseInput(modelID string, raw map[string]any) (*bedrockruntime.ConverseInput, error) {
+	messagesRaw, ok := raw["messages"].([]any)
+	if !ok || len(messagesRaw) == 0 {
+		return nil, errors.New("messages must be a non-empty array")
+	}
+	var messages []types.Message
+	var system []types.SystemContentBlock
+	for _, item := range messagesRaw {
+		msg, ok := item.(map[string]any)
+		if !ok {
+			return nil, errors.New("messages entries must be objects")
+		}
+		role, _ := msg["role"].(string)
+		role = strings.ToLower(strings.TrimSpace(role))
+		text, err := openAIMessageText(msg["content"])
+		if err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(text) == "" {
+			continue
+		}
+		switch role {
+		case "system", "developer":
+			system = append(system, &types.SystemContentBlockMemberText{Value: text})
+		case "user":
+			messages = append(messages, types.Message{
+				Role:    types.ConversationRoleUser,
+				Content: []types.ContentBlock{&types.ContentBlockMemberText{Value: text}},
+			})
+		case "assistant":
+			messages = append(messages, types.Message{
+				Role:    types.ConversationRoleAssistant,
+				Content: []types.ContentBlock{&types.ContentBlockMemberText{Value: text}},
+			})
+		default:
+			return nil, fmt.Errorf("Bedrock adapter supports user, assistant, system, and developer text messages only; got role %q", role)
+		}
+	}
+	if len(messages) == 0 {
+		return nil, errors.New("at least one non-empty user or assistant message is required")
+	}
+	input := &bedrockruntime.ConverseInput{
+		ModelId:  aws.String(modelID),
+		Messages: messages,
+		System:   system,
+	}
+	inference := types.InferenceConfiguration{}
+	if n, ok, err := int32Field(raw, "max_tokens"); err != nil {
+		return nil, err
+	} else if ok {
+		inference.MaxTokens = aws.Int32(n)
+	} else if n, ok, err := int32Field(raw, "max_completion_tokens"); err != nil {
+		return nil, err
+	} else if ok {
+		inference.MaxTokens = aws.Int32(n)
+	}
+	if f, ok, err := float32Field(raw, "temperature"); err != nil {
+		return nil, err
+	} else if ok {
+		inference.Temperature = aws.Float32(f)
+	}
+	if f, ok, err := float32Field(raw, "top_p"); err != nil {
+		return nil, err
+	} else if ok {
+		inference.TopP = aws.Float32(f)
+	}
+	stops, err := stopSequences(raw["stop"])
+	if err != nil {
+		return nil, err
+	}
+	inference.StopSequences = stops
+	if inference.MaxTokens != nil || inference.Temperature != nil || inference.TopP != nil || len(inference.StopSequences) > 0 {
+		input.InferenceConfig = &inference
+	}
+	return input, nil
+}
+
+func openAIMessageText(content any) (string, error) {
+	switch v := content.(type) {
+	case nil:
+		return "", nil
+	case string:
+		return v, nil
+	case []any:
+		var parts []string
+		for _, item := range v {
+			part, ok := item.(map[string]any)
+			if !ok {
+				return "", errors.New("message content parts must be objects")
+			}
+			typ, _ := part["type"].(string)
+			if typ == "" || typ == "text" {
+				text, _ := part["text"].(string)
+				if text != "" {
+					parts = append(parts, text)
+				}
+				continue
+			}
+			return "", fmt.Errorf("Bedrock adapter only supports text content parts; got %q", typ)
+		}
+		return strings.Join(parts, "\n"), nil
+	default:
+		return "", errors.New("message content must be a string or text content parts")
+	}
+}
+
+func int32Field(raw map[string]any, key string) (int32, bool, error) {
+	value, ok := raw[key]
+	if !ok || value == nil {
+		return 0, false, nil
+	}
+	number, ok := value.(float64)
+	if !ok || number < 0 || math.Trunc(number) != number || number > math.MaxInt32 {
+		return 0, false, fmt.Errorf("%s must be a non-negative integer", key)
+	}
+	return int32(number), true, nil
+}
+
+func float32Field(raw map[string]any, key string) (float32, bool, error) {
+	value, ok := raw[key]
+	if !ok || value == nil {
+		return 0, false, nil
+	}
+	number, ok := value.(float64)
+	if !ok {
+		return 0, false, fmt.Errorf("%s must be a number", key)
+	}
+	return float32(number), true, nil
+}
+
+func stopSequences(value any) ([]string, error) {
+	switch v := value.(type) {
+	case nil:
+		return nil, nil
+	case string:
+		if v == "" {
+			return nil, nil
+		}
+		return []string{v}, nil
+	case []any:
+		out := make([]string, 0, len(v))
+		for _, item := range v {
+			text, ok := item.(string)
+			if !ok {
+				return nil, errors.New("stop must be a string or array of strings")
+			}
+			if text != "" {
+				out = append(out, text)
+			}
+		}
+		return out, nil
+	default:
+		return nil, errors.New("stop must be a string or array of strings")
+	}
+}
+
+func openAIResponseFromBedrock(route store.RoutedModel, output *bedrockruntime.ConverseOutput) map[string]any {
+	usage := bedrockUsage(output)
+	return map[string]any{
+		"id":      requestID(),
+		"object":  "chat.completion",
+		"created": time.Now().Unix(),
+		"model":   route.Model.Route,
+		"choices": []map[string]any{{
+			"index": 0,
+			"message": map[string]any{
+				"role":    "assistant",
+				"content": bedrockOutputText(output),
+			},
+			"finish_reason": bedrockFinishReason(output.StopReason),
+		}},
+		"usage": map[string]int{
+			"prompt_tokens":     usage.Input,
+			"completion_tokens": usage.Output,
+			"total_tokens":      usage.Total,
+		},
+	}
+}
+
+func bedrockUsage(output *bedrockruntime.ConverseOutput) tokenUsage {
+	if output == nil || output.Usage == nil {
+		return tokenUsage{}
+	}
+	usage := tokenUsage{}
+	if output.Usage.InputTokens != nil {
+		usage.Input = int(*output.Usage.InputTokens)
+	}
+	if output.Usage.OutputTokens != nil {
+		usage.Output = int(*output.Usage.OutputTokens)
+	}
+	if output.Usage.TotalTokens != nil {
+		usage.Total = int(*output.Usage.TotalTokens)
+	}
+	if usage.Total == 0 {
+		usage.Total = usage.Input + usage.Output
+	}
+	return usage
+}
+
+func bedrockOutputText(output *bedrockruntime.ConverseOutput) string {
+	if output == nil {
+		return ""
+	}
+	message, ok := output.Output.(*types.ConverseOutputMemberMessage)
+	if !ok {
+		return ""
+	}
+	parts := make([]string, 0, len(message.Value.Content))
+	for _, content := range message.Value.Content {
+		if text, ok := content.(*types.ContentBlockMemberText); ok && text.Value != "" {
+			parts = append(parts, text.Value)
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
+func bedrockFinishReason(reason types.StopReason) string {
+	switch reason {
+	case types.StopReasonMaxTokens, types.StopReasonModelContextWindowExceeded:
+		return "length"
+	case types.StopReasonContentFiltered, types.StopReasonGuardrailIntervened:
+		return "content_filter"
+	case types.StopReasonToolUse, types.StopReasonMalformedToolUse:
+		return "tool_calls"
+	default:
+		return "stop"
+	}
+}
+
+func bedrockErrorStatus(err error) int {
+	var responseError interface{ HTTPStatusCode() int }
+	if errors.As(err, &responseError) {
+		status := responseError.HTTPStatusCode()
+		if status >= 400 && status <= 599 {
+			return status
+		}
+	}
+	return http.StatusBadGateway
+}
+
+func bedrockErrorMessage(err error) string {
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) {
+		if apiErr.ErrorMessage() != "" {
+			return apiErr.ErrorCode() + ": " + apiErr.ErrorMessage()
+		}
+		if apiErr.ErrorCode() != "" {
+			return apiErr.ErrorCode()
+		}
+	}
+	return err.Error()
 }
 
 func parseOpenAIUsage(body []byte) tokenUsage {
