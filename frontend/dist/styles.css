@@ -217,6 +217,83 @@ button {
   align-items: center;
 }
 
+.metric-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.mini-metric {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #100817;
+  padding: 12px;
+}
+
+.mini-metric .label {
+  color: var(--muted);
+  font-size: 12px;
+  text-transform: uppercase;
+}
+
+.mini-metric strong {
+  display: block;
+  margin-top: 6px;
+  font-size: 18px;
+}
+
+.chart-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.chart-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #100817;
+  padding: 12px;
+}
+
+.chart-title {
+  color: var(--muted);
+  font-size: 12px;
+  text-transform: uppercase;
+  margin-bottom: 10px;
+}
+
+.bars {
+  height: 96px;
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+}
+
+.bar-wrap {
+  flex: 1;
+  min-width: 4px;
+  height: 92px;
+  display: flex;
+  align-items: flex-end;
+}
+
+.bar {
+  width: 100%;
+  min-height: 1px;
+  border-radius: 3px 3px 0 0;
+  background: linear-gradient(180deg, var(--cyan), var(--accent));
+}
+
+.chart-foot {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
 .check {
   min-height: 40px;
   display: inline-flex;
@@ -398,6 +475,11 @@ th {
   .form-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+
+  .metric-strip,
+  .chart-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 560px) {
@@ -411,6 +493,11 @@ th {
   }
 
   .form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .metric-strip,
+  .chart-grid {
     grid-template-columns: 1fr;
   }
 

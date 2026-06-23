@@ -98,6 +98,7 @@ func New(opts Options) (http.Handler, error) {
 	mux.HandleFunc("DELETE /api/admin/api-keys/{id}", s.requireAdmin(s.revokeAPIKeyAdmin))
 	mux.HandleFunc("GET /api/admin/audit-log", s.requireAdmin(s.auditLog))
 	mux.HandleFunc("GET /api/admin/usage/summary", s.requireAdmin(s.adminUsage))
+	mux.HandleFunc("GET /api/admin/usage/timeseries", s.requireAdmin(s.adminUsageTimeSeries))
 	mux.HandleFunc("GET /api/admin/usage/export.csv", s.requireAdmin(s.adminUsageCSV))
 	mux.HandleFunc("GET /v1/models", s.requireAPIKey(s.openAIModels))
 	mux.HandleFunc("POST /v1/chat/completions", s.requireAPIKey(s.openAIChatCompletions))
@@ -677,6 +678,24 @@ func (s *Server) adminUsage(w http.ResponseWriter, r *http.Request, _ store.User
 		return
 	}
 	respondJSON(w, http.StatusOK, summary)
+}
+
+func (s *Server) adminUsageTimeSeries(w http.ResponseWriter, r *http.Request, _ store.User) {
+	days := 30
+	if raw := strings.TrimSpace(r.URL.Query().Get("days")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed <= 0 {
+			respondError(w, http.StatusBadRequest, "days must be a positive integer")
+			return
+		}
+		days = parsed
+	}
+	points, err := s.store.UsageTimeSeries(r.Context(), days, time.Now().UTC())
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	respondJSON(w, http.StatusOK, points)
 }
 
 func (s *Server) auditLog(w http.ResponseWriter, r *http.Request, _ store.User) {

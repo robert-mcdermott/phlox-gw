@@ -13,6 +13,7 @@ const state = {
   adminKeys: [],
   adminModels: [],
   auditLogs: [],
+  usageSeries: [],
   secret: '',
   error: '',
   notice: ''
@@ -49,14 +50,15 @@ async function refresh() {
       state.keys = keys || [];
       state.usage = usage;
       if (state.user.role === 'admin') {
-        const [providers, users, budgets, adminUsage, adminModels, adminKeys, auditLogs] = await Promise.all([
+        const [providers, users, budgets, adminUsage, adminModels, adminKeys, auditLogs, usageSeries] = await Promise.all([
           api('/api/admin/providers'),
           api('/api/admin/users'),
           api('/api/admin/budgets'),
           api('/api/admin/usage/summary'),
           api('/api/admin/models'),
           api('/api/admin/api-keys'),
-          api('/api/admin/audit-log?limit=100')
+          api('/api/admin/audit-log?limit=100'),
+          api('/api/admin/usage/timeseries?days=30')
         ]);
         state.providers = providers || [];
         state.users = users || [];
@@ -65,6 +67,7 @@ async function refresh() {
         state.adminModels = adminModels || [];
         state.adminKeys = adminKeys || [];
         state.auditLogs = auditLogs || [];
+        state.usageSeries = usageSeries || [];
       }
     }
   } catch (err) {
@@ -244,6 +247,10 @@ function adminView() {
       ${card('Total spend', money(usage.cost_usd || 0), `${usage.requests || 0} requests`)}
     </section>
     <section class="panel">
+      <div class="section-head"><h3>Operations</h3><span>Last 30 days</span></div>
+      ${monitoringView()}
+    </section>
+    <section class="panel">
       <div class="section-head"><h3>Add provider</h3><span>OpenAI-compatible covers Ollama, vLLM, LM Studio, OpenRouter, and LiteLLM.</span></div>
       <div class="form-grid">
         <input id="provider-id" placeholder="provider id, e.g. local-vllm" />
@@ -319,6 +326,50 @@ function adminView() {
       <div class="section-head"><h3>Audit log</h3><span>Recent local auth, admin, and API key lifecycle events.</span></div>
       ${auditLogRows()}
     </section>
+  `;
+}
+
+function monitoringView() {
+  const rows = state.usageSeries || [];
+  if (!rows.length) return '<p>No usage data yet.</p>';
+  const totalRequests = rows.reduce((sum, row) => sum + Number(row.requests || 0), 0);
+  const totalErrors = rows.reduce((sum, row) => sum + Number(row.errors || 0), 0);
+  const errorRate = totalRequests ? totalErrors / totalRequests : 0;
+  const avgLatency = weightedAverage(rows, 'avg_latency_ms', 'requests');
+  return `
+    <div class="metric-strip">
+      ${miniMetric('30d requests', totalRequests)}
+      ${miniMetric('30d errors', totalErrors)}
+      ${miniMetric('Error rate', percent(errorRate))}
+      ${miniMetric('Avg latency', `${Math.round(avgLatency)} ms`)}
+    </div>
+    <div class="chart-grid">
+      ${barChart('Daily cost', rows, 'cost_usd', money)}
+      ${barChart('Daily tokens', rows, 'total_tokens', compact)}
+      ${barChart('Daily requests', rows, 'requests', compact)}
+      ${barChart('Daily errors', rows, 'errors', compact)}
+    </div>
+  `;
+}
+
+function miniMetric(label, value) {
+  return `<div class="mini-metric"><div class="label">${esc(label)}</div><strong>${esc(String(value))}</strong></div>`;
+}
+
+function barChart(title, rows, field, formatter) {
+  const max = Math.max(1, ...rows.map(row => Number(row[field] || 0)));
+  return `
+    <div class="chart-card">
+      <div class="chart-title">${esc(title)}</div>
+      <div class="bars">
+        ${rows.map(row => {
+          const value = Number(row[field] || 0);
+          const height = Math.max(value > 0 ? 4 : 1, Math.round((value / max) * 88));
+          return `<div class="bar-wrap" title="${esc(row.date)} · ${esc(formatter(value))}"><div class="bar" style="height:${height}px"></div></div>`;
+        }).join('')}
+      </div>
+      <div class="chart-foot"><span>${esc(rows[0]?.date || '')}</span><span>${esc(rows[rows.length - 1]?.date || '')}</span></div>
+    </div>
   `;
 }
 
@@ -737,6 +788,21 @@ function statusPill(status) {
 
 function money(v) {
   return `$${Number(v || 0).toFixed(4)}`;
+}
+
+function compact(v) {
+  return Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 }).format(Number(v || 0));
+}
+
+function percent(v) {
+  return `${(Number(v || 0) * 100).toFixed(1)}%`;
+}
+
+function weightedAverage(rows, valueField, weightField) {
+  const totalWeight = rows.reduce((sum, row) => sum + Number(row[weightField] || 0), 0);
+  if (!totalWeight) return 0;
+  const weighted = rows.reduce((sum, row) => sum + (Number(row[valueField] || 0) * Number(row[weightField] || 0)), 0);
+  return weighted / totalWeight;
 }
 
 function fmt(v) {

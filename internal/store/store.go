@@ -167,6 +167,17 @@ type UsageSummaryByModel struct {
 	CostUSD      float64 `json:"cost_usd"`
 }
 
+type UsageTimeSeriesPoint struct {
+	Date         string  `json:"date"`
+	Requests     int64   `json:"requests"`
+	Errors       int64   `json:"errors"`
+	InputTokens  int64   `json:"input_tokens"`
+	OutputTokens int64   `json:"output_tokens"`
+	TotalTokens  int64   `json:"total_tokens"`
+	CostUSD      float64 `json:"cost_usd"`
+	AvgLatencyMS float64 `json:"avg_latency_ms"`
+}
+
 type UsageExportRow struct {
 	CreatedAt    time.Time `json:"created_at"`
 	RequestID    string    `json:"request_id"`
@@ -949,6 +960,54 @@ func (s *Store) UsageForUser(ctx context.Context, userID string) (UsageSummary, 
 
 func (s *Store) UsageAll(ctx context.Context) (UsageSummary, error) {
 	return s.usageSummary(ctx, ``)
+}
+
+func (s *Store) UsageTimeSeries(ctx context.Context, days int, now time.Time) ([]UsageTimeSeriesPoint, error) {
+	if days <= 0 {
+		days = 30
+	}
+	if days > 365 {
+		days = 365
+	}
+	endDay := time.Date(now.UTC().Year(), now.UTC().Month(), now.UTC().Day(), 0, 0, 0, 0, time.UTC)
+	startDay := endDay.AddDate(0, 0, -(days - 1))
+	points := make([]UsageTimeSeriesPoint, days)
+	byDate := make(map[string]*UsageTimeSeriesPoint, days)
+	for i := range points {
+		day := startDay.AddDate(0, 0, i).Format("2006-01-02")
+		points[i].Date = day
+		byDate[day] = &points[i]
+	}
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT substr(created_at, 1, 10) AS day,
+		       COUNT(*) AS requests,
+		       COALESCE(SUM(CASE WHEN status_code >= 400 OR error_text <> '' THEN 1 ELSE 0 END), 0) AS errors,
+		       COALESCE(SUM(input_tokens), 0),
+		       COALESCE(SUM(output_tokens), 0),
+		       COALESCE(SUM(total_tokens), 0),
+		       COALESCE(SUM(cost_usd), 0),
+		       COALESCE(AVG(latency_ms), 0)
+		FROM usage_ledger
+		WHERE created_at >= ?
+		GROUP BY day
+		ORDER BY day`, formatTime(startDay))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var item UsageTimeSeriesPoint
+		if err := rows.Scan(&item.Date, &item.Requests, &item.Errors, &item.InputTokens, &item.OutputTokens, &item.TotalTokens, &item.CostUSD, &item.AvgLatencyMS); err != nil {
+			return nil, err
+		}
+		if point, ok := byDate[item.Date]; ok {
+			item.CostUSD = roundCost(item.CostUSD)
+			item.AvgLatencyMS = math.Round(item.AvgLatencyMS)
+			*point = item
+		}
+	}
+	return points, rows.Err()
 }
 
 func (s *Store) UsageExport(ctx context.Context) ([]UsageExportRow, error) {

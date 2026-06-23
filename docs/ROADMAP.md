@@ -16,6 +16,7 @@
 - [x] Admin API key inventory with per-key model allowlists, monthly budgets, RPM limits, and TPM limits.
 - [x] Immutable audit log for local login, admin, and API key lifecycle events.
 - [x] Persisted provider health state with automatic failure tracking and circuit-open blocking.
+- [x] Admin operations dashboard with 30-day cost, token, request, error, and latency trends.
 
 ## Next
 
@@ -24,7 +25,7 @@
 - Add API key rotation workflow and self-service expiration controls.
 - Add user, department, provider, and model-level rate limits.
 - Add provider retries, weighted routing, and failover policies.
-- Add richer dashboards for latency, error rate, token volume, and budget burn-down.
+- Add budget burn-down, provider drilldowns, and model drilldowns.
 - Add Anthropic streaming support and streamed usage capture where compatible endpoints expose it.
 
 ## Later

@@ -251,6 +251,63 @@ func TestAPIKeyGovernanceControlsAndUsage(t *testing.T) {
 	}
 }
 
+func TestUsageTimeSeriesFillsDaysAndAggregatesMetrics(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+
+	now := time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)
+	if err := s.InsertUsage(ctx, UsageRecord{
+		ID:           "usage_series_1",
+		RequestID:    "req_series_1",
+		Model:        "openai/test",
+		InputTokens:  10,
+		OutputTokens: 20,
+		TotalTokens:  30,
+		CostUSD:      0.01,
+		LatencyMS:    100,
+		StatusCode:   200,
+		CreatedAt:    now.AddDate(0, 0, -2),
+	}); err != nil {
+		t.Fatalf("InsertUsage 1: %v", err)
+	}
+	if err := s.InsertUsage(ctx, UsageRecord{
+		ID:           "usage_series_2",
+		RequestID:    "req_series_2",
+		Model:        "openai/test",
+		InputTokens:  5,
+		OutputTokens: 15,
+		TotalTokens:  20,
+		CostUSD:      0.02,
+		LatencyMS:    300,
+		StatusCode:   503,
+		ErrorText:    "provider error",
+		CreatedAt:    now,
+	}); err != nil {
+		t.Fatalf("InsertUsage 2: %v", err)
+	}
+
+	points, err := s.UsageTimeSeries(ctx, 3, now)
+	if err != nil {
+		t.Fatalf("UsageTimeSeries: %v", err)
+	}
+	if len(points) != 3 {
+		t.Fatalf("expected 3 points, got %d", len(points))
+	}
+	if points[0].Date != "2026-06-21" || points[0].Requests != 1 || points[0].TotalTokens != 30 || points[0].CostUSD != 0.01 || points[0].AvgLatencyMS != 100 {
+		t.Fatalf("unexpected first point: %#v", points[0])
+	}
+	if points[1].Date != "2026-06-22" || points[1].Requests != 0 {
+		t.Fatalf("expected empty middle day, got %#v", points[1])
+	}
+	if points[2].Date != "2026-06-23" || points[2].Requests != 1 || points[2].Errors != 1 || points[2].TotalTokens != 20 || points[2].CostUSD != 0.02 || points[2].AvgLatencyMS != 300 {
+		t.Fatalf("unexpected final point: %#v", points[2])
+	}
+}
+
 func TestAuditLogInsertAndList(t *testing.T) {
 	ctx := context.Background()
 	s, err := Open(filepath.Join(t.TempDir(), "test.db"))
