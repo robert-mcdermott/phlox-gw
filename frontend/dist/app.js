@@ -14,6 +14,7 @@ const state = {
   adminModels: [],
   auditLogs: [],
   usageSeries: [],
+  oidcConfig: { enabled: false, display_name: 'Entra ID' },
   secret: '',
   error: '',
   notice: ''
@@ -42,6 +43,7 @@ async function refresh() {
   state.error = '';
   try {
     state.health = await api('/api/health', { headers: {} });
+    state.oidcConfig = await api('/api/auth/oidc/config', { headers: {} });
     if (state.token) {
       state.user = await api('/api/auth/me');
       const base = [api('/api/models'), api('/api/api-keys'), api('/api/usage')];
@@ -92,6 +94,7 @@ function loginView() {
       <div class="field"><label>Password</label><input id="password" type="password" autocomplete="current-password" value="admin" /></div>
       <div class="error" id="login-error"></div>
       <button class="btn primary" id="login-btn">Sign in</button>
+      ${state.oidcConfig?.enabled ? `<button class="btn sso" id="oidc-login">Sign in with ${esc(state.oidcConfig.display_name || 'SSO')}</button>` : ''}
     </div>
   `;
   document.getElementById('login-btn').onclick = async () => {
@@ -110,6 +113,12 @@ function loginView() {
       error.textContent = err.message;
     }
   };
+  const oidcLogin = document.getElementById('oidc-login');
+  if (oidcLogin) {
+    oidcLogin.onclick = () => {
+      window.location.href = '/api/auth/oidc/login';
+    };
+  }
 }
 
 function shell(content) {

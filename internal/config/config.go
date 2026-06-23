@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 type Config struct {
@@ -13,6 +14,22 @@ type Config struct {
 	DBPath             string
 	SessionSecret      string
 	UsingDefaultSecret bool
+	OIDC               OIDCConfig
+}
+
+type OIDCConfig struct {
+	Enabled         bool
+	DisplayName     string
+	IssuerURL       string
+	ClientID        string
+	ClientSecret    string
+	RedirectURL     string
+	Scopes          []string
+	UsernameClaim   string
+	DepartmentClaim string
+	GroupsClaim     string
+	AdminGroups     []string
+	AutoProvision   bool
 }
 
 func Load() (Config, error) {
@@ -36,6 +53,12 @@ func Load() (Config, error) {
 		secret = devSecret()
 		usingDefault = true
 	}
+	oidc := loadOIDCConfig()
+	if oidc.Enabled {
+		if oidc.IssuerURL == "" || oidc.ClientID == "" || oidc.ClientSecret == "" {
+			return Config{}, errMissingOIDCConfig()
+		}
+	}
 
 	return Config{
 		Addr:               addr,
@@ -43,6 +66,7 @@ func Load() (Config, error) {
 		DBPath:             filepath.Join(dataDir, "phlox-gw.db"),
 		SessionSecret:      secret,
 		UsingDefaultSecret: usingDefault,
+		OIDC:               oidc,
 	}, nil
 }
 
@@ -52,6 +76,81 @@ func getenv(key, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+func loadOIDCConfig() OIDCConfig {
+	return OIDCConfig{
+		Enabled:         boolEnv("PHLOX_GW_OIDC_ENABLED", false),
+		DisplayName:     getenv("PHLOX_GW_OIDC_DISPLAY_NAME", "Entra ID"),
+		IssuerURL:       strings.TrimRight(strings.TrimSpace(os.Getenv("PHLOX_GW_OIDC_ISSUER_URL")), "/"),
+		ClientID:        strings.TrimSpace(os.Getenv("PHLOX_GW_OIDC_CLIENT_ID")),
+		ClientSecret:    os.Getenv("PHLOX_GW_OIDC_CLIENT_SECRET"),
+		RedirectURL:     strings.TrimSpace(os.Getenv("PHLOX_GW_OIDC_REDIRECT_URL")),
+		Scopes:          scopesEnv("PHLOX_GW_OIDC_SCOPES", []string{"openid", "profile", "email"}),
+		UsernameClaim:   getenv("PHLOX_GW_OIDC_USERNAME_CLAIM", "preferred_username"),
+		DepartmentClaim: getenv("PHLOX_GW_OIDC_DEPARTMENT_CLAIM", "department"),
+		GroupsClaim:     getenv("PHLOX_GW_OIDC_GROUPS_CLAIM", "groups"),
+		AdminGroups:     listEnv("PHLOX_GW_OIDC_ADMIN_GROUPS"),
+		AutoProvision:   boolEnv("PHLOX_GW_OIDC_AUTO_PROVISION", true),
+	}
+}
+
+func boolEnv(key string, fallback bool) bool {
+	value := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
+	if value == "" {
+		return fallback
+	}
+	switch value {
+	case "1", "true", "t", "yes", "y", "on":
+		return true
+	case "0", "false", "f", "no", "n", "off":
+		return false
+	default:
+		return fallback
+	}
+}
+
+func scopesEnv(key string, fallback []string) []string {
+	values := listEnv(key)
+	if len(values) == 0 {
+		values = append([]string(nil), fallback...)
+	}
+	hasOpenID := false
+	for _, value := range values {
+		if value == "openid" {
+			hasOpenID = true
+			break
+		}
+	}
+	if !hasOpenID {
+		values = append([]string{"openid"}, values...)
+	}
+	return values
+}
+
+func listEnv(key string) []string {
+	raw := os.Getenv(key)
+	parts := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\n' || r == '\r' || r == '\t'
+	})
+	values := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			values = append(values, part)
+		}
+	}
+	return values
+}
+
+func errMissingOIDCConfig() error {
+	return &missingOIDCConfigError{}
+}
+
+type missingOIDCConfigError struct{}
+
+func (*missingOIDCConfigError) Error() string {
+	return "PHLOX_GW_OIDC_ISSUER_URL, PHLOX_GW_OIDC_CLIENT_ID, and PHLOX_GW_OIDC_CLIENT_SECRET are required when PHLOX_GW_OIDC_ENABLED is true"
 }
 
 func devSecret() string {

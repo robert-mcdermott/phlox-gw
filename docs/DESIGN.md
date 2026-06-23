@@ -41,12 +41,13 @@ dashboard so the production artifact can be distributed as one executable.
 - Bcrypt password hashes for local accounts.
 - SHA-256 hashed API keys; plaintext keys are shown only once.
 - Provider secrets resolved from environment variable references when configured.
+- Optional OIDC authorization-code login for Entra ID or other OIDC providers.
 
 ## Data Model
 
 Core tables:
 
-- `users`: local users, role, department, auth provider, active flag.
+- `users`: local or OIDC-provisioned users, role, department, auth provider, active flag.
 - `api_keys`: user-owned keys, hash, prefix, expiry, active flag, last used timestamp,
   model allowlist, monthly budget, RPM limit, and TPM limit.
 - `providers`: provider type, base URL, API key or environment variable reference,
@@ -60,6 +61,24 @@ Core tables:
 
 The usage ledger snapshots username and department at write time so chargeback rows remain
 billable if users are later deleted or moved.
+
+## Browser Authentication
+
+Local login verifies a bcrypt password and returns a Phlox-GW HMAC-signed session token
+for the embedded dashboard. Optional OIDC login uses an authorization-code flow with a
+signed, HTTP-only, SameSite=Lax state cookie and nonce validation. After the OIDC ID token
+is verified, configured claims are mapped into the local `users` table:
+
+- `PHLOX_GW_OIDC_USERNAME_CLAIM` chooses the local username, with fallbacks to
+  `preferred_username`, `upn`, `email`, then `sub`.
+- `PHLOX_GW_OIDC_DEPARTMENT_CLAIM` populates the department used for chargeback and
+  department budgets.
+- `PHLOX_GW_OIDC_GROUPS_CLAIM` and `PHLOX_GW_OIDC_ADMIN_GROUPS` can grant admin role to
+  matching SSO users.
+
+Disabled local users remain blocked even if OIDC authentication succeeds. Existing local
+roles are preserved unless an incoming OIDC admin group grants admin. Auto-provisioning is
+enabled by default and can be disabled for environments that require pre-created users.
 
 ## Request Lifecycle
 
@@ -138,6 +157,7 @@ Current implementation:
 
 - Bcrypt local passwords.
 - HMAC-signed session tokens.
+- OIDC authorization-code login with signed state cookies and ID token nonce validation.
 - SHA-256 API key storage.
 - Admin-gated configuration and reporting APIs.
 - API-key-only gateway routes.
@@ -151,7 +171,6 @@ Current implementation:
 
 Planned:
 
-- Entra ID/OIDC and group/department claim mapping.
 - Request metadata search across gateway calls.
 - Provider secret encryption or external vault integration.
 - Guardrails and redaction policies.

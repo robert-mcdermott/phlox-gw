@@ -18,10 +18,10 @@
 - [x] Persisted provider health state with automatic failure tracking and circuit-open blocking.
 - [x] Admin operations dashboard with 30-day cost, token, request, error, and latency trends.
 - [x] Bedrock Converse adapter with AWS SDK credential chain support for non-streaming text chat.
+- [x] Entra ID/OIDC browser login with local provisioning, department claim mapping, and admin group mapping.
 
 ## Next
 
-- Add Entra ID/OIDC login and department claim mapping.
 - Add API key rotation workflow and self-service expiration controls.
 - Add user, department, provider, and model-level rate limits.
 - Add provider retries, weighted routing, and failover policies.

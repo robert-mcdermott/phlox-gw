@@ -6,7 +6,7 @@ budget enforcement, and operational visibility.
 This repository is intentionally separate from Phlox. Phlox-GW keeps the useful platform
 ideas from Phlox, but narrows the product to a high-performance gateway:
 
-- Local auth with a future Entra ID/OIDC SSO integration point.
+- Local auth with optional Entra ID/OIDC SSO and department claim mapping.
 - User-owned API keys for programmatic access.
 - OpenAI-compatible gateway endpoints for OpenAI, Ollama, OpenRouter, LiteLLM, vLLM,
   LM Studio, and compatible local runtimes.
@@ -28,6 +28,8 @@ This is the first implementation scaffold. It includes:
 - Seeded local admin account: `admin` / `admin`.
 - Session token auth, admin/user roles, users, API keys, providers, models, budgets,
   and usage ledger schema.
+- Optional OIDC browser login for Entra ID or other OIDC providers, with signed state
+  cookies, local user provisioning, department claim mapping, and admin group mapping.
 - Dashboard workflows to create users, mint user API keys, add/update providers, add/update
   models and token prices, and create/delete budgets.
 - Admin lifecycle controls for enabling/disabling users, resetting passwords, deleting
@@ -46,9 +48,9 @@ This is the first implementation scaffold. It includes:
   upstream stream includes a final usage chunk.
 - Embedded dashboard assets under `frontend/dist`.
 
-Entra ID, advanced load balancing, guardrails, semantic caching, and full
-Prometheus/OpenTelemetry integrations are documented in the roadmap and will be added
-behind the existing provider, policy, and usage seams.
+Advanced load balancing, guardrails, semantic caching, and full Prometheus/OpenTelemetry
+integrations are documented in the roadmap and will be added behind the existing provider,
+policy, and usage seams.
 
 ## Quick Start
 
@@ -66,6 +68,24 @@ PHLOX_GW_ADDR=127.0.0.1:8080
 PHLOX_GW_DATA_DIR=/path/to/data
 PHLOX_GW_SESSION_SECRET='replace-this-with-a-long-random-secret'
 ```
+
+Optional OIDC/Entra ID environment variables:
+
+```bash
+PHLOX_GW_OIDC_ENABLED=true
+PHLOX_GW_OIDC_DISPLAY_NAME='Entra ID'
+PHLOX_GW_OIDC_ISSUER_URL='https://login.microsoftonline.com/<tenant-id>/v2.0'
+PHLOX_GW_OIDC_CLIENT_ID='<app-client-id>'
+PHLOX_GW_OIDC_CLIENT_SECRET='<app-client-secret>'
+PHLOX_GW_OIDC_REDIRECT_URL='https://gateway.example.com/api/auth/oidc/callback'
+PHLOX_GW_OIDC_DEPARTMENT_CLAIM='department'
+PHLOX_GW_OIDC_GROUPS_CLAIM='groups'
+PHLOX_GW_OIDC_ADMIN_GROUPS='<admin-group-object-id-or-name>'
+```
+
+If `PHLOX_GW_OIDC_REDIRECT_URL` is omitted, Phlox-GW derives it from the incoming request
+host and `/api/auth/oidc/callback`. Auto-provisioning is enabled by default and can be
+disabled with `PHLOX_GW_OIDC_AUTO_PROVISION=false`.
 
 Provider secrets can be stored directly for local development, but production deployments
 should prefer environment variable references. The database stores the provider

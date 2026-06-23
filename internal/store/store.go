@@ -408,6 +408,23 @@ func (s *Store) UpdateUser(ctx context.Context, u User) error {
 	return nil
 }
 
+func (s *Store) UpdateFederatedUser(ctx context.Context, u User) error {
+	now := time.Now().UTC()
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE users
+		SET email = ?, display_name = ?, department = ?, role = ?, auth_provider = ?, updated_at = ?
+		WHERE id = ?`,
+		u.Email, u.DisplayName, u.Department, u.Role, valueOr(u.AuthProvider, "oidc"), formatTime(now), u.ID)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (s *Store) SetUserPassword(ctx context.Context, userID, passwordHash string) error {
 	now := time.Now().UTC()
 	res, err := s.db.ExecContext(ctx, `UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?`, passwordHash, formatTime(now), userID)

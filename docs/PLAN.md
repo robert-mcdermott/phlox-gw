@@ -50,6 +50,7 @@ not complicate the first gateway release.
 - Build a single Go binary that serves an embedded dashboard and HTTP API.
 - Store users, API keys, providers, models, budgets, and usage in SQLite.
 - Implement local auth, admin bootstrap, user-owned API key minting, and model catalog.
+- Implement Entra ID/OIDC browser login with department claim mapping.
 - Implement OpenAI-compatible and Anthropic-compatible pass-through routes.
 - Implement Bedrock Converse routing through the OpenAI-compatible chat endpoint.
 - Record usage and cost from provider response metadata when available.
@@ -62,7 +63,6 @@ not complicate the first gateway release.
 
 ### Phase 2: Production Controls
 
-- Add Entra ID/OIDC login.
 - Add API key rotation workflow and self-service expiration controls.
 - Add rate limits by user, department, provider, and model.
 - Add provider retries, failover policies, and weighted routing.

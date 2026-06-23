@@ -386,6 +386,12 @@ select {
   font-weight: 700;
 }
 
+.btn.sso {
+  width: 100%;
+  margin-top: 10px;
+  border-color: var(--cyan);
+}
+
 .btn.danger {
   border-color: var(--red);
   color: var(--red);
