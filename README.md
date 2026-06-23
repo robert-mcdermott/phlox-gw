@@ -1,0 +1,76 @@
+# Phlox-GW
+
+Phlox-GW is an enterprise LLM gateway focused on secure model access, cost control,
+budget enforcement, and operational visibility.
+
+This repository is intentionally separate from Phlox. Phlox-GW keeps the useful platform
+ideas from Phlox, but narrows the product to a high-performance gateway:
+
+- Local auth with a future Entra ID/OIDC SSO integration point.
+- User-owned API keys for programmatic access.
+- OpenAI-compatible gateway endpoints for OpenAI, Ollama, OpenRouter, LiteLLM, vLLM,
+  LM Studio, and compatible local runtimes.
+- Anthropic-compatible gateway endpoint support.
+- Provider/model catalog with administrator-owned pricing.
+- Usage ledger for per-user and per-department chargeback.
+- Monthly user and department budgets with warning thresholds and hard limits.
+- Embedded dashboard served from the same Go binary.
+- SQLite database stored in the application data directory.
+
+## Current State
+
+This is the first implementation scaffold. It includes:
+
+- Go HTTP server using the standard library.
+- SQLite persistence through a pure-Go SQLite driver.
+- Seeded local admin account: `admin` / `admin`.
+- Session token auth, admin/user roles, users, API keys, providers, models, budgets,
+  and usage ledger schema.
+- Dashboard workflows to create users, mint user API keys, add/update providers, add/update
+  models and token prices, and create/delete budgets.
+- `/v1/models`, `/v1/chat/completions`, and `/anthropic/v1/messages` gateway surfaces.
+- Embedded dashboard assets under `frontend/dist`.
+
+Bedrock, Entra ID, advanced load balancing, guardrails, semantic caching, and full
+Prometheus/OpenTelemetry integrations are documented in the roadmap and will be added
+behind the existing provider, policy, and usage seams.
+
+## Quick Start
+
+```bash
+go mod tidy
+go run ./cmd/phlox-gw
+```
+
+Open `http://127.0.0.1:8080` and sign in as `admin` / `admin`.
+
+Important environment variables:
+
+```bash
+PHLOX_GW_ADDR=127.0.0.1:8080
+PHLOX_GW_DATA_DIR=/path/to/data
+PHLOX_GW_SESSION_SECRET='replace-this-with-a-long-random-secret'
+```
+
+Provider secrets can be stored directly for local development, but production deployments
+should prefer environment variable references. The database stores the provider
+`api_key_env` field and resolves it at request time.
+
+## Repository Map
+
+```text
+cmd/phlox-gw/        Binary entry point
+internal/auth/       Password hashing and signed session tokens
+internal/config/     Environment and data path loading
+internal/httpapi/    REST, admin, API key, and gateway handlers
+internal/store/      SQLite schema and persistence methods
+frontend/dist/       Embedded first-pass dashboard
+frontend/src/        React/Vite source scaffold for the dashboard
+docs/                Plan, design, and roadmap
+```
+
+## Documentation
+
+- [Plan](docs/PLAN.md)
+- [Design](docs/DESIGN.md)
+- [Roadmap](docs/ROADMAP.md)

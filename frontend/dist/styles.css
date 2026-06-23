@@ -1,0 +1,398 @@
+:root {
+  --bg: #120b18;
+  --surface: #1b1324;
+  --surface-2: #24182f;
+  --surface-3: #2f2040;
+  --border: #4d3564;
+  --text: #f5eeff;
+  --muted: #b9a9ca;
+  --accent: #df3cff;
+  --accent-fg: #17051d;
+  --cyan: #36d7ff;
+  --green: #65e6a7;
+  --red: #ff6b86;
+  --gold: #ffd166;
+  --shadow: rgba(0, 0, 0, 0.36);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  letter-spacing: 0;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+.app {
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: 260px 1fr;
+}
+
+.sidebar {
+  background: #170e20;
+  border-right: 1px solid var(--border);
+  padding: 20px;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 24px;
+}
+
+.mark {
+  width: 34px;
+  height: 34px;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  font-weight: 800;
+}
+
+.brand h1 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.brand p {
+  margin: 2px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.nav {
+  display: grid;
+  gap: 8px;
+}
+
+.nav button {
+  width: 100%;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 10px 12px;
+  text-align: left;
+  color: var(--muted);
+  background: transparent;
+}
+
+.nav button.active {
+  border-color: var(--border);
+  color: var(--text);
+  background: var(--surface-2);
+}
+
+.main {
+  min-width: 0;
+  padding: 24px;
+}
+
+.topbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+
+.topbar h2 {
+  margin: 0;
+  font-size: 22px;
+}
+
+.topbar p {
+  margin: 4px 0 0;
+  color: var(--muted);
+}
+
+.session {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+  margin-bottom: 18px;
+}
+
+.card,
+.panel {
+  border: 1px solid var(--border);
+  background: var(--surface);
+  border-radius: 8px;
+  box-shadow: 0 14px 32px var(--shadow);
+}
+
+.card {
+  padding: 16px;
+}
+
+.card .label {
+  color: var(--muted);
+  font-size: 12px;
+  text-transform: uppercase;
+}
+
+.card .value {
+  margin-top: 8px;
+  font-size: 24px;
+  font-weight: 750;
+}
+
+.card .sub {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.panel {
+  padding: 16px;
+  margin-bottom: 16px;
+}
+
+.panel h3 {
+  margin: 0 0 12px;
+  font-size: 16px;
+}
+
+.row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 12px;
+}
+
+.section-head h3 {
+  margin: 0;
+}
+
+.section-head span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(150px, 1fr));
+  gap: 10px;
+  align-items: center;
+}
+
+.check {
+  min-height: 40px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: #100817;
+}
+
+.check input,
+td input[type="checkbox"] {
+  width: auto;
+}
+
+.table-scroll {
+  width: 100%;
+  overflow-x: auto;
+}
+
+.login {
+  width: min(430px, calc(100vw - 32px));
+  margin: 10vh auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 24px;
+  box-shadow: 0 20px 48px var(--shadow);
+}
+
+.login h1 {
+  margin: 0 0 8px;
+}
+
+.login p {
+  color: var(--muted);
+}
+
+.field {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.field label {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+input {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #100817;
+  color: var(--text);
+  padding: 10px 12px;
+}
+
+select {
+  width: 100%;
+  min-height: 40px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #100817;
+  color: var(--text);
+  padding: 9px 10px;
+}
+
+.btn {
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 9px 12px;
+}
+
+.btn.primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-fg);
+  font-weight: 700;
+}
+
+.btn.danger {
+  border-color: var(--red);
+  color: var(--red);
+}
+
+.error {
+  color: var(--red);
+  min-height: 20px;
+  font-size: 13px;
+}
+
+.success {
+  color: var(--green);
+  font-size: 13px;
+  word-break: break-all;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+th,
+td {
+  border-bottom: 1px solid var(--border);
+  padding: 10px 8px;
+  text-align: left;
+  vertical-align: top;
+}
+
+td input,
+td select {
+  min-width: 130px;
+}
+
+th {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.pill.on {
+  color: var(--green);
+  border-color: rgba(101, 230, 167, 0.5);
+}
+
+.pill.off {
+  color: var(--gold);
+  border-color: rgba(255, 209, 102, 0.5);
+}
+
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+}
+
+@media (max-width: 900px) {
+  .app {
+    grid-template-columns: 1fr;
+  }
+
+  .sidebar {
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .form-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 560px) {
+  .main,
+  .sidebar {
+    padding: 16px;
+  }
+
+  .grid {
+    grid-template-columns: 1fr;
+  }
+
+  .form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .section-head {
+    display: block;
+  }
+}

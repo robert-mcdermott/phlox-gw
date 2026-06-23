@@ -1,0 +1,9 @@
+.gocache/
+/phlox-gw
+/phlox-gw.exe
+phlox-gw.db
+phlox-gw.db-*
+node_modules/
+frontend/dist/assets/
+output/playwright/
+.playwright-cli/
