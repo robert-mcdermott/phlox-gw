@@ -10,6 +10,7 @@ const state = {
   adminUsage: null,
   users: [],
   budgets: [],
+  rateLimits: [],
   adminKeys: [],
   adminModels: [],
   auditLogs: [],
@@ -52,10 +53,11 @@ async function refresh() {
       state.keys = keys || [];
       state.usage = usage;
       if (state.user.role === 'admin') {
-        const [providers, users, budgets, adminUsage, adminModels, adminKeys, auditLogs, usageSeries] = await Promise.all([
+        const [providers, users, budgets, rateLimits, adminUsage, adminModels, adminKeys, auditLogs, usageSeries] = await Promise.all([
           api('/api/admin/providers'),
           api('/api/admin/users'),
           api('/api/admin/budgets'),
+          api('/api/admin/rate-limits'),
           api('/api/admin/usage/summary'),
           api('/api/admin/models'),
           api('/api/admin/api-keys'),
@@ -65,6 +67,7 @@ async function refresh() {
         state.providers = providers || [];
         state.users = users || [];
         state.budgets = budgets || [];
+        state.rateLimits = rateLimits || [];
         state.adminUsage = adminUsage;
         state.adminModels = adminModels || [];
         state.adminKeys = adminKeys || [];
@@ -273,6 +276,7 @@ function adminView() {
       ${card('Users', state.users.length, 'Local accounts')}
       ${card('Providers', state.providers.length, 'Configured providers')}
       ${card('Budgets', state.budgets.length, 'Monthly limits')}
+      ${card('Rate limits', state.rateLimits.length, 'User, department, provider, model')}
       ${card('API keys', state.adminKeys.length, 'User-owned credentials')}
       ${card('Audit events', state.auditLogs.length, 'Recent admin activity')}
       ${card('Total spend', money(usage.cost_usd || 0), `${usage.requests || 0} requests`)}
@@ -337,6 +341,21 @@ function adminView() {
     <section class="panel">
       <div class="section-head"><h3>API key governance</h3><span>Empty allowlist means all enabled models. Limits of 0 are unlimited.</span></div>
       ${keyGovernanceRows()}
+    </section>
+    <section class="panel">
+      <div class="section-head"><h3>Add rate limit</h3><span>Scope values use user id, department name, provider id, or model route. Limits of 0 are unlimited.</span></div>
+      <div class="form-grid">
+        <label class="form-field"><span>Scope</span><select id="rate-scope-type"><option value="user">User</option><option value="department">Department</option><option value="provider">Provider</option><option value="model">Model</option></select></label>
+        <label class="form-field"><span>Scope value</span><input id="rate-scope-value" placeholder="User id, department, provider, or model" list="rate-limit-values" /></label>
+        <datalist id="rate-limit-values">${rateLimitValueOptions()}</datalist>
+        <label class="form-field"><span>Requests/min</span><input id="rate-rpm" aria-label="Requests per minute limit" placeholder="RPM limit" type="number" min="0" step="1" value="0" /></label>
+        <label class="form-field"><span>Tokens/min</span><input id="rate-tpm" aria-label="Tokens per minute limit" placeholder="TPM limit" type="number" min="0" step="1" value="0" /></label>
+        <button class="btn primary" id="create-rate-limit">Create limit</button>
+      </div>
+    </section>
+    <section class="panel">
+      <h3>Rate limits</h3>
+      ${rateLimitRows()}
     </section>
     <section class="panel">
       <div class="section-head"><h3>Add budget</h3><span>User budgets use the user id shown above; department budgets use the department name.</span></div>
@@ -534,6 +553,29 @@ function budgetRows() {
               <td><input data-budget-field="warn_pct" type="number" min="1" max="100" step="1" value="${attr(b.warn_pct)}" /></td>
               <td><input data-budget-field="is_active" type="checkbox" ${b.is_active ? 'checked' : ''} /></td>
               <td><div class="actions"><button class="btn" data-save-budget="${esc(b.id)}">Save</button><button class="btn danger" data-delete-budget="${esc(b.id)}">Delete</button></div></td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function rateLimitRows() {
+  if (!state.rateLimits.length) return '<p>No records yet.</p>';
+  return `
+    <div class="table-scroll">
+      <table>
+        <thead><tr><th>Scope</th><th>Scope value</th><th>RPM</th><th>TPM</th><th>Active</th><th>Actions</th></tr></thead>
+        <tbody>
+          ${state.rateLimits.map(rl => `
+            <tr data-rate-limit-row="${esc(rl.id)}">
+              <td><select data-rate-limit-field="scope_type">${option('user', 'User', rl.scope_type)}${option('department', 'Department', rl.scope_type)}${option('provider', 'Provider', rl.scope_type)}${option('model', 'Model', rl.scope_type)}</select></td>
+              <td><input data-rate-limit-field="scope_value" value="${attr(rl.scope_value)}" list="rate-limit-values" /></td>
+              <td><input data-rate-limit-field="rpm_limit" type="number" min="0" step="1" value="${attr(rl.rpm_limit)}" /></td>
+              <td><input data-rate-limit-field="tpm_limit" type="number" min="0" step="1" value="${attr(rl.tpm_limit)}" /></td>
+              <td><input data-rate-limit-field="is_active" type="checkbox" ${rl.is_active ? 'checked' : ''} /></td>
+              <td><div class="actions"><button class="btn" data-save-rate-limit="${esc(rl.id)}">Save</button><button class="btn danger" data-delete-rate-limit="${esc(rl.id)}">Delete</button></div></td>
             </tr>
           `).join('')}
         </tbody>
@@ -766,6 +808,37 @@ function afterRender() {
       await refresh();
     };
   });
+  const createRateLimit = document.getElementById('create-rate-limit');
+  if (createRateLimit) {
+    createRateLimit.onclick = async () => {
+      await api('/api/admin/rate-limits', { method: 'POST', body: JSON.stringify({
+        scope_type: val('rate-scope-type'),
+        scope_value: val('rate-scope-value'),
+        rpm_limit: intNum('rate-rpm'),
+        tpm_limit: intNum('rate-tpm')
+      })});
+      state.notice = 'Rate limit created.';
+      await refresh();
+    };
+  }
+  document.querySelectorAll('[data-save-rate-limit]').forEach((btn) => {
+    btn.onclick = async () => {
+      const row = btn.closest('[data-rate-limit-row]');
+      const body = collectFields(row, 'rate-limit');
+      body.rpm_limit = Number.parseInt(body.rpm_limit || '0', 10);
+      body.tpm_limit = Number.parseInt(body.tpm_limit || '0', 10);
+      await api(`/api/admin/rate-limits/${encodeURIComponent(btn.dataset.saveRateLimit)}`, { method: 'PATCH', body: JSON.stringify(body) });
+      state.notice = 'Rate limit saved.';
+      await refresh();
+    };
+  });
+  document.querySelectorAll('[data-delete-rate-limit]').forEach((btn) => {
+    btn.onclick = async () => {
+      await api(`/api/admin/rate-limits/${encodeURIComponent(btn.dataset.deleteRateLimit)}`, { method: 'DELETE' });
+      state.notice = 'Rate limit deleted.';
+      await refresh();
+    };
+  });
   const createBudget = document.getElementById('create-budget');
   if (createBudget) {
     createBudget.onclick = async () => {
@@ -915,6 +988,17 @@ function budgetValueOptions() {
     if (u.department) values.add(u.department);
     values.add(u.id);
   });
+  return [...values].map(v => `<option value="${attr(v)}"></option>`).join('');
+}
+
+function rateLimitValueOptions() {
+  const values = new Set();
+  state.users.forEach(u => {
+    values.add(u.id);
+    if (u.department) values.add(u.department);
+  });
+  state.providers.forEach(p => values.add(p.id));
+  state.adminModels.forEach(m => values.add(m.route));
   return [...values].map(v => `<option value="${attr(v)}"></option>`).join('');
 }
 

@@ -136,6 +136,10 @@ func New(opts Options) (http.Handler, error) {
 	mux.HandleFunc("POST /api/admin/budgets", s.requireAdmin(s.createBudget))
 	mux.HandleFunc("PATCH /api/admin/budgets/{id}", s.requireAdmin(s.updateBudget))
 	mux.HandleFunc("DELETE /api/admin/budgets/{id}", s.requireAdmin(s.deleteBudget))
+	mux.HandleFunc("GET /api/admin/rate-limits", s.requireAdmin(s.listRateLimits))
+	mux.HandleFunc("POST /api/admin/rate-limits", s.requireAdmin(s.createRateLimit))
+	mux.HandleFunc("PATCH /api/admin/rate-limits/{id}", s.requireAdmin(s.updateRateLimit))
+	mux.HandleFunc("DELETE /api/admin/rate-limits/{id}", s.requireAdmin(s.deleteRateLimit))
 	mux.HandleFunc("GET /api/admin/api-keys", s.requireAdmin(s.adminAPIKeys))
 	mux.HandleFunc("PATCH /api/admin/api-keys/{id}", s.requireAdmin(s.updateAPIKeyControls))
 	mux.HandleFunc("POST /api/admin/api-keys/{id}/rotate", s.requireAdmin(s.rotateAPIKeyAdmin))
@@ -1078,6 +1082,74 @@ func (s *Server) deleteBudget(w http.ResponseWriter, r *http.Request, admin stor
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (s *Server) listRateLimits(w http.ResponseWriter, r *http.Request, _ store.User) {
+	limits, err := s.store.ListRateLimits(r.Context())
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	respondJSON(w, http.StatusOK, limits)
+}
+
+func (s *Server) createRateLimit(w http.ResponseWriter, r *http.Request, admin store.User) {
+	rl, ok := s.rateLimitFromRequest(w, r, "")
+	if !ok {
+		return
+	}
+	id, err := auth.RandomID("limit")
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "could not allocate rate limit id")
+		return
+	}
+	rl.ID = id
+	rl.IsActive = true
+	if err := s.store.CreateRateLimit(r.Context(), rl); err != nil {
+		if errors.Is(err, store.ErrConflict) {
+			respondError(w, http.StatusConflict, "rate limit already exists for this scope")
+			return
+		}
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.audit(r, admin, "rate_limit.create", "rate_limit", rl.ID, rateLimitDisplay(rl), rateLimitAuditDetails(rl))
+	respondJSON(w, http.StatusCreated, rl)
+}
+
+func (s *Server) updateRateLimit(w http.ResponseWriter, r *http.Request, admin store.User) {
+	rl, ok := s.rateLimitFromRequest(w, r, r.PathValue("id"))
+	if !ok {
+		return
+	}
+	if err := s.store.UpdateRateLimit(r.Context(), rl); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			respondError(w, http.StatusNotFound, "rate limit not found")
+			return
+		}
+		if errors.Is(err, store.ErrConflict) {
+			respondError(w, http.StatusConflict, "rate limit already exists for this scope")
+			return
+		}
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.audit(r, admin, "rate_limit.update", "rate_limit", rl.ID, rateLimitDisplay(rl), rateLimitAuditDetails(rl))
+	respondJSON(w, http.StatusOK, rl)
+}
+
+func (s *Server) deleteRateLimit(w http.ResponseWriter, r *http.Request, admin store.User) {
+	id := r.PathValue("id")
+	if err := s.store.DeleteRateLimit(r.Context(), id); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			respondError(w, http.StatusNotFound, "rate limit not found")
+			return
+		}
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.audit(r, admin, "rate_limit.delete", "rate_limit", id, id, nil)
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (s *Server) openAIModels(w http.ResponseWriter, r *http.Request, user store.User, key store.APIKey) {
 	models, err := s.store.ListModels(r.Context(), false)
 	if err != nil {
@@ -1095,6 +1167,13 @@ func (s *Server) openAIModels(w http.ResponseWriter, r *http.Request, user store
 			if keyBlocked, keyReason := s.checkAPIKeyMonthlyBudget(r.Context(), key); keyBlocked {
 				blocked = true
 				reason = keyReason
+			}
+		}
+		if !blocked {
+			route := store.RoutedModel{Model: m, Provider: store.Provider{ID: m.ProviderID}}
+			if rateBlocked, _, rateReason, _ := s.checkRateLimits(r.Context(), user, route); rateBlocked {
+				blocked = true
+				reason = rateReason
 			}
 		}
 		data = append(data, map[string]any{
@@ -1133,6 +1212,10 @@ func (s *Server) openAIChatCompletions(w http.ResponseWriter, r *http.Request, u
 	}
 	if blocked, reason := s.checkBudget(r.Context(), user, route.Model); blocked {
 		openAIError(w, http.StatusPaymentRequired, reason, "insufficient_quota")
+		return
+	}
+	if blocked, status, reason, typ := s.checkRateLimits(r.Context(), user, route); blocked {
+		openAIError(w, status, reason, typ)
 		return
 	}
 	if route.Provider.Type == "bedrock" {
@@ -1186,6 +1269,10 @@ func (s *Server) anthropicMessages(w http.ResponseWriter, r *http.Request, user 
 	}
 	if blocked, reason := s.checkBudget(r.Context(), user, route.Model); blocked {
 		anthropicError(w, http.StatusPaymentRequired, reason)
+		return
+	}
+	if blocked, status, reason, _ := s.checkRateLimits(r.Context(), user, route); blocked {
+		anthropicError(w, status, reason)
 		return
 	}
 	raw["model"] = route.Model.ModelID
@@ -1544,6 +1631,33 @@ func (s *Server) checkAPIKeyPolicy(ctx context.Context, key store.APIKey, route 
 		}
 		if key.TPMLimit > 0 && usage.TotalTokens >= int64(key.TPMLimit) {
 			return true, http.StatusTooManyRequests, "API key tokens per minute limit exceeded", "rate_limit_exceeded"
+		}
+	}
+	return false, 0, "", ""
+}
+
+func (s *Server) checkRateLimits(ctx context.Context, user store.User, route store.RoutedModel) (bool, int, string, string) {
+	limits, err := s.store.ApplicableRateLimits(ctx, user, route)
+	if err != nil {
+		return true, http.StatusInternalServerError, "rate limit check failed", "server_error"
+	}
+	if len(limits) == 0 {
+		return false, 0, "", ""
+	}
+	since := time.Now().UTC().Add(-time.Minute)
+	for _, limit := range limits {
+		if limit.RPMLimit <= 0 && limit.TPMLimit <= 0 {
+			continue
+		}
+		usage, err := s.store.RateLimitWindowUsage(ctx, limit, since)
+		if err != nil {
+			return true, http.StatusInternalServerError, "rate limit check failed", "server_error"
+		}
+		if limit.RPMLimit > 0 && usage.Requests >= int64(limit.RPMLimit) {
+			return true, http.StatusTooManyRequests, fmt.Sprintf("%s %s requests per minute limit exceeded", limit.ScopeType, limit.ScopeValue), "rate_limit_exceeded"
+		}
+		if limit.TPMLimit > 0 && usage.TotalTokens >= int64(limit.TPMLimit) {
+			return true, http.StatusTooManyRequests, fmt.Sprintf("%s %s tokens per minute limit exceeded", limit.ScopeType, limit.ScopeValue), "rate_limit_exceeded"
 		}
 	}
 	return false, 0, "", ""
@@ -2157,6 +2271,54 @@ func (s *Server) modelFromRequest(w http.ResponseWriter, r *http.Request, pathID
 	}, true
 }
 
+func (s *Server) rateLimitFromRequest(w http.ResponseWriter, r *http.Request, pathID string) (store.RateLimit, bool) {
+	var req struct {
+		ID         string `json:"id"`
+		ScopeType  string `json:"scope_type"`
+		ScopeValue string `json:"scope_value"`
+		RPMLimit   int    `json:"rpm_limit"`
+		TPMLimit   int    `json:"tpm_limit"`
+		IsActive   bool   `json:"is_active"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return store.RateLimit{}, false
+	}
+	id := strings.TrimSpace(req.ID)
+	if pathID != "" {
+		id = pathID
+	}
+	scopeType := strings.TrimSpace(req.ScopeType)
+	scopeValue := strings.TrimSpace(req.ScopeValue)
+	if !validRateLimitScope(scopeType) {
+		respondError(w, http.StatusBadRequest, "scope_type must be user, department, provider, or model")
+		return store.RateLimit{}, false
+	}
+	if scopeValue == "" {
+		respondError(w, http.StatusBadRequest, "scope_value is required")
+		return store.RateLimit{}, false
+	}
+	if req.RPMLimit < 0 || req.TPMLimit < 0 {
+		respondError(w, http.StatusBadRequest, "rate limits cannot be negative")
+		return store.RateLimit{}, false
+	}
+	if req.RPMLimit == 0 && req.TPMLimit == 0 {
+		respondError(w, http.StatusBadRequest, "at least one rate limit must be positive")
+		return store.RateLimit{}, false
+	}
+	return store.RateLimit{
+		ID:         id,
+		ScopeType:  scopeType,
+		ScopeValue: scopeValue,
+		RPMLimit:   req.RPMLimit,
+		TPMLimit:   req.TPMLimit,
+		IsActive:   req.IsActive,
+	}, true
+}
+
+func validRateLimitScope(scopeType string) bool {
+	return scopeType == "user" || scopeType == "department" || scopeType == "provider" || scopeType == "model"
+}
+
 func providerAuditDetails(p store.Provider, directSecretUpdated bool) map[string]any {
 	return map[string]any{
 		"id":                    p.ID,
@@ -2195,8 +2357,22 @@ func budgetAuditDetails(b store.Budget) map[string]any {
 	}
 }
 
+func rateLimitAuditDetails(rl store.RateLimit) map[string]any {
+	return map[string]any{
+		"scope_type":  rl.ScopeType,
+		"scope_value": rl.ScopeValue,
+		"rpm_limit":   rl.RPMLimit,
+		"tpm_limit":   rl.TPMLimit,
+		"is_active":   rl.IsActive,
+	}
+}
+
 func budgetDisplay(b store.Budget) string {
 	return b.ScopeType + ":" + b.ScopeValue
+}
+
+func rateLimitDisplay(rl store.RateLimit) string {
+	return rl.ScopeType + ":" + rl.ScopeValue
 }
 
 func (s *Server) requireSession(next func(http.ResponseWriter, *http.Request, store.User)) http.HandlerFunc {

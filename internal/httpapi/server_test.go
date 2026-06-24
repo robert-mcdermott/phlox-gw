@@ -88,6 +88,93 @@ func TestCheckAPIKeyPolicy(t *testing.T) {
 	}
 }
 
+func TestConfiguredRateLimitsBlockGatewayRequests(t *testing.T) {
+	cases := []struct {
+		name       string
+		scopeType  string
+		scopeValue func(store.User, store.RoutedModel) string
+		want       string
+	}{
+		{name: "user", scopeType: "user", scopeValue: func(u store.User, _ store.RoutedModel) string { return u.ID }, want: "user"},
+		{name: "department", scopeType: "department", scopeValue: func(u store.User, _ store.RoutedModel) string { return u.Department }, want: "department"},
+		{name: "provider", scopeType: "provider", scopeValue: func(_ store.User, r store.RoutedModel) string { return r.Provider.ID }, want: "provider"},
+		{name: "model", scopeType: "model", scopeValue: func(_ store.User, r store.RoutedModel) string { return r.Model.Route }, want: "model"},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+			if err != nil {
+				t.Fatalf("Open: %v", err)
+			}
+			defer st.Close()
+			if err := st.EnsureSeedData("hash"); err != nil {
+				t.Fatalf("EnsureSeedData: %v", err)
+			}
+			user, err := st.GetUserByUsername(ctx, "admin")
+			if err != nil {
+				t.Fatalf("GetUserByUsername: %v", err)
+			}
+			plain, prefix, keyHash, err := auth.NewAPIKey()
+			if err != nil {
+				t.Fatalf("NewAPIKey: %v", err)
+			}
+			if err := st.CreateAPIKey(ctx, store.APIKey{ID: "key_limit", UserID: user.ID, Name: "Limit key", Prefix: prefix, KeyHash: keyHash}); err != nil {
+				t.Fatalf("CreateAPIKey: %v", err)
+			}
+			route, err := st.ResolveModel(ctx, "local-ollama/llama3.1:8b")
+			if err != nil {
+				t.Fatalf("ResolveModel: %v", err)
+			}
+			limit := store.RateLimit{
+				ID:         "limit_" + tt.name,
+				ScopeType:  tt.scopeType,
+				ScopeValue: tt.scopeValue(user, route),
+				RPMLimit:   1,
+				IsActive:   true,
+			}
+			if err := st.CreateRateLimit(ctx, limit); err != nil {
+				t.Fatalf("CreateRateLimit: %v", err)
+			}
+			if err := st.InsertUsage(ctx, store.UsageRecord{
+				ID:          "usage_limit_" + tt.name,
+				RequestID:   "req_limit_" + tt.name,
+				UserID:      user.ID,
+				Username:    user.Username,
+				Department:  user.Department,
+				APIKeyID:    "key_limit",
+				ProviderID:  route.Provider.ID,
+				Model:       route.Model.Route,
+				TotalTokens: 10,
+				StatusCode:  200,
+				CreatedAt:   time.Now().UTC(),
+			}); err != nil {
+				t.Fatalf("InsertUsage: %v", err)
+			}
+			handler, err := New(Options{
+				Config: config.Config{SessionSecret: "test-secret"},
+				Store:  st,
+				Frontend: fstest.MapFS{
+					"frontend/dist/index.html": &fstest.MapFile{Data: []byte("<html></html>")},
+				},
+			})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			resp := jsonRequest(t, handler, http.MethodPost, "/v1/chat/completions", plain, map[string]any{
+				"model":    route.Model.Route,
+				"messages": []map[string]string{{"role": "user", "content": "hello"}},
+			})
+			if resp.Code != http.StatusTooManyRequests {
+				t.Fatalf("status = %d body = %s", resp.Code, resp.Body.String())
+			}
+			if !strings.Contains(resp.Body.String(), tt.want) || !strings.Contains(resp.Body.String(), "requests per minute limit exceeded") {
+				t.Fatalf("unexpected response body: %s", resp.Body.String())
+			}
+		})
+	}
+}
+
 func TestSelfServiceAPIKeyExpirationAndRotation(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))

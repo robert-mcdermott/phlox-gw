@@ -56,6 +56,8 @@ Core tables:
 - `models`: provider-owned models, route id, enabled flag, pricing, context metadata.
 - `usage_ledger`: append-only request metadata for chargeback and reporting.
 - `budgets`: active user or department monthly budget definitions.
+- `rate_limits`: active RPM/TPM policy definitions for users, departments, providers,
+  and models.
 - `audit_log`: append-only local login, admin, and API key lifecycle events with
   sanitized details, client IP, and user agent.
 
@@ -86,14 +88,15 @@ enabled by default and can be disabled for environments that require pre-created
 2. The gateway hashes the key, resolves the owner, checks expiry/active status, and updates
    `last_used_at`.
 3. The requested model route is resolved against the enabled model catalog.
-4. The API key policy gate checks model allowlists, key monthly budget, RPM, and TPM.
-5. The budget gate checks applicable user and department budgets for priced models.
-6. The provider health gate blocks dispatch when the provider circuit is still open.
-7. The provider adapter rewrites only the routing fields needed by the upstream provider.
-8. The request is dispatched with a bounded HTTP client.
-9. Provider success/failure state is updated from the upstream response.
-10. Latency, status, tokens, and cost are appended to the usage ledger.
-11. The provider response is returned in the original API shape.
+4. The provider health gate blocks dispatch when the provider circuit is still open.
+5. The API key policy gate checks model allowlists, key monthly budget, RPM, and TPM.
+6. The budget gate checks applicable user and department budgets for priced models.
+7. The rate-limit gate checks user, department, provider, and model RPM/TPM policies.
+8. The provider adapter rewrites only the routing fields needed by the upstream provider.
+9. The request is dispatched with a bounded HTTP client.
+10. Provider success/failure state is updated from the upstream response.
+11. Latency, status, tokens, and cost are appended to the usage ledger.
+12. The provider response is returned in the original API shape.
 
 ## Provider Strategy
 
@@ -127,6 +130,10 @@ at or above its monthly spend limit. Key RPM/TPM limits use a rolling one-minute
 window. TPM enforcement is based on completed requests already recorded in the ledger, so
 the request that crosses a token-per-minute boundary can finish before the next request is
 blocked.
+
+Enterprise rate limits use the same rolling one-minute ledger window and can apply to
+users, departments, providers, or model routes. A request is blocked before dispatch when
+any applicable active limit is already at or above its RPM or TPM threshold.
 
 Because exact token cost is known only after provider response, the request that crosses a
 budget can finish. The next priced request is blocked.
@@ -163,6 +170,7 @@ Current implementation:
 - API-key-only gateway routes.
 - Admin API key inventory with model allowlists, monthly budgets, RPM limits, and TPM
   limits.
+- Admin-managed RPM/TPM rate limits by user, department, provider, and model.
 - Self-service key naming/expiration updates and in-place key rotation; newly minted or
   rotated plaintext secrets are returned only once.
 - Immutable audit log for local login, admin configuration changes, model health tests,

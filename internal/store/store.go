@@ -111,6 +111,22 @@ type Budget struct {
 	UpdatedAt  time.Time `json:"updated_at"`
 }
 
+type RateLimit struct {
+	ID         string    `json:"id"`
+	ScopeType  string    `json:"scope_type"`
+	ScopeValue string    `json:"scope_value"`
+	RPMLimit   int       `json:"rpm_limit"`
+	TPMLimit   int       `json:"tpm_limit"`
+	IsActive   bool      `json:"is_active"`
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
+}
+
+type RateLimitWindowUsage struct {
+	Requests    int64
+	TotalTokens int64
+}
+
 type BudgetStatus struct {
 	Blocked bool             `json:"blocked"`
 	Warning bool             `json:"warning"`
@@ -447,6 +463,9 @@ func (s *Store) DeleteUser(ctx context.Context, userID string) error {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM budgets WHERE scope_type = 'user' AND scope_value = ?`, userID); err != nil {
 		return err
 	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM rate_limits WHERE scope_type = 'user' AND scope_value = ?`, userID); err != nil {
+		return err
+	}
 	res, err := tx.ExecContext(ctx, `DELETE FROM users WHERE id = ?`, userID)
 	if err != nil {
 		return err
@@ -768,7 +787,22 @@ func (s *Store) RecordProviderFailure(ctx context.Context, providerID string, th
 }
 
 func (s *Store) DeleteProvider(ctx context.Context, id string) error {
-	res, err := s.db.ExecContext(ctx, `DELETE FROM providers WHERE id = ?`, id)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM rate_limits WHERE scope_type = 'provider' AND scope_value = ?`, id); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM rate_limits WHERE scope_type = 'model' AND scope_value IN (
+		SELECT route FROM models WHERE provider_id = ?
+		UNION SELECT model_id FROM models WHERE provider_id = ?
+		UNION SELECT id FROM models WHERE provider_id = ?
+	)`, id, id, id); err != nil {
+		return err
+	}
+	res, err := tx.ExecContext(ctx, `DELETE FROM providers WHERE id = ?`, id)
 	if err != nil {
 		return err
 	}
@@ -776,7 +810,7 @@ func (s *Store) DeleteProvider(ctx context.Context, id string) error {
 	if n == 0 {
 		return ErrNotFound
 	}
-	return nil
+	return tx.Commit()
 }
 
 func (s *Store) ListModels(ctx context.Context, includeDisabled bool) ([]Model, error) {
@@ -836,7 +870,19 @@ func (s *Store) UpdateModel(ctx context.Context, m Model) error {
 }
 
 func (s *Store) DeleteModel(ctx context.Context, id string) error {
-	res, err := s.db.ExecContext(ctx, `DELETE FROM models WHERE id = ?`, id)
+	route, err := s.ResolveModelByID(ctx, id, false)
+	if err != nil {
+		return err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM rate_limits WHERE scope_type = 'model' AND scope_value IN (?, ?, ?)`, route.Model.Route, route.Model.ModelID, route.Model.ID); err != nil {
+		return err
+	}
+	res, err := tx.ExecContext(ctx, `DELETE FROM models WHERE id = ?`, id)
 	if err != nil {
 		return err
 	}
@@ -844,7 +890,7 @@ func (s *Store) DeleteModel(ctx context.Context, id string) error {
 	if n == 0 {
 		return ErrNotFound
 	}
-	return nil
+	return tx.Commit()
 }
 
 func (s *Store) ResolveModelByID(ctx context.Context, id string, requireEnabled bool) (RoutedModel, error) {
@@ -947,6 +993,105 @@ func (s *Store) UpdateBudget(ctx context.Context, b Budget) error {
 		return ErrNotFound
 	}
 	return nil
+}
+
+func (s *Store) ListRateLimits(ctx context.Context) ([]RateLimit, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, scope_type, scope_value, rpm_limit, tpm_limit, is_active, created_at, updated_at FROM rate_limits ORDER BY scope_type, scope_value`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var limits []RateLimit
+	for rows.Next() {
+		rl, err := scanRateLimit(rows)
+		if err != nil {
+			return nil, err
+		}
+		limits = append(limits, rl)
+	}
+	return limits, rows.Err()
+}
+
+func (s *Store) ApplicableRateLimits(ctx context.Context, u User, route RoutedModel) ([]RateLimit, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, scope_type, scope_value, rpm_limit, tpm_limit, is_active, created_at, updated_at
+		FROM rate_limits
+		WHERE is_active = 1 AND (
+			(scope_type = 'user' AND scope_value = ?) OR
+			(scope_type = 'department' AND scope_value = ?) OR
+			(scope_type = 'provider' AND scope_value = ?) OR
+			(scope_type = 'model' AND scope_value = ?)
+		)
+		ORDER BY scope_type, scope_value`,
+		u.ID, u.Department, route.Provider.ID, route.Model.Route)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var limits []RateLimit
+	for rows.Next() {
+		rl, err := scanRateLimit(rows)
+		if err != nil {
+			return nil, err
+		}
+		limits = append(limits, rl)
+	}
+	return limits, rows.Err()
+}
+
+func (s *Store) CreateRateLimit(ctx context.Context, rl RateLimit) error {
+	now := time.Now().UTC()
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO rate_limits (id, scope_type, scope_value, rpm_limit, tpm_limit, is_active, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		rl.ID, rl.ScopeType, rl.ScopeValue, rl.RPMLimit, rl.TPMLimit, boolInt(rl.IsActive), formatTime(now), formatTime(now))
+	if isUniqueErr(err) {
+		return ErrConflict
+	}
+	return err
+}
+
+func (s *Store) UpdateRateLimit(ctx context.Context, rl RateLimit) error {
+	now := time.Now().UTC()
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE rate_limits
+		SET scope_type = ?, scope_value = ?, rpm_limit = ?, tpm_limit = ?, is_active = ?, updated_at = ?
+		WHERE id = ?`,
+		rl.ScopeType, rl.ScopeValue, rl.RPMLimit, rl.TPMLimit, boolInt(rl.IsActive), formatTime(now), rl.ID)
+	if err != nil {
+		if isUniqueErr(err) {
+			return ErrConflict
+		}
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) DeleteRateLimit(ctx context.Context, id string) error {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM rate_limits WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) RateLimitWindowUsage(ctx context.Context, rl RateLimit, since time.Time) (RateLimitWindowUsage, error) {
+	field, ok := rateLimitUsageField(rl.ScopeType)
+	if !ok {
+		return RateLimitWindowUsage{}, nil
+	}
+	var usage RateLimitWindowUsage
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(total_tokens), 0) FROM usage_ledger WHERE `+field+` = ? AND created_at >= ?`,
+		rl.ScopeValue, formatTime(since)).Scan(&usage.Requests, &usage.TotalTokens)
+	return usage, err
 }
 
 func (s *Store) BudgetStatus(ctx context.Context, u User, pricedOnly bool) (BudgetStatus, error) {
@@ -1423,6 +1568,23 @@ func scanBudget(row scanner) (Budget, error) {
 	return b, nil
 }
 
+func scanRateLimit(row scanner) (RateLimit, error) {
+	var rl RateLimit
+	var active int
+	var created, updated string
+	err := row.Scan(&rl.ID, &rl.ScopeType, &rl.ScopeValue, &rl.RPMLimit, &rl.TPMLimit, &active, &created, &updated)
+	if errors.Is(err, sql.ErrNoRows) {
+		return RateLimit{}, ErrNotFound
+	}
+	if err != nil {
+		return RateLimit{}, err
+	}
+	rl.IsActive = active == 1
+	rl.CreatedAt = parseTime(created)
+	rl.UpdatedAt = parseTime(updated)
+	return rl, nil
+}
+
 func scanAuditLog(row scanner) (AuditLog, error) {
 	var item AuditLog
 	var created string
@@ -1458,6 +1620,21 @@ func valueOr(v, fallback string) string {
 		return fallback
 	}
 	return v
+}
+
+func rateLimitUsageField(scopeType string) (string, bool) {
+	switch scopeType {
+	case "user":
+		return "user_id", true
+	case "department":
+		return "department", true
+	case "provider":
+		return "provider_id", true
+	case "model":
+		return "model", true
+	default:
+		return "", false
+	}
 }
 
 func normalizeList(v string) string {
@@ -1560,6 +1737,17 @@ var schema = []string{
 		updated_at TEXT NOT NULL,
 		UNIQUE(scope_type, scope_value)
 	)`,
+	`CREATE TABLE IF NOT EXISTS rate_limits (
+		id TEXT PRIMARY KEY,
+		scope_type TEXT NOT NULL CHECK (scope_type IN ('user', 'department', 'provider', 'model')),
+		scope_value TEXT NOT NULL,
+		rpm_limit INTEGER NOT NULL DEFAULT 0,
+		tpm_limit INTEGER NOT NULL DEFAULT 0,
+		is_active INTEGER NOT NULL DEFAULT 1,
+		created_at TEXT NOT NULL,
+		updated_at TEXT NOT NULL,
+		UNIQUE(scope_type, scope_value)
+	)`,
 	`CREATE TABLE IF NOT EXISTS usage_ledger (
 		id TEXT PRIMARY KEY,
 		request_id TEXT NOT NULL UNIQUE,
@@ -1582,6 +1770,7 @@ var schema = []string{
 	`CREATE INDEX IF NOT EXISTS idx_usage_user_created ON usage_ledger(user_id, created_at)`,
 	`CREATE INDEX IF NOT EXISTS idx_usage_api_key_created ON usage_ledger(api_key_id, created_at)`,
 	`CREATE INDEX IF NOT EXISTS idx_usage_department_created ON usage_ledger(department, created_at)`,
+	`CREATE INDEX IF NOT EXISTS idx_usage_provider_created ON usage_ledger(provider_id, created_at)`,
 	`CREATE INDEX IF NOT EXISTS idx_usage_model_created ON usage_ledger(model, created_at)`,
 	`CREATE TABLE IF NOT EXISTS audit_log (
 		id TEXT PRIMARY KEY,

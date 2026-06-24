@@ -20,10 +20,10 @@
 - [x] Bedrock Converse adapter with AWS SDK credential chain support for non-streaming text chat.
 - [x] Entra ID/OIDC browser login with local provisioning, department claim mapping, and admin group mapping.
 - [x] API key rotation workflow and self-service expiration controls.
+- [x] User, department, provider, and model-level RPM/TPM rate limits.
 
 ## Next
 
-- Add user, department, provider, and model-level rate limits.
 - Add provider retries, weighted routing, and failover policies.
 - Add budget burn-down, provider drilldowns, and model drilldowns.
 - Add Bedrock streaming with ConverseStream and richer multimodal/tool-call mapping.

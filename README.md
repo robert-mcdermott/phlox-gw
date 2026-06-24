@@ -16,6 +16,7 @@ ideas from Phlox, but narrows the product to a high-performance gateway:
 - Usage ledger for per-user and per-department chargeback.
 - Monthly user and department budgets with warning thresholds and hard limits.
 - Per-key model allowlists, monthly budgets, RPM limits, and TPM limits.
+- Enterprise RPM/TPM rate limits by user, department, provider, and model.
 - Embedded dashboard served from the same Go binary.
 - SQLite database stored in the application data directory.
 
@@ -38,6 +39,8 @@ This is the first implementation scaffold. It includes:
   request-per-minute limits, token-per-minute limits, and revocation.
 - Self-service API key expiration updates and in-place key rotation with one-time secret
   display.
+- Admin-managed RPM/TPM rate limits by user, department, provider, and model, enforced
+  before provider dispatch.
 - Immutable audit log for local login, admin configuration changes, model tests, and API
   key lifecycle events.
 - Provider health state with automatic failure tracking and circuit-open blocking after

@@ -32,7 +32,6 @@ not complicate the first gateway release.
 
 ## Enterprise Features To Add
 
-- Rate limits by user, department, provider, and model.
 - Provider failover policies, retries, and weighted load balancing.
 - Request policy engine: model allowlists, data classification labels, prompt/response
   guardrails, and optional PII redaction.
@@ -56,6 +55,7 @@ not complicate the first gateway release.
 - Record usage and cost from provider response metadata when available.
 - Enforce user and department monthly budgets before dispatch.
 - Enforce API-key model allowlists, monthly key budgets, RPM limits, and TPM limits.
+- Enforce RPM and TPM rate limits by user, department, provider, and model.
 - Provide admin API key inventory and governance controls.
 - Support API key rotation and self-service expiration controls.
 - Record admin, login, and API key lifecycle events in an immutable audit log.
@@ -64,7 +64,6 @@ not complicate the first gateway release.
 
 ### Phase 2: Production Controls
 
-- Add rate limits by user, department, provider, and model.
 - Add provider retries, failover policies, and weighted routing.
 - Add request and response metadata search without storing prompt content by default.
 - Add budget burn-down, provider drilldowns, and model drilldowns.
