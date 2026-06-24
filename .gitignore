@@ -1,9 +1,12 @@
+.DS_Store
 .gocache/
 /phlox-gw
 /phlox-gw.exe
+/dist/
+/.env
+/.phlox-gw-data/
 phlox-gw.db
 phlox-gw.db-*
 node_modules/
-frontend/dist/assets/
 output/playwright/
 .playwright-cli/

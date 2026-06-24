@@ -79,8 +79,8 @@ From the repository root:
 
 ```bash
 go test ./...
-go build -o phlox-gw ./cmd/phlox-gw
-./phlox-gw
+scripts/build-release.sh --skip-frontend
+scripts/run-local.sh
 ```
 
 Open [http://127.0.0.1:8080](http://127.0.0.1:8080) and sign in with the seeded local
@@ -116,28 +116,48 @@ backup, and reverse-proxy guidance.
 
 ## Build Options
 
-Build for the current OS:
+Build the frontend and all release binaries:
 
 ```bash
-go build -o phlox-gw ./cmd/phlox-gw
+scripts/build-release.sh
 ```
 
-Build for common targets from macOS or Linux:
+This writes:
 
-```bash
-GOOS=linux GOARCH=amd64 go build -o dist/phlox-gw-linux-amd64 ./cmd/phlox-gw
-GOOS=darwin GOARCH=arm64 go build -o dist/phlox-gw-darwin-arm64 ./cmd/phlox-gw
-GOOS=windows GOARCH=amd64 go build -o dist/phlox-gw-windows-amd64.exe ./cmd/phlox-gw
+- `dist/phlox-gw-darwin-arm64`
+- `dist/phlox-gw-linux-amd64`
+- `dist/phlox-gw-linux-arm64`
+- `dist/phlox-gw-windows-amd64.exe`
+- `dist/phlox-gw-windows-arm64.exe`
+- `dist/checksums.txt`
+
+On Windows PowerShell:
+
+```powershell
+scripts\build-release.ps1
 ```
 
-If you edit the frontend source, rebuild the dashboard before compiling the Go binary:
+Build just the Go binaries when `frontend/dist` is already current:
 
 ```bash
-cd frontend
-npm install
-npm run build
-cd ..
-go build -o phlox-gw ./cmd/phlox-gw
+scripts/build-release.sh --skip-frontend
+```
+
+The frontend source lives in `frontend/src/static`. `npm run build` copies those files into
+`frontend/dist`, and the Go binary embeds `frontend/dist`.
+
+For local runs, copy the environment template and start the gateway:
+
+```bash
+cp scripts/env.example .env
+scripts/run-local.sh
+```
+
+On Windows:
+
+```powershell
+Copy-Item scripts\env.example .env
+scripts\run-local.ps1
 ```
 
 ## First-Time Setup

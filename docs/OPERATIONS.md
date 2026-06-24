@@ -20,30 +20,50 @@ go build -o phlox-gw ./cmd/phlox-gw
 The compiled binary embeds `frontend/dist`, so users do not need a separate web server for
 the dashboard.
 
-If you change files under `frontend/src`, rebuild the frontend before rebuilding Go:
+Build the frontend and all release binaries:
 
 ```bash
-cd frontend
-npm install
-npm run build
-cd ..
-go build -o phlox-gw ./cmd/phlox-gw
+scripts/build-release.sh
 ```
 
-Cross-compile examples:
+This writes binaries and checksums under `dist/`:
+
+- `phlox-gw-darwin-arm64`
+- `phlox-gw-linux-amd64`
+- `phlox-gw-linux-arm64`
+- `phlox-gw-windows-amd64.exe`
+- `phlox-gw-windows-arm64.exe`
+- `checksums.txt`
+
+The script runs `npm run build` in `frontend/` first, so the embedded UI is regenerated
+before Go compiles. Use `--skip-frontend` when `frontend/dist` is already current:
 
 ```bash
-GOOS=linux GOARCH=amd64 go build -o dist/phlox-gw-linux-amd64 ./cmd/phlox-gw
-GOOS=darwin GOARCH=arm64 go build -o dist/phlox-gw-darwin-arm64 ./cmd/phlox-gw
-GOOS=windows GOARCH=amd64 go build -o dist/phlox-gw-windows-amd64.exe ./cmd/phlox-gw
+scripts/build-release.sh --skip-frontend
 ```
 
-On Windows PowerShell:
+On Windows PowerShell, use the equivalent helper:
 
 ```powershell
-$env:GOOS="windows"
-$env:GOARCH="amd64"
-go build -o dist/phlox-gw-windows-amd64.exe ./cmd/phlox-gw
+scripts\build-release.ps1
+```
+
+The frontend source for the embedded dashboard lives in `frontend/src/static`. `npm run
+build` copies that source into `frontend/dist`, which is what `embed.go` includes in the
+single binary.
+
+For local runs, copy the environment template and use the run helper:
+
+```bash
+cp scripts/env.example .env
+scripts/run-local.sh
+```
+
+On Windows:
+
+```powershell
+Copy-Item scripts\env.example .env
+scripts\run-local.ps1
 ```
 
 ## Runtime Files
