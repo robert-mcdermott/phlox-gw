@@ -36,6 +36,8 @@ This is the first implementation scaffold. It includes:
   users/providers/models, testing enabled models, and exporting usage to CSV.
 - Admin API key governance for owner inventory, model allowlists, monthly key budgets,
   request-per-minute limits, token-per-minute limits, and revocation.
+- Self-service API key expiration updates and in-place key rotation with one-time secret
+  display.
 - Immutable audit log for local login, admin configuration changes, model tests, and API
   key lifecycle events.
 - Provider health state with automatic failure tracking and circuit-open blocking after

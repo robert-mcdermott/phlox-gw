@@ -163,6 +163,8 @@ Current implementation:
 - API-key-only gateway routes.
 - Admin API key inventory with model allowlists, monthly budgets, RPM limits, and TPM
   limits.
+- Self-service key naming/expiration updates and in-place key rotation; newly minted or
+  rotated plaintext secrets are returned only once.
 - Immutable audit log for local login, admin configuration changes, model health tests,
   and API key lifecycle events.
 - Persisted provider health state and circuit-open blocking after repeated provider

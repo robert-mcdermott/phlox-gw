@@ -57,13 +57,13 @@ not complicate the first gateway release.
 - Enforce user and department monthly budgets before dispatch.
 - Enforce API-key model allowlists, monthly key budgets, RPM limits, and TPM limits.
 - Provide admin API key inventory and governance controls.
+- Support API key rotation and self-service expiration controls.
 - Record admin, login, and API key lifecycle events in an immutable audit log.
 - Track provider health and block dispatch while a provider circuit is open.
 - Show 30-day operational monitoring charts from the usage ledger.
 
 ### Phase 2: Production Controls
 
-- Add API key rotation workflow and self-service expiration controls.
 - Add rate limits by user, department, provider, and model.
 - Add provider retries, failover policies, and weighted routing.
 - Add request and response metadata search without storing prompt content by default.

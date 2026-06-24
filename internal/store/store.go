@@ -516,6 +516,58 @@ func (s *Store) CreateAPIKey(ctx context.Context, k APIKey) error {
 	return err
 }
 
+func (s *Store) UpdateAPIKeySelf(ctx context.Context, k APIKey) error {
+	var expires any
+	if k.ExpiresAt != nil {
+		expires = formatTime(*k.ExpiresAt)
+	}
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE api_keys
+		SET name = ?, expires_at = ?
+		WHERE id = ? AND user_id = ? AND is_active = 1`,
+		k.Name, expires, k.ID, k.UserID)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) RotateAPIKey(ctx context.Context, userID, keyID, prefix, hash string) error {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE api_keys
+		SET prefix = ?, key_hash = ?, last_used_at = NULL
+		WHERE id = ? AND user_id = ? AND is_active = 1`,
+		prefix, hash, keyID, userID)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) RotateAPIKeyAdmin(ctx context.Context, keyID, prefix, hash string) error {
+	res, err := s.db.ExecContext(ctx, `
+		UPDATE api_keys
+		SET prefix = ?, key_hash = ?, last_used_at = NULL
+		WHERE id = ? AND is_active = 1`,
+		prefix, hash, keyID)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 func (s *Store) RevokeAPIKey(ctx context.Context, userID, keyID string) error {
 	res, err := s.db.ExecContext(ctx, `UPDATE api_keys SET is_active = 0 WHERE id = ? AND user_id = ?`, keyID, userID)
 	if err != nil {

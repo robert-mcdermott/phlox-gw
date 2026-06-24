@@ -200,16 +200,38 @@ function keysView() {
       <h3>Mint API key</h3>
       <div class="row">
         <input id="key-name" placeholder="Key name" value="Development key" />
+        <input id="key-expires" placeholder="Expires RFC3339 (optional)" />
         <button class="btn primary" id="create-key">Create</button>
       </div>
       <div class="success" id="new-secret">${state.secret ? `New key: ${state.secret}` : ''}</div>
     </section>
     <section class="panel">
       <h3>Your API keys</h3>
-      ${table(['Name', 'Prefix', 'Active', 'Last used', ''], state.keys.map(k => [
-        esc(k.name), `<span class="mono">${esc(k.prefix)}</span>`, pill(k.is_active), fmt(k.last_used_at), k.is_active ? `<button class="btn danger" data-revoke="${k.id}">Revoke</button>` : ''
-      ]))}
+      ${selfKeyRows()}
     </section>
+  `;
+}
+
+function selfKeyRows() {
+  if (!state.keys.length) return '<p>No API keys yet.</p>';
+  return `
+    <div class="table-scroll">
+      <table>
+        <thead><tr><th>Name</th><th>Prefix</th><th>Status</th><th>Expires</th><th>Last used</th><th>Actions</th></tr></thead>
+        <tbody>
+          ${state.keys.map(k => `
+            <tr data-self-key-row="${esc(k.id)}">
+              <td><input data-self-key-field="name" value="${attr(k.name)}" ${k.is_active ? '' : 'disabled'} /></td>
+              <td class="mono">${esc(k.prefix)}</td>
+              <td>${keyStatusPill(k)}</td>
+              <td><input data-self-key-field="expires_at" value="${attr(k.expires_at || '')}" placeholder="RFC3339 or blank" ${k.is_active ? '' : 'disabled'} /></td>
+              <td>${fmt(k.last_used_at)}</td>
+              <td><div class="actions">${k.is_active ? `<button class="btn" data-save-self-key="${esc(k.id)}">Save</button><button class="btn" data-rotate="${esc(k.id)}">Rotate</button><button class="btn danger" data-revoke="${esc(k.id)}">Revoke</button>` : ''}</div></td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    </div>
   `;
 }
 
@@ -469,6 +491,7 @@ function userRows() {
 function keyGovernanceRows() {
   if (!state.adminKeys.length) return '<p>No API keys yet.</p>';
   return `
+    ${state.secret ? `<div class="success">New rotated key: ${esc(state.secret)}</div>` : ''}
     <div class="table-scroll">
       <table>
         <thead><tr><th>Owner</th><th>Department</th><th>Prefix</th><th>Name</th><th>Active</th><th>Monthly budget</th><th>RPM</th><th>TPM</th><th>Model allowlist</th><th>Month spend</th><th>Expires</th><th>Last used</th><th>Actions</th></tr></thead>
@@ -487,7 +510,7 @@ function keyGovernanceRows() {
               <td>${money(k.monthly_spend_usd || 0)}</td>
               <td><input data-key-field="expires_at" value="${attr(k.expires_at || '')}" placeholder="RFC3339 or blank" /></td>
               <td>${fmt(k.last_used_at)}</td>
-              <td><div class="actions"><button class="btn" data-save-key="${esc(k.id)}">Save</button><button class="btn danger" data-revoke-admin-key="${esc(k.id)}">Revoke</button></div></td>
+              <td><div class="actions"><button class="btn" data-save-key="${esc(k.id)}">Save</button>${k.is_active ? `<button class="btn" data-rotate-admin-key="${esc(k.id)}">Rotate</button>` : ''}<button class="btn danger" data-revoke-admin-key="${esc(k.id)}">Revoke</button></div></td>
             </tr>
           `).join('')}
         </tbody>
@@ -547,11 +570,30 @@ function afterRender() {
   if (create) {
     create.onclick = async () => {
       const name = document.getElementById('key-name').value || 'API key';
-      const resp = await api('/api/api-keys', { method: 'POST', body: JSON.stringify({ name }) });
+      const expires_at = document.getElementById('key-expires').value.trim();
+      const resp = await api('/api/api-keys', { method: 'POST', body: JSON.stringify({ name, expires_at }) });
       state.secret = resp.key;
       await refresh();
     };
   }
+  document.querySelectorAll('[data-save-self-key]').forEach((btn) => {
+    btn.onclick = async () => {
+      const row = btn.closest('[data-self-key-row]');
+      const body = collectFields(row, 'self-key');
+      await api(`/api/api-keys/${encodeURIComponent(btn.dataset.saveSelfKey)}`, { method: 'PATCH', body: JSON.stringify(body) });
+      state.notice = 'API key saved.';
+      await refresh();
+    };
+  });
+  document.querySelectorAll('[data-rotate]').forEach((btn) => {
+    btn.onclick = async () => {
+      if (!confirm(`Rotate API key ${btn.dataset.rotate}? The old secret will stop working immediately.`)) return;
+      const resp = await api(`/api/api-keys/${encodeURIComponent(btn.dataset.rotate)}/rotate`, { method: 'POST', body: '{}' });
+      state.secret = resp.key;
+      state.notice = 'API key rotated.';
+      await refresh();
+    };
+  });
   document.querySelectorAll('[data-revoke]').forEach((btn) => {
     btn.onclick = async () => {
       await api(`/api/api-keys/${btn.dataset.revoke}`, { method: 'DELETE' });
@@ -707,6 +749,15 @@ function afterRender() {
       await refresh();
     };
   });
+  document.querySelectorAll('[data-rotate-admin-key]').forEach((btn) => {
+    btn.onclick = async () => {
+      if (!confirm(`Rotate API key ${btn.dataset.rotateAdminKey}? The old secret will stop working immediately.`)) return;
+      const resp = await api(`/api/admin/api-keys/${encodeURIComponent(btn.dataset.rotateAdminKey)}/rotate`, { method: 'POST', body: '{}' });
+      state.secret = resp.key;
+      state.notice = 'API key rotated.';
+      await refresh();
+    };
+  });
   document.querySelectorAll('[data-revoke-admin-key]').forEach((btn) => {
     btn.onclick = async () => {
       if (!confirm(`Revoke API key ${btn.dataset.revokeAdminKey}?`)) return;
@@ -795,6 +846,12 @@ function statusPill(status) {
   return `<span class="pill ${cls}">${esc(normalized)}</span>`;
 }
 
+function keyStatusPill(k) {
+  if (!k.is_active) return '<span class="pill off">revoked</span>';
+  if (k.expires_at && new Date(k.expires_at).getTime() <= Date.now()) return '<span class="pill off">expired</span>';
+  return '<span class="pill on">active</span>';
+}
+
 function money(v) {
   return `$${Number(v || 0).toFixed(4)}`;
 }
@@ -836,8 +893,9 @@ function intNum(id) {
 
 function collectFields(row, prefix) {
   const out = {};
+  const datasetKey = prefix.replace(/-([a-z])/g, (_, c) => c.toUpperCase()) + 'Field';
   row.querySelectorAll(`[data-${prefix}-field]`).forEach((el) => {
-    const key = el.dataset[`${prefix}Field`];
+    const key = el.dataset[datasetKey];
     out[key] = el.type === 'checkbox' ? el.checked : el.value.trim();
   });
   return out;

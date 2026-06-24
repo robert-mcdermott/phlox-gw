@@ -115,6 +115,8 @@ func New(opts Options) (http.Handler, error) {
 	mux.HandleFunc("GET /api/usage/budget", s.requireSession(s.budgetStatus))
 	mux.HandleFunc("GET /api/api-keys", s.requireSession(s.listAPIKeys))
 	mux.HandleFunc("POST /api/api-keys", s.requireSession(s.createAPIKey))
+	mux.HandleFunc("PATCH /api/api-keys/{id}", s.requireSession(s.updateAPIKeySelf))
+	mux.HandleFunc("POST /api/api-keys/{id}/rotate", s.requireSession(s.rotateAPIKey))
 	mux.HandleFunc("DELETE /api/api-keys/{id}", s.requireSession(s.revokeAPIKey))
 	mux.HandleFunc("GET /api/admin/users", s.requireAdmin(s.listUsers))
 	mux.HandleFunc("POST /api/admin/users", s.requireAdmin(s.createUser))
@@ -136,6 +138,7 @@ func New(opts Options) (http.Handler, error) {
 	mux.HandleFunc("DELETE /api/admin/budgets/{id}", s.requireAdmin(s.deleteBudget))
 	mux.HandleFunc("GET /api/admin/api-keys", s.requireAdmin(s.adminAPIKeys))
 	mux.HandleFunc("PATCH /api/admin/api-keys/{id}", s.requireAdmin(s.updateAPIKeyControls))
+	mux.HandleFunc("POST /api/admin/api-keys/{id}/rotate", s.requireAdmin(s.rotateAPIKeyAdmin))
 	mux.HandleFunc("DELETE /api/admin/api-keys/{id}", s.requireAdmin(s.revokeAPIKeyAdmin))
 	mux.HandleFunc("GET /api/admin/audit-log", s.requireAdmin(s.auditLog))
 	mux.HandleFunc("GET /api/admin/usage/summary", s.requireAdmin(s.adminUsage))
@@ -510,14 +513,9 @@ func (s *Server) createAPIKey(w http.ResponseWriter, r *http.Request, user store
 	if strings.TrimSpace(req.Name) == "" {
 		req.Name = "API key"
 	}
-	var expires *time.Time
-	if strings.TrimSpace(req.ExpiresAt) != "" {
-		t, err := time.Parse(time.RFC3339, req.ExpiresAt)
-		if err != nil {
-			respondError(w, http.StatusBadRequest, "expires_at must be RFC3339")
-			return
-		}
-		expires = &t
+	expires, ok := parseAPIKeyExpiresAt(w, req.ExpiresAt, true)
+	if !ok {
+		return
 	}
 	plain, prefix, hash, err := auth.NewAPIKey()
 	if err != nil {
@@ -540,6 +538,66 @@ func (s *Server) createAPIKey(w http.ResponseWriter, r *http.Request, user store
 		"expires_at": key.ExpiresAt,
 	})
 	respondJSON(w, http.StatusCreated, map[string]any{"key": plain, "record": key})
+}
+
+func (s *Server) updateAPIKeySelf(w http.ResponseWriter, r *http.Request, user store.User) {
+	var req struct {
+		Name      string `json:"name"`
+		ExpiresAt string `json:"expires_at"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		respondError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+	expires, ok := parseAPIKeyExpiresAt(w, req.ExpiresAt, true)
+	if !ok {
+		return
+	}
+	key := store.APIKey{
+		ID:        r.PathValue("id"),
+		UserID:    user.ID,
+		Name:      name,
+		ExpiresAt: expires,
+	}
+	if err := s.store.UpdateAPIKeySelf(r.Context(), key); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			respondError(w, http.StatusNotFound, "key not found")
+			return
+		}
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.audit(r, user, "api_key.update_self", "api_key", key.ID, key.Name, map[string]any{
+		"name":       key.Name,
+		"expires_at": key.ExpiresAt,
+	})
+	respondJSON(w, http.StatusOK, map[string]any{"status": "ok"})
+}
+
+func (s *Server) rotateAPIKey(w http.ResponseWriter, r *http.Request, user store.User) {
+	keyID := r.PathValue("id")
+	plain, prefix, hash, err := auth.NewAPIKey()
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "could not generate key")
+		return
+	}
+	if err := s.store.RotateAPIKey(r.Context(), user.ID, keyID, prefix, hash); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			respondError(w, http.StatusNotFound, "active key not found")
+			return
+		}
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.audit(r, user, "api_key.rotate", "api_key", keyID, prefix, map[string]any{
+		"scope":      "self",
+		"new_prefix": prefix,
+	})
+	respondJSON(w, http.StatusOK, map[string]any{"key": plain, "prefix": prefix})
 }
 
 func (s *Server) revokeAPIKey(w http.ResponseWriter, r *http.Request, user store.User) {
@@ -588,14 +646,9 @@ func (s *Server) updateAPIKeyControls(w http.ResponseWriter, r *http.Request, ad
 		respondError(w, http.StatusBadRequest, "budgets and rate limits cannot be negative")
 		return
 	}
-	var expires *time.Time
-	if strings.TrimSpace(req.ExpiresAt) != "" {
-		t, err := time.Parse(time.RFC3339, req.ExpiresAt)
-		if err != nil {
-			respondError(w, http.StatusBadRequest, "expires_at must be RFC3339")
-			return
-		}
-		expires = &t
+	expires, ok := parseAPIKeyExpiresAt(w, req.ExpiresAt, false)
+	if !ok {
+		return
 	}
 	key := store.APIKey{
 		ID:             r.PathValue("id"),
@@ -625,6 +678,28 @@ func (s *Server) updateAPIKeyControls(w http.ResponseWriter, r *http.Request, ad
 		"expires_at":          key.ExpiresAt,
 	})
 	respondJSON(w, http.StatusOK, map[string]any{"status": "ok"})
+}
+
+func (s *Server) rotateAPIKeyAdmin(w http.ResponseWriter, r *http.Request, admin store.User) {
+	keyID := r.PathValue("id")
+	plain, prefix, hash, err := auth.NewAPIKey()
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "could not generate key")
+		return
+	}
+	if err := s.store.RotateAPIKeyAdmin(r.Context(), keyID, prefix, hash); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			respondError(w, http.StatusNotFound, "active key not found")
+			return
+		}
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.audit(r, admin, "api_key.rotate", "api_key", keyID, prefix, map[string]any{
+		"scope":      "admin",
+		"new_prefix": prefix,
+	})
+	respondJSON(w, http.StatusOK, map[string]any{"key": plain, "prefix": prefix})
 }
 
 func (s *Server) revokeAPIKeyAdmin(w http.ResponseWriter, r *http.Request, admin store.User) {
@@ -2215,6 +2290,24 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, dest any) bool {
 		return false
 	}
 	return true
+}
+
+func parseAPIKeyExpiresAt(w http.ResponseWriter, raw string, requireFuture bool) (*time.Time, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, true
+	}
+	t, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "expires_at must be RFC3339")
+		return nil, false
+	}
+	t = t.UTC()
+	if requireFuture && !t.After(time.Now().UTC()) {
+		respondError(w, http.StatusBadRequest, "expires_at must be in the future")
+		return nil, false
+	}
+	return &t, true
 }
 
 func respondJSON(w http.ResponseWriter, status int, value any) {
