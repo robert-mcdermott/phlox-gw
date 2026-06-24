@@ -93,12 +93,45 @@ button {
   text-align: left;
   color: var(--muted);
   background: transparent;
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 
 .nav button.active {
   border-color: var(--border);
   color: var(--text);
   background: var(--surface-2);
+}
+
+.icon,
+.section-icon,
+.heading-icon,
+.tiny-icon,
+.btn-icon {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+}
+
+.section-icon,
+.heading-icon {
+  color: var(--accent);
+}
+
+.heading-icon {
+  width: 20px;
+  height: 20px;
+}
+
+.tiny-icon {
+  width: 13px;
+  height: 13px;
+}
+
+.btn-icon {
+  width: 15px;
+  height: 15px;
 }
 
 .main {
@@ -205,6 +238,12 @@ button {
   margin: 0;
 }
 
+.section-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .section-head span {
   color: var(--muted);
   font-size: 12px;
@@ -225,6 +264,73 @@ button {
 .form-field span {
   color: var(--muted);
   font-size: 12px;
+}
+
+.admin-subnav {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #170e20;
+  display: grid;
+  gap: 6px;
+  margin-top: 2px;
+  padding: 8px;
+}
+
+.admin-subnav button {
+  width: 100%;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px;
+  text-align: left;
+}
+
+.admin-subnav button:hover {
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text);
+}
+
+.admin-subnav button.active {
+  border-color: rgba(223, 60, 255, 0.32);
+  background: var(--surface-3);
+  color: var(--text);
+}
+
+.admin-subnav button small {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.admin-content {
+  min-width: 0;
+}
+
+.admin-heading {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: linear-gradient(180deg, rgba(36, 24, 47, 0.96), rgba(27, 19, 36, 0.96));
+  box-shadow: 0 14px 32px var(--shadow);
+  padding: 16px;
+  margin-bottom: 16px;
+}
+
+.admin-heading h3 {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 19px;
+}
+
+.admin-heading p {
+  margin: 8px 0 0;
+  color: var(--muted);
+  max-width: 820px;
 }
 
 .metric-strip {
@@ -387,6 +493,10 @@ select {
   color: var(--text);
   border-radius: 8px;
   padding: 9px 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
 }
 
 .btn.primary {

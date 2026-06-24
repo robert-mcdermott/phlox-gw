@@ -16,10 +16,22 @@ const state = {
   auditLogs: [],
   usageSeries: [],
   oidcConfig: { enabled: false, display_name: 'Entra ID' },
+  adminTab: 'operations',
   secret: '',
   error: '',
   notice: ''
 };
+
+const ADMIN_SECTIONS = [
+  { id: 'operations', label: 'Operations', icon: 'chart', description: '30-day usage, latency, cost, and error movement.' },
+  { id: 'providers', label: 'Providers', icon: 'server', description: 'Configure upstream providers and health state.' },
+  { id: 'models', label: 'Models', icon: 'cpu', description: 'Expose model routes, prices, context metadata, and health tests.' },
+  { id: 'users', label: 'Users', icon: 'users', description: 'Manage local users, departments, roles, and passwords.' },
+  { id: 'keys', label: 'API Keys', icon: 'key', description: 'Govern user-owned API keys, allowlists, budgets, and per-key limits.' },
+  { id: 'limits', label: 'Rate Limits', icon: 'gauge', description: 'Set RPM and TPM controls by user, department, provider, or model.' },
+  { id: 'budgets', label: 'Budgets', icon: 'wallet', description: 'Cap monthly spend by user or department.' },
+  { id: 'audit', label: 'Audit Log', icon: 'file', description: 'Review recent local auth, admin, and key lifecycle events.' }
+];
 
 const app = document.getElementById('app');
 
@@ -126,11 +138,11 @@ function loginView() {
 
 function shell(content) {
   const tabs = [
-    ['overview', 'Overview'],
-    ['keys', 'API Keys'],
-    ['models', 'Models'],
-    ['usage', 'Usage'],
-    ['admin', 'Admin']
+    ['overview', 'Overview', 'grid'],
+    ['keys', 'API Keys', 'key'],
+    ['models', 'Models', 'cpu'],
+    ['usage', 'Usage', 'chart'],
+    ['admin', 'Admin', 'shield']
   ];
   app.innerHTML = `
     <div class="app">
@@ -140,7 +152,10 @@ function shell(content) {
           <div><h1>Phlox-GW</h1><p>LLM gateway</p></div>
         </div>
         <nav class="nav">
-          ${tabs.map(([id, label]) => `<button data-tab="${id}" class="${state.tab === id ? 'active' : ''}">${label}</button>`).join('')}
+          ${tabs.map(([id, label, glyph]) => `
+            <button data-tab="${id}" class="${state.tab === id ? 'active' : ''}">${icon(glyph)}<span>${label}</span></button>
+            ${id === 'admin' ? adminSidebarMenu() : ''}
+          `).join('')}
         </nav>
       </aside>
       <main class="main">
@@ -161,6 +176,22 @@ function shell(content) {
     };
   });
   document.getElementById('logout').onclick = logout;
+}
+
+function adminSidebarMenu() {
+  if (state.tab !== 'admin' || state.user?.role !== 'admin') return '';
+  if (!ADMIN_SECTIONS.some(section => section.id === state.adminTab)) state.adminTab = 'operations';
+  return `
+    <div class="admin-subnav" aria-label="Admin sections">
+      ${ADMIN_SECTIONS.map(section => `
+        <button data-admin-tab="${section.id}" class="${state.adminTab === section.id ? 'active' : ''}">
+          ${icon(section.icon)}
+          <span>${esc(section.label)}</span>
+          ${adminSectionCount(section.id)}
+        </button>
+      `).join('')}
+    </div>
+  `;
 }
 
 function render() {
@@ -271,6 +302,111 @@ function usageView() {
 function adminView() {
   if (state.user.role !== 'admin') return `<section class="panel">Admin role required.</section>`;
   const usage = state.adminUsage || {};
+  if (!ADMIN_SECTIONS.some(section => section.id === state.adminTab)) state.adminTab = 'operations';
+  const active = ADMIN_SECTIONS.find(section => section.id === state.adminTab) || ADMIN_SECTIONS[0];
+  return `
+    <section class="admin-content">
+      <section class="admin-heading">
+        <div>
+          <h3>${icon(active.icon, 'heading-icon')}${esc(active.label)}</h3>
+          <p>${esc(active.description)}</p>
+        </div>
+      </section>
+      ${adminContentView(usage)}
+    </section>
+  `;
+}
+
+function adminContentView(usage) {
+  if (state.adminTab === 'providers') {
+    return `
+      ${adminPanel('Add provider', 'server', 'OpenAI-compatible covers Ollama, vLLM, LM Studio, OpenRouter, and LiteLLM. Bedrock uses AWS region and the AWS credential chain.', `
+        <div class="form-grid">
+          <input id="provider-id" placeholder="provider id, e.g. local-vllm" />
+          <input id="provider-name" placeholder="Display name" />
+          <select id="provider-type"><option value="openai">OpenAI-compatible</option><option value="anthropic">Anthropic-compatible</option><option value="bedrock">AWS Bedrock</option></select>
+          <input id="provider-base-url" placeholder="Base URL, e.g. http://localhost:8000/v1" />
+          <input id="provider-api-key-env" placeholder="API key env var, e.g. OPENAI_API_KEY" />
+          <input id="provider-api-key" placeholder="Direct API key (optional)" type="password" />
+          <input id="provider-aws-region" placeholder="AWS region for Bedrock, e.g. us-east-1" />
+          <label class="check"><input id="provider-enabled" type="checkbox" checked /> Enabled</label>
+          <button class="btn primary" id="create-provider">${icon('plus', 'btn-icon')}Add provider</button>
+        </div>
+      `)}
+      ${adminPanel('Providers', 'server', '', providerRows())}
+    `;
+  }
+  if (state.adminTab === 'models') {
+    return `
+      ${adminPanel('Add model', 'cpu', 'Route defaults to provider/model. Prices are USD per 1M tokens. Bedrock streaming is not enabled yet.', `
+        <div class="form-grid">
+          <select id="model-provider">${state.providers.map(p => `<option value="${esc(p.id)}">${esc(p.id)} · ${esc(p.name)}</option>`).join('')}</select>
+          <input id="model-model-id" placeholder="Upstream model id" />
+          <input id="model-route" placeholder="Route id (optional)" />
+          <input id="model-display-name" placeholder="Display name" />
+          <input id="model-input-cost" placeholder="Input $ / 1M" type="number" min="0" step="0.0001" value="0" />
+          <input id="model-output-cost" placeholder="Output $ / 1M" type="number" min="0" step="0.0001" value="0" />
+          <input id="model-context" placeholder="Context window" type="number" min="0" step="1" value="0" />
+          <label class="check"><input id="model-streaming" type="checkbox" checked /> Streaming</label>
+          <label class="check"><input id="model-enabled" type="checkbox" checked /> Enabled</label>
+          <button class="btn primary" id="create-model">${icon('plus', 'btn-icon')}Add model</button>
+        </div>
+      `)}
+      ${adminPanel('Models and pricing', 'cpu', '', modelRows())}
+    `;
+  }
+  if (state.adminTab === 'users') {
+    return `
+      ${adminPanel('Add user', 'users', 'Local users can mint their own API keys after signing in.', `
+        <div class="form-grid">
+          <input id="user-username" placeholder="Username" />
+          <input id="user-password" placeholder="Temporary password" type="password" />
+          <input id="user-email" placeholder="Email" />
+          <input id="user-display" placeholder="Display name" />
+          <input id="user-department" placeholder="Department" />
+          <select id="user-role"><option value="user">User</option><option value="admin">Admin</option></select>
+          <button class="btn primary" id="create-user">${icon('plus', 'btn-icon')}Create user</button>
+        </div>
+      `)}
+      ${adminPanel('Users', 'users', '', userRows())}
+    `;
+  }
+  if (state.adminTab === 'keys') {
+    return adminPanel('API key governance', 'key', 'Empty allowlist means all enabled models. Limits of 0 are unlimited.', keyGovernanceRows());
+  }
+  if (state.adminTab === 'limits') {
+    return `
+      ${adminPanel('Add rate limit', 'gauge', 'Scope values use user id, department name, provider id, or model route. Limits of 0 are unlimited.', `
+        <div class="form-grid">
+          <label class="form-field"><span>Scope</span><select id="rate-scope-type"><option value="user">User</option><option value="department">Department</option><option value="provider">Provider</option><option value="model">Model</option></select></label>
+          <label class="form-field"><span>Scope value</span><input id="rate-scope-value" placeholder="User id, department, provider, or model" list="rate-limit-values" /></label>
+          <datalist id="rate-limit-values">${rateLimitValueOptions()}</datalist>
+          <label class="form-field"><span>Requests/min</span><input id="rate-rpm" aria-label="Requests per minute limit" placeholder="RPM limit" type="number" min="0" step="1" value="0" /></label>
+          <label class="form-field"><span>Tokens/min</span><input id="rate-tpm" aria-label="Tokens per minute limit" placeholder="TPM limit" type="number" min="0" step="1" value="0" /></label>
+          <button class="btn primary" id="create-rate-limit">${icon('plus', 'btn-icon')}Create limit</button>
+        </div>
+      `)}
+      ${adminPanel('Rate limits', 'gauge', '', rateLimitRows())}
+    `;
+  }
+  if (state.adminTab === 'budgets') {
+    return `
+      ${adminPanel('Add budget', 'wallet', 'User budgets use the user id shown in Users. Department budgets use the department name.', `
+        <div class="form-grid">
+          <select id="budget-scope-type"><option value="department">Department</option><option value="user">User</option></select>
+          <input id="budget-scope-value" placeholder="Department name or user id" list="budget-values" />
+          <datalist id="budget-values">${budgetValueOptions()}</datalist>
+          <input id="budget-limit" placeholder="Monthly limit USD" type="number" min="0" step="0.01" />
+          <input id="budget-warn" placeholder="Warn %" type="number" min="1" max="100" step="1" value="90" />
+          <button class="btn primary" id="create-budget">${icon('plus', 'btn-icon')}Create budget</button>
+        </div>
+      `)}
+      ${adminPanel('Budgets', 'wallet', '', budgetRows())}
+    `;
+  }
+  if (state.adminTab === 'audit') {
+    return adminPanel('Audit log', 'file', 'Recent local auth, admin, and API key lifecycle events.', auditLogRows());
+  }
   return `
     <section class="grid">
       ${card('Users', state.users.length, 'Local accounts')}
@@ -285,96 +421,30 @@ function adminView() {
       <div class="section-head"><h3>Operations</h3><span>Last 30 days</span></div>
       ${monitoringView()}
     </section>
+  `;
+}
+
+function adminSectionCount(id) {
+  const counts = {
+    providers: state.providers.length,
+    models: state.adminModels.length,
+    users: state.users.length,
+    keys: state.adminKeys.length,
+    limits: state.rateLimits.length,
+    budgets: state.budgets.length,
+    audit: state.auditLogs.length
+  };
+  return counts[id] === undefined ? '' : `<small>${counts[id]}</small>`;
+}
+
+function adminPanel(title, glyph, note, content) {
+  return `
     <section class="panel">
-      <div class="section-head"><h3>Add provider</h3><span>OpenAI-compatible covers Ollama, vLLM, LM Studio, OpenRouter, and LiteLLM. Bedrock uses AWS region and the AWS credential chain.</span></div>
-      <div class="form-grid">
-        <input id="provider-id" placeholder="provider id, e.g. local-vllm" />
-        <input id="provider-name" placeholder="Display name" />
-        <select id="provider-type"><option value="openai">OpenAI-compatible</option><option value="anthropic">Anthropic-compatible</option><option value="bedrock">AWS Bedrock</option></select>
-        <input id="provider-base-url" placeholder="Base URL, e.g. http://localhost:8000/v1" />
-        <input id="provider-api-key-env" placeholder="API key env var, e.g. OPENAI_API_KEY" />
-        <input id="provider-api-key" placeholder="Direct API key (optional)" type="password" />
-        <input id="provider-aws-region" placeholder="AWS region for Bedrock, e.g. us-east-1" />
-        <label class="check"><input id="provider-enabled" type="checkbox" checked /> Enabled</label>
-        <button class="btn primary" id="create-provider">Add provider</button>
+      <div class="section-head">
+        <h3 class="section-title">${icon(glyph, 'section-icon')}${esc(title)}</h3>
+        ${note ? `<span>${esc(note)}</span>` : ''}
       </div>
-    </section>
-    <section class="panel">
-      <h3>Providers</h3>
-      ${providerRows()}
-    </section>
-    <section class="panel">
-      <div class="section-head"><h3>Add model</h3><span>Route defaults to provider/model. Prices are USD per 1M tokens. Bedrock streaming is not enabled yet.</span></div>
-      <div class="form-grid">
-        <select id="model-provider">${state.providers.map(p => `<option value="${esc(p.id)}">${esc(p.id)} · ${esc(p.name)}</option>`).join('')}</select>
-        <input id="model-model-id" placeholder="Upstream model id" />
-        <input id="model-route" placeholder="Route id (optional)" />
-        <input id="model-display-name" placeholder="Display name" />
-        <input id="model-input-cost" placeholder="Input $ / 1M" type="number" min="0" step="0.0001" value="0" />
-        <input id="model-output-cost" placeholder="Output $ / 1M" type="number" min="0" step="0.0001" value="0" />
-        <input id="model-context" placeholder="Context window" type="number" min="0" step="1" value="0" />
-        <label class="check"><input id="model-streaming" type="checkbox" checked /> Streaming</label>
-        <label class="check"><input id="model-enabled" type="checkbox" checked /> Enabled</label>
-        <button class="btn primary" id="create-model">Add model</button>
-      </div>
-    </section>
-    <section class="panel">
-      <h3>Models and pricing</h3>
-      ${modelRows()}
-    </section>
-    <section class="panel">
-      <div class="section-head"><h3>Add user</h3><span>Local users can mint their own API keys after signing in.</span></div>
-      <div class="form-grid">
-        <input id="user-username" placeholder="Username" />
-        <input id="user-password" placeholder="Temporary password" type="password" />
-        <input id="user-email" placeholder="Email" />
-        <input id="user-display" placeholder="Display name" />
-        <input id="user-department" placeholder="Department" />
-        <select id="user-role"><option value="user">User</option><option value="admin">Admin</option></select>
-        <button class="btn primary" id="create-user">Create user</button>
-      </div>
-    </section>
-    <section class="panel">
-      <h3>Users</h3>
-      ${userRows()}
-    </section>
-    <section class="panel">
-      <div class="section-head"><h3>API key governance</h3><span>Empty allowlist means all enabled models. Limits of 0 are unlimited.</span></div>
-      ${keyGovernanceRows()}
-    </section>
-    <section class="panel">
-      <div class="section-head"><h3>Add rate limit</h3><span>Scope values use user id, department name, provider id, or model route. Limits of 0 are unlimited.</span></div>
-      <div class="form-grid">
-        <label class="form-field"><span>Scope</span><select id="rate-scope-type"><option value="user">User</option><option value="department">Department</option><option value="provider">Provider</option><option value="model">Model</option></select></label>
-        <label class="form-field"><span>Scope value</span><input id="rate-scope-value" placeholder="User id, department, provider, or model" list="rate-limit-values" /></label>
-        <datalist id="rate-limit-values">${rateLimitValueOptions()}</datalist>
-        <label class="form-field"><span>Requests/min</span><input id="rate-rpm" aria-label="Requests per minute limit" placeholder="RPM limit" type="number" min="0" step="1" value="0" /></label>
-        <label class="form-field"><span>Tokens/min</span><input id="rate-tpm" aria-label="Tokens per minute limit" placeholder="TPM limit" type="number" min="0" step="1" value="0" /></label>
-        <button class="btn primary" id="create-rate-limit">Create limit</button>
-      </div>
-    </section>
-    <section class="panel">
-      <h3>Rate limits</h3>
-      ${rateLimitRows()}
-    </section>
-    <section class="panel">
-      <div class="section-head"><h3>Add budget</h3><span>User budgets use the user id shown above; department budgets use the department name.</span></div>
-      <div class="form-grid">
-        <select id="budget-scope-type"><option value="department">Department</option><option value="user">User</option></select>
-        <input id="budget-scope-value" placeholder="Department name or user id" list="budget-values" />
-        <datalist id="budget-values">${budgetValueOptions()}</datalist>
-        <input id="budget-limit" placeholder="Monthly limit USD" type="number" min="0" step="0.01" />
-        <input id="budget-warn" placeholder="Warn %" type="number" min="1" max="100" step="1" value="90" />
-        <button class="btn primary" id="create-budget">Create budget</button>
-      </div>
-    </section>
-    <section class="panel">
-      <h3>Budgets</h3>
-      ${budgetRows()}
-    </section>
-    <section class="panel">
-      <div class="section-head"><h3>Audit log</h3><span>Recent local auth, admin, and API key lifecycle events.</span></div>
-      ${auditLogRows()}
+      ${content}
     </section>
   `;
 }
@@ -608,6 +678,12 @@ function auditLogRows() {
 }
 
 function afterRender() {
+  document.querySelectorAll('[data-admin-tab]').forEach((btn) => {
+    btn.onclick = () => {
+      state.adminTab = btn.dataset.adminTab;
+      render();
+    };
+  });
   const create = document.getElementById('create-key');
   if (create) {
     create.onclick = async () => {
@@ -893,6 +969,23 @@ render = function () {
   oldRender();
   afterRender();
 };
+
+function icon(name, className = 'icon') {
+  const paths = {
+    grid: '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',
+    key: '<path d="M15 7.5a5 5 0 1 0-4.1 4.9L13 14.5V17h2.5v2.5H18V22h3v-3.2l-6-6"/><circle cx="7.5" cy="7.5" r="1.2"/>',
+    cpu: '<rect x="7" y="7" width="10" height="10" rx="2"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M1 9h3M1 15h3M20 9h3M20 15h3"/>',
+    chart: '<path d="M4 19V5"/><path d="M4 19h16"/><path d="M8 16v-5"/><path d="M12 16V8"/><path d="M16 16v-9"/>',
+    shield: '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/><path d="M9 12l2 2 4-5"/>',
+    server: '<rect x="3" y="4" width="18" height="6" rx="2"/><rect x="3" y="14" width="18" height="6" rx="2"/><path d="M7 7h.01M7 17h.01"/>',
+    users: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.9"/><path d="M16 3.1a4 4 0 0 1 0 7.8"/>',
+    wallet: '<path d="M3 7a3 3 0 0 1 3-3h14v16H6a3 3 0 0 1-3-3V7Z"/><path d="M3 7h17"/><path d="M16 13h4v4h-4a2 2 0 0 1 0-4Z"/>',
+    gauge: '<path d="M4 14a8 8 0 1 1 16 0"/><path d="M12 14l4-4"/><path d="M5 20h14"/><path d="M7 14h.01M17 14h.01"/>',
+    file: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6"/><path d="M8 13h8M8 17h8"/>',
+    plus: '<path d="M12 5v14M5 12h14"/>'
+  };
+  return `<svg class="${className}" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${paths[name] || paths.grid}</svg>`;
+}
 
 function card(label, value, sub) {
   return `<div class="card"><div class="label">${esc(label)}</div><div class="value">${esc(String(value))}</div><div class="sub">${esc(sub)}</div></div>`;
