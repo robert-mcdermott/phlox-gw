@@ -1199,6 +1199,131 @@ func TestAnthropicMessagesStreamsAndRecordsUsage(t *testing.T) {
 	}
 }
 
+func TestAnthropicMessagesAcceptsXAPIKeyAndTranslatesOpenAICompatibleRoute(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer st.Close()
+	user := store.User{
+		ID:           "user_anthropic_openai",
+		Username:     "anthropic-openai-user",
+		Department:   "AI",
+		Role:         "user",
+		PasswordHash: "unused",
+		AuthProvider: "local",
+		IsActive:     true,
+	}
+	if err := st.CreateUser(ctx, user); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	plain, prefix, keyHash, err := auth.NewAPIKey()
+	if err != nil {
+		t.Fatalf("NewAPIKey: %v", err)
+	}
+	if err := st.CreateAPIKey(ctx, store.APIKey{ID: "key_anthropic_openai", UserID: user.ID, Name: "Anthropic OpenAI key", Prefix: prefix, KeyHash: keyHash}); err != nil {
+		t.Fatalf("CreateAPIKey: %v", err)
+	}
+	provider := store.Provider{ID: "local-ollama", Name: "Local Ollama", Type: "openai", BaseURL: "http://ollama.test/v1", Enabled: true}
+	if err := st.CreateProvider(ctx, provider); err != nil {
+		t.Fatalf("CreateProvider: %v", err)
+	}
+	model := store.Model{
+		ID:                   "model_anthropic_openai",
+		ProviderID:           provider.ID,
+		ModelID:              "glm-5.2:cloud",
+		Route:                "glm-5.2:cloud",
+		DisplayName:          "GLM 5.2",
+		InputCostPerMillion:  1,
+		OutputCostPerMillion: 2,
+		SupportsStreaming:    true,
+		Enabled:              true,
+	}
+	if err := st.CreateModel(ctx, model); err != nil {
+		t.Fatalf("CreateModel: %v", err)
+	}
+	upstreamHits := 0
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		upstreamHits++
+		if r.URL.Host != "ollama.test" || r.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("unexpected upstream target: %s", r.URL.String())
+		}
+		var req map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("upstream decode: %v", err)
+		}
+		if req["model"] != "glm-5.2:cloud" || req["max_tokens"] != float64(64) {
+			t.Fatalf("unexpected upstream request: %#v", req)
+		}
+		messages, _ := req["messages"].([]any)
+		if len(messages) != 1 {
+			t.Fatalf("upstream messages = %#v", req["messages"])
+		}
+		msg, _ := messages[0].(map[string]any)
+		if msg["role"] != "user" || msg["content"] != "ping" {
+			t.Fatalf("unexpected upstream message: %#v", msg)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body: io.NopCloser(strings.NewReader(`{
+				"id":"chatcmpl_anthropic_translate",
+				"object":"chat.completion",
+				"model":"glm-5.2:cloud",
+				"choices":[{"index":0,"message":{"role":"assistant","content":"","reasoning":"pong"},"finish_reason":"stop"}],
+				"usage":{"prompt_tokens":4,"completion_tokens":2,"total_tokens":6}
+			}`)),
+			Request: r,
+		}, nil
+	})
+	handler, err := New(Options{
+		Config: config.Config{SessionSecret: "test-secret"},
+		Store:  st,
+		Frontend: fstest.MapFS{
+			"frontend/dist/index.html": &fstest.MapFile{Data: []byte("<html></html>")},
+		},
+		HTTPClient: &http.Client{Transport: transport},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	resp := jsonRequestWithHeaders(t, handler, http.MethodPost, "/anthropic/v1/messages", map[string]string{
+		"x-api-key":         plain,
+		"anthropic-version": "2023-06-01",
+	}, map[string]any{
+		"model":      model.Route,
+		"max_tokens": 64,
+		"messages":   []map[string]string{{"role": "user", "content": "ping"}},
+	})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", resp.Code, resp.Body.String())
+	}
+	if upstreamHits != 1 {
+		t.Fatalf("upstream hits = %d", upstreamHits)
+	}
+	var body map[string]any
+	decodeRecorder(t, resp, &body)
+	if body["type"] != "message" || body["role"] != "assistant" || body["model"] != "glm-5.2:cloud" {
+		t.Fatalf("unexpected anthropic response: %#v", body)
+	}
+	content, _ := body["content"].([]any)
+	if len(content) != 1 {
+		t.Fatalf("unexpected content: %#v", body["content"])
+	}
+	textBlock, _ := content[0].(map[string]any)
+	if textBlock["type"] != "text" || textBlock["text"] != "pong" {
+		t.Fatalf("unexpected content block: %#v", textBlock)
+	}
+	usage, err := st.UsageForUser(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("UsageForUser: %v", err)
+	}
+	if usage.Requests != 1 || usage.InputTokens != 4 || usage.OutputTokens != 2 || usage.TotalTokens != 6 || usage.CostUSD != 0.000008 {
+		t.Fatalf("unexpected stored usage: %#v", usage)
+	}
+}
+
 func TestOpenAIChatCompletionsFallsBackAfterPrimaryProviderFailure(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
@@ -1860,6 +1985,15 @@ func newOpenAIGuardrailFixture(t *testing.T, policy store.GuardrailPolicy, round
 
 func jsonRequest(t *testing.T, handler http.Handler, method, path, token string, body any) *httptest.ResponseRecorder {
 	t.Helper()
+	headers := map[string]string{}
+	if token != "" {
+		headers["Authorization"] = "Bearer " + token
+	}
+	return jsonRequestWithHeaders(t, handler, method, path, headers, body)
+}
+
+func jsonRequestWithHeaders(t *testing.T, handler http.Handler, method, path string, headers map[string]string, body any) *httptest.ResponseRecorder {
+	t.Helper()
 	var reader io.Reader
 	if body != nil {
 		payload, err := json.Marshal(body)
@@ -1870,8 +2004,8 @@ func jsonRequest(t *testing.T, handler http.Handler, method, path, token string,
 	}
 	req := httptest.NewRequest(method, path, reader)
 	req.Header.Set("Content-Type", "application/json")
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
+	for key, value := range headers {
+		req.Header.Set(key, value)
 	}
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)

@@ -1601,8 +1601,8 @@ func (s *Server) anthropicMessages(w http.ResponseWriter, r *http.Request, user 
 	}
 	candidates := plan.Candidates
 	route := candidates[0]
-	if route.Provider.Type != "anthropic" {
-		anthropicError(w, http.StatusNotImplemented, "model is not on an Anthropic-compatible provider")
+	if route.Provider.Type != "anthropic" && route.Provider.Type != "openai" && route.Provider.Type != "bedrock" {
+		anthropicError(w, http.StatusNotImplemented, "model is not on a supported provider")
 		return
 	}
 	if blocked, status, reason, _ := s.checkAPIKeyPolicy(r.Context(), key, route); blocked {
@@ -1620,6 +1620,10 @@ func (s *Server) anthropicMessages(w http.ResponseWriter, r *http.Request, user 
 	policy := reliabilityPolicy(plan.Requested.Model)
 	requestID := requestID()
 	if stream, _ := raw["stream"].(bool); stream {
+		if !hasAnthropicCandidate(candidates) {
+			anthropicError(w, http.StatusNotImplemented, "streaming Anthropic-to-OpenAI translation is not supported yet; use non-streaming or /v1/chat/completions")
+			return
+		}
 		eventMeta := requestEventFromHTTP(r, true)
 		selected, status, reason, ok := s.selectAnthropicStreamCandidate(r.Context(), candidates, user, key, policy)
 		if !ok {
@@ -1761,7 +1765,7 @@ func (s *Server) executeAnthropicPlan(ctx context.Context, candidates []store.Ro
 	var last upstreamResult
 	attemptSeq := 0
 	for idx, route := range candidates {
-		if route.Provider.Type != "anthropic" {
+		if route.Provider.Type != "anthropic" && route.Provider.Type != "openai" && route.Provider.Type != "bedrock" {
 			continue
 		}
 		if policy.HealthRoutingEnabled {
@@ -1779,7 +1783,12 @@ func (s *Server) executeAnthropicPlan(ctx context.Context, candidates []store.Ro
 		attempts := policy.RetryAttempts + 1
 		for attempt := 0; attempt < attempts; attempt++ {
 			attemptSeq++
-			result := s.callAnthropicNonStreaming(ctx, route, raw, inbound, policy.RequestTimeout)
+			var result upstreamResult
+			if route.Provider.Type == "anthropic" {
+				result = s.callAnthropicNonStreaming(ctx, route, raw, inbound, policy.RequestTimeout)
+			} else {
+				result = s.callAnthropicViaOpenAINonStreaming(ctx, route, raw, policy.RequestTimeout)
+			}
 			s.recordProviderOutcome(ctx, route.Provider.ID, result.Status, result.ErrorText)
 			usage := parseAnthropicUsage(result.Body)
 			result = applyOutputGuardrailsToResult(guardrails, result)
@@ -1795,7 +1804,7 @@ func (s *Server) executeAnthropicPlan(ctx context.Context, candidates []store.Ro
 		}
 	}
 	if last.Status == 0 {
-		return upstreamResult{Status: http.StatusServiceUnavailable, ErrorText: "no available Anthropic-compatible provider candidate"}
+		return upstreamResult{Status: http.StatusServiceUnavailable, ErrorText: "no available provider candidate for Anthropic-compatible request"}
 	}
 	return last
 }
@@ -1850,6 +1859,15 @@ func (s *Server) selectAnthropicStreamCandidate(ctx context.Context, candidates 
 		return route, 0, "", true
 	}
 	return store.RoutedModel{}, http.StatusServiceUnavailable, "no available streaming Anthropic-compatible provider candidate", false
+}
+
+func hasAnthropicCandidate(candidates []store.RoutedModel) bool {
+	for _, route := range candidates {
+		if route.Provider.Type == "anthropic" {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) checkRouteAdmission(ctx context.Context, user store.User, key store.APIKey, route store.RoutedModel) (bool, int, string, string) {
@@ -1956,6 +1974,256 @@ func (s *Server) callAnthropicNonStreaming(parent context.Context, route store.R
 		result.ErrorText = string(responseBody)
 	}
 	return result
+}
+
+func (s *Server) callAnthropicViaOpenAINonStreaming(parent context.Context, route store.RoutedModel, raw map[string]any, timeout time.Duration) upstreamResult {
+	openAIRaw, err := anthropicRequestToOpenAI(raw)
+	if err != nil {
+		return upstreamResult{Route: route, Protocol: "anthropic", Status: http.StatusBadRequest, ErrorText: err.Error()}
+	}
+	result := s.callOpenAINonStreaming(parent, route, openAIRaw, timeout)
+	if result.Status < 200 || result.Status >= 300 {
+		return upstreamResult{
+			Route:     route,
+			Protocol:  "anthropic",
+			Status:    result.Status,
+			ErrorText: providerErrorText(result.Body, result.ErrorText),
+			LatencyMS: result.LatencyMS,
+		}
+	}
+	body, err := anthropicResponseFromOpenAI(route, result.Body)
+	if err != nil {
+		return upstreamResult{Route: route, Protocol: "anthropic", Status: http.StatusBadGateway, ErrorText: "could not translate OpenAI-compatible response: " + err.Error(), LatencyMS: result.LatencyMS}
+	}
+	return upstreamResult{
+		Route:     route,
+		Protocol:  "anthropic",
+		Status:    result.Status,
+		Headers:   http.Header{"Content-Type": []string{"application/json"}},
+		Body:      body,
+		LatencyMS: result.LatencyMS,
+	}
+}
+
+func anthropicRequestToOpenAI(raw map[string]any) (map[string]any, error) {
+	out := map[string]any{
+		"model":  raw["model"],
+		"stream": false,
+	}
+	messages := []any{}
+	if system, ok := raw["system"]; ok {
+		if content, ok := anthropicContentToOpenAI(system); ok {
+			messages = append(messages, map[string]any{"role": "system", "content": content})
+		}
+	}
+	rawMessages, ok := raw["messages"].([]any)
+	if !ok || len(rawMessages) == 0 {
+		return nil, errors.New("messages must be a non-empty array")
+	}
+	for _, item := range rawMessages {
+		msg, ok := item.(map[string]any)
+		if !ok {
+			return nil, errors.New("messages entries must be objects")
+		}
+		role, _ := msg["role"].(string)
+		if role != "assistant" && role != "system" {
+			role = "user"
+		}
+		content, _ := anthropicContentToOpenAI(msg["content"])
+		messages = append(messages, map[string]any{"role": role, "content": content})
+	}
+	out["messages"] = messages
+	if v, ok := raw["max_tokens"]; ok {
+		out["max_tokens"] = v
+	}
+	for _, key := range []string{"temperature", "top_p", "presence_penalty", "frequency_penalty"} {
+		if v, ok := raw[key]; ok {
+			out[key] = v
+		}
+	}
+	if stop, ok := raw["stop_sequences"]; ok {
+		out["stop"] = stop
+	}
+	return out, nil
+}
+
+func anthropicContentToOpenAI(value any) (any, bool) {
+	switch v := value.(type) {
+	case string:
+		return v, strings.TrimSpace(v) != ""
+	case []any:
+		parts := make([]any, 0, len(v))
+		for _, item := range v {
+			block, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			switch block["type"] {
+			case "text":
+				text, _ := block["text"].(string)
+				parts = append(parts, map[string]any{"type": "text", "text": text})
+			case "image":
+				source, _ := block["source"].(map[string]any)
+				if source["type"] != "base64" {
+					continue
+				}
+				mediaType, _ := source["media_type"].(string)
+				data, _ := source["data"].(string)
+				if mediaType == "" || data == "" {
+					continue
+				}
+				parts = append(parts, map[string]any{
+					"type": "image_url",
+					"image_url": map[string]any{
+						"url": "data:" + mediaType + ";base64," + data,
+					},
+				})
+			}
+		}
+		if len(parts) == 0 {
+			return "", false
+		}
+		return parts, true
+	default:
+		return "", false
+	}
+}
+
+func anthropicResponseFromOpenAI(route store.RoutedModel, body []byte) ([]byte, error) {
+	var raw map[string]any
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return nil, err
+	}
+	choices, _ := raw["choices"].([]any)
+	var message map[string]any
+	var finishReason string
+	if len(choices) > 0 {
+		choice, _ := choices[0].(map[string]any)
+		message, _ = choice["message"].(map[string]any)
+		finishReason, _ = choice["finish_reason"].(string)
+	}
+	content := openAIContentToAnthropic(message["content"])
+	if anthropicTextContentEmpty(content) {
+		if reasoning, _ := firstPresent(message, "reasoning", "reasoning_content").(string); strings.TrimSpace(reasoning) != "" {
+			content = []map[string]any{{"type": "text", "text": reasoning}}
+		}
+	}
+	usage, _ := raw["usage"].(map[string]any)
+	inputTokens := intValue(firstPresent(usage, "prompt_tokens", "input_tokens"))
+	outputTokens := intValue(firstPresent(usage, "completion_tokens", "output_tokens"))
+	id, _ := raw["id"].(string)
+	if id == "" {
+		id = "msg_" + requestID()
+	}
+	model, _ := raw["model"].(string)
+	if model == "" {
+		model = route.Model.Route
+	}
+	response := map[string]any{
+		"id":            id,
+		"type":          "message",
+		"role":          "assistant",
+		"model":         model,
+		"content":       content,
+		"stop_reason":   anthropicStopReason(finishReason),
+		"stop_sequence": nil,
+		"usage": map[string]any{
+			"input_tokens":  inputTokens,
+			"output_tokens": outputTokens,
+		},
+	}
+	return json.Marshal(response)
+}
+
+func openAIContentToAnthropic(value any) []map[string]any {
+	switch v := value.(type) {
+	case string:
+		return []map[string]any{{"type": "text", "text": v}}
+	case []any:
+		out := make([]map[string]any, 0, len(v))
+		for _, item := range v {
+			block, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			if block["type"] == "text" {
+				text, _ := block["text"].(string)
+				out = append(out, map[string]any{"type": "text", "text": text})
+			}
+		}
+		if len(out) > 0 {
+			return out
+		}
+	}
+	return []map[string]any{{"type": "text", "text": ""}}
+}
+
+func anthropicTextContentEmpty(blocks []map[string]any) bool {
+	if len(blocks) == 0 {
+		return true
+	}
+	for _, block := range blocks {
+		if text, _ := block["text"].(string); strings.TrimSpace(text) != "" {
+			return false
+		}
+	}
+	return true
+}
+
+func anthropicStopReason(reason string) string {
+	switch reason {
+	case "length":
+		return "max_tokens"
+	case "tool_calls":
+		return "tool_use"
+	case "content_filter":
+		return "refusal"
+	default:
+		return "end_turn"
+	}
+}
+
+func firstPresent(m map[string]any, keys ...string) any {
+	for _, key := range keys {
+		if value, ok := m[key]; ok {
+			return value
+		}
+	}
+	return nil
+}
+
+func intValue(value any) int {
+	switch v := value.(type) {
+	case int:
+		return v
+	case int64:
+		return int(v)
+	case float64:
+		return int(v)
+	case json.Number:
+		n, _ := v.Int64()
+		return int(n)
+	default:
+		return 0
+	}
+}
+
+func providerErrorText(body []byte, fallback string) string {
+	if len(body) == 0 {
+		return fallbackString(fallback, "provider unavailable")
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(body, &raw); err == nil {
+		if errObj, ok := raw["error"].(map[string]any); ok {
+			if msg, ok := errObj["message"].(string); ok && msg != "" {
+				return msg
+			}
+		}
+		if msg, ok := raw["message"].(string); ok && msg != "" {
+			return msg
+		}
+	}
+	return fallbackString(fallback, string(body))
 }
 
 func (s *Server) callBedrockOpenAINonStreaming(parent context.Context, route store.RoutedModel, raw map[string]any, timeout time.Duration) upstreamResult {
@@ -3893,14 +4161,14 @@ func (s *Server) requireAdmin(next func(http.ResponseWriter, *http.Request, stor
 
 func (s *Server) requireAPIKey(next func(http.ResponseWriter, *http.Request, store.User, store.APIKey)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		token := bearerToken(r)
+		token := gatewayAPIKeyToken(r)
 		if token == "" {
-			openAIError(w, http.StatusUnauthorized, "missing API key", "authentication_error")
+			gatewayAuthError(w, r, http.StatusUnauthorized, "missing API key")
 			return
 		}
 		user, key, err := s.store.ResolveAPIKey(r.Context(), auth.HashAPIKey(token), time.Now().UTC())
 		if err != nil {
-			openAIError(w, http.StatusUnauthorized, "invalid API key", "authentication_error")
+			gatewayAuthError(w, r, http.StatusUnauthorized, "invalid API key")
 			return
 		}
 		next(w, r, user, key)
@@ -3995,6 +4263,21 @@ func bearerToken(r *http.Request) string {
 		return ""
 	}
 	return strings.TrimSpace(header[7:])
+}
+
+func gatewayAPIKeyToken(r *http.Request) string {
+	if token := bearerToken(r); token != "" {
+		return token
+	}
+	return strings.TrimSpace(r.Header.Get("x-api-key"))
+}
+
+func gatewayAuthError(w http.ResponseWriter, r *http.Request, status int, message string) {
+	if strings.HasPrefix(r.URL.Path, "/anthropic/") {
+		anthropicError(w, status, message)
+		return
+	}
+	openAIError(w, status, message, "authentication_error")
 }
 
 func publicUser(u store.User) map[string]any {

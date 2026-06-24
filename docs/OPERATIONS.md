@@ -209,7 +209,9 @@ Runtime environment:
 export ANTHROPIC_API_KEY="sk-ant-..."
 ```
 
-Phlox-GW appends `/v1/messages` for Anthropic-compatible providers.
+For provider pass-through, Phlox-GW appends `/v1/messages` for Anthropic-compatible
+providers. The client-facing `/anthropic/v1/messages` endpoint can also translate
+non-streaming Anthropic Messages requests to OpenAI-compatible and Bedrock routes.
 
 ### AWS Bedrock
 
