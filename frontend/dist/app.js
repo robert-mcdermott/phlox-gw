@@ -29,6 +29,8 @@ const state = {
   adminModels: [],
   auditLogs: [],
   usageSeries: [],
+  usageDrilldowns: { providers: [], models: [] },
+  budgetBurnDown: [],
   oidcConfig: { enabled: false, display_name: 'Entra ID' },
   adminTab: 'operations',
   secret: '',
@@ -81,7 +83,7 @@ async function refresh() {
       state.keys = keys || [];
       state.usage = usage;
       if (state.user.role === 'admin') {
-        const [providers, users, budgets, rateLimits, adminUsage, adminModels, adminKeys, auditLogs, usageSeries] = await Promise.all([
+        const [providers, users, budgets, rateLimits, adminUsage, adminModels, adminKeys, auditLogs, usageSeries, usageDrilldowns, budgetBurnDown] = await Promise.all([
           api('/api/admin/providers'),
           api('/api/admin/users'),
           api('/api/admin/budgets'),
@@ -90,7 +92,9 @@ async function refresh() {
           api('/api/admin/models'),
           api('/api/admin/api-keys'),
           api('/api/admin/audit-log?limit=100'),
-          api('/api/admin/usage/timeseries?days=30')
+          api('/api/admin/usage/timeseries?days=30'),
+          api('/api/admin/usage/drilldowns?days=30'),
+          api('/api/admin/budgets/burndown')
         ]);
         state.providers = providers || [];
         state.users = users || [];
@@ -101,6 +105,8 @@ async function refresh() {
         state.adminKeys = adminKeys || [];
         state.auditLogs = auditLogs || [];
         state.usageSeries = usageSeries || [];
+        state.usageDrilldowns = usageDrilldowns || { providers: [], models: [] };
+        state.budgetBurnDown = budgetBurnDown || [];
       }
     }
   } catch (err) {
@@ -447,6 +453,7 @@ function adminContentView(usage) {
           <button class="btn primary" id="create-budget">${icon('plus', 'btn-icon')}Create budget</button>
         </div>
       `)}
+      ${adminPanel('Budget burn-down', 'chart', 'Current month spend, remaining budget, and projected month-end run rate.', budgetBurnDownView())}
       ${adminPanel('Budgets', 'wallet', '', budgetRows())}
     `;
   }
@@ -466,6 +473,14 @@ function adminContentView(usage) {
     <section class="panel">
       <div class="section-head"><h3>Operations</h3><span>Last 30 days</span></div>
       ${monitoringView()}
+    </section>
+    <section class="panel">
+      <div class="section-head"><h3>Provider drilldown</h3><span>Last 30 days</span></div>
+      ${providerDrilldownRows()}
+    </section>
+    <section class="panel">
+      <div class="section-head"><h3>Model drilldown</h3><span>Last 30 days</span></div>
+      ${modelDrilldownRows()}
     </section>
   `;
 }
@@ -537,6 +552,41 @@ function barChart(title, rows, field, formatter) {
       <div class="chart-foot"><span>${esc(rows[0]?.date || '')}</span><span>${esc(rows[rows.length - 1]?.date || '')}</span></div>
     </div>
   `;
+}
+
+function providerDrilldownRows() {
+  const rows = state.usageDrilldowns?.providers || [];
+  if (!rows.length) return '<p>No provider usage in the last 30 days.</p>';
+  return drilldownTable(['Provider', 'Requests', 'Errors', 'Error rate', 'Tokens', 'Cost', 'Avg latency', 'Last used'], rows.map(row => [
+    `<span class="mono">${esc(row.provider_id || '(none)')}</span>`,
+    compact(row.requests),
+    compact(row.errors),
+    percent(row.error_rate),
+    compact(row.total_tokens),
+    money(row.cost_usd),
+    `${Math.round(Number(row.avg_latency_ms || 0))} ms`,
+    fmt(row.last_used_at)
+  ]));
+}
+
+function modelDrilldownRows() {
+  const rows = state.usageDrilldowns?.models || [];
+  if (!rows.length) return '<p>No model usage in the last 30 days.</p>';
+  return drilldownTable(['Model', 'Provider', 'Requests', 'Errors', 'Error rate', 'Tokens', 'Cost', 'Avg latency', 'Last used'], rows.map(row => [
+    `<span class="mono">${esc(row.model || '(none)')}</span>`,
+    `<span class="mono">${esc(row.provider_id || '(none)')}</span>`,
+    compact(row.requests),
+    compact(row.errors),
+    percent(row.error_rate),
+    compact(row.total_tokens),
+    money(row.cost_usd),
+    `${Math.round(Number(row.avg_latency_ms || 0))} ms`,
+    fmt(row.last_used_at)
+  ]));
+}
+
+function drilldownTable(headers, rows) {
+  return `<div class="table-scroll">${table(headers, rows)}</div>`;
 }
 
 function providerRows() {
@@ -657,6 +707,48 @@ function keyGovernanceRows() {
       </table>
     </div>
   `;
+}
+
+function budgetBurnDownView() {
+  const rows = state.budgetBurnDown || [];
+  if (!rows.length) return '<p>No budgets yet.</p>';
+  return `
+    <div class="table-scroll">
+      <table>
+        <thead><tr><th>Scope</th><th>Spend</th><th>Progress</th><th>Remaining</th><th>Projected month-end</th><th>Daily avg</th><th>Days left</th><th>Status</th></tr></thead>
+        <tbody>
+          ${rows.map(item => {
+            const b = item.budget || {};
+            const ratio = Number(item.ratio || 0);
+            const projectedRatio = Number(item.projected_ratio || 0);
+            return `
+              <tr>
+                <td><span class="mono">${esc(b.scope_type || '')}</span> ${esc(b.scope_value || '')}</td>
+                <td>${money(item.spend_usd)} / ${money(b.limit_usd)}</td>
+                <td>${progressBar(ratio, `${percent(ratio)} used`)}</td>
+                <td>${money(item.remaining_usd)}</td>
+                <td>${money(item.projected_month_end_usd)} <span class="muted">(${percent(projectedRatio)})</span></td>
+                <td>${money(item.daily_average_usd)}</td>
+                <td>${Number(item.days_remaining || 0)}</td>
+                <td>${budgetStatePill(item)}</td>
+              </tr>
+            `;
+          }).join('')}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function progressBar(ratio, label) {
+  const pct = Math.max(0, Math.min(100, Number(ratio || 0) * 100));
+  return `<div class="progress" title="${esc(label)}"><div class="progress-fill" style="width:${pct}%"></div></div><span class="progress-label">${esc(label)}</span>`;
+}
+
+function budgetStatePill(item) {
+  if (item.blocked) return '<span class="pill off">blocked</span>';
+  if (item.warning) return '<span class="pill">warning</span>';
+  return '<span class="pill on">ok</span>';
 }
 
 function budgetRows() {

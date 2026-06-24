@@ -174,6 +174,8 @@ func New(opts Options) (http.Handler, error) {
 	mux.HandleFunc("GET /api/admin/audit-log", s.requireAdmin(s.auditLog))
 	mux.HandleFunc("GET /api/admin/usage/summary", s.requireAdmin(s.adminUsage))
 	mux.HandleFunc("GET /api/admin/usage/timeseries", s.requireAdmin(s.adminUsageTimeSeries))
+	mux.HandleFunc("GET /api/admin/usage/drilldowns", s.requireAdmin(s.adminUsageDrilldowns))
+	mux.HandleFunc("GET /api/admin/budgets/burndown", s.requireAdmin(s.adminBudgetBurnDown))
 	mux.HandleFunc("GET /api/admin/usage/export.csv", s.requireAdmin(s.adminUsageCSV))
 	mux.HandleFunc("GET /v1/models", s.requireAPIKey(s.openAIModels))
 	mux.HandleFunc("POST /v1/chat/completions", s.requireAPIKey(s.openAIChatCompletions))
@@ -928,14 +930,9 @@ func (s *Server) adminUsage(w http.ResponseWriter, r *http.Request, _ store.User
 }
 
 func (s *Server) adminUsageTimeSeries(w http.ResponseWriter, r *http.Request, _ store.User) {
-	days := 30
-	if raw := strings.TrimSpace(r.URL.Query().Get("days")); raw != "" {
-		parsed, err := strconv.Atoi(raw)
-		if err != nil || parsed <= 0 {
-			respondError(w, http.StatusBadRequest, "days must be a positive integer")
-			return
-		}
-		days = parsed
+	days, ok := parseDaysQuery(w, r, 30)
+	if !ok {
+		return
 	}
 	points, err := s.store.UsageTimeSeries(r.Context(), days, time.Now().UTC())
 	if err != nil {
@@ -943,6 +940,41 @@ func (s *Server) adminUsageTimeSeries(w http.ResponseWriter, r *http.Request, _ 
 		return
 	}
 	respondJSON(w, http.StatusOK, points)
+}
+
+func (s *Server) adminUsageDrilldowns(w http.ResponseWriter, r *http.Request, _ store.User) {
+	days, ok := parseDaysQuery(w, r, 30)
+	if !ok {
+		return
+	}
+	drilldowns, err := s.store.UsageDrilldowns(r.Context(), days, time.Now().UTC())
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	respondJSON(w, http.StatusOK, drilldowns)
+}
+
+func (s *Server) adminBudgetBurnDown(w http.ResponseWriter, r *http.Request, _ store.User) {
+	items, err := s.store.BudgetBurnDown(r.Context(), time.Now().UTC())
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	respondJSON(w, http.StatusOK, items)
+}
+
+func parseDaysQuery(w http.ResponseWriter, r *http.Request, fallback int) (int, bool) {
+	days := fallback
+	if raw := strings.TrimSpace(r.URL.Query().Get("days")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed <= 0 {
+			respondError(w, http.StatusBadRequest, "days must be a positive integer")
+			return 0, false
+		}
+		days = parsed
+	}
+	return days, true
 }
 
 func (s *Server) auditLog(w http.ResponseWriter, r *http.Request, _ store.User) {

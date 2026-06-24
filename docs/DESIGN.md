@@ -151,8 +151,13 @@ budget can finish. The next priced request is blocked.
 The usage ledger is the source of truth for chargeback and operational reporting. The
 admin API exposes a bounded daily time series derived from the ledger for requests,
 errors, token volume, cost, and average latency. The embedded dashboard renders this as a
-30-day operations panel so administrators can spot cost, traffic, latency, and provider
-error movement without needing an external metrics stack for the first deployment mode.
+30-day operations panel, plus provider and model drilldowns, so administrators can spot
+cost, traffic, latency, and provider error movement without needing an external metrics
+stack for the first deployment mode.
+
+Budget burn-down reporting derives current-month spend from the same ledger and compares
+it with active user and department budget limits. It exposes spend, remaining budget,
+average daily run rate, days remaining, and projected month-end spend.
 
 ## Frontend
 

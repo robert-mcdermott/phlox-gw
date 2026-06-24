@@ -64,11 +64,11 @@ not complicate the first gateway release.
 - Apply model-level weighted routing policies for traffic splitting across compatible
   backend routes.
 - Show 30-day operational monitoring charts from the usage ledger.
+- Show budget burn-down projections and provider/model drilldowns from the usage ledger.
 
 ### Phase 2: Production Controls
 
 - Add request and response metadata search without storing prompt content by default.
-- Add budget burn-down, provider drilldowns, and model drilldowns.
 - Add Bedrock streaming, multimodal input mapping, and tool-call mapping.
 
 ### Phase 3: Enterprise Operations

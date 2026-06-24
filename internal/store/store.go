@@ -147,6 +147,20 @@ type BudgetLineItem struct {
 	Warning  bool    `json:"warning"`
 }
 
+type BudgetBurnDownItem struct {
+	Budget               Budget  `json:"budget"`
+	SpendUSD             float64 `json:"spend_usd"`
+	RemainingUSD         float64 `json:"remaining_usd"`
+	Ratio                float64 `json:"ratio"`
+	DailyAverageUSD      float64 `json:"daily_average_usd"`
+	ProjectedMonthEndUSD float64 `json:"projected_month_end_usd"`
+	ProjectedRatio       float64 `json:"projected_ratio"`
+	DaysElapsed          int     `json:"days_elapsed"`
+	DaysRemaining        int     `json:"days_remaining"`
+	Blocked              bool    `json:"blocked"`
+	Warning              bool    `json:"warning"`
+}
+
 type UsageRecord struct {
 	ID           string
 	RequestID    string
@@ -197,6 +211,25 @@ type UsageTimeSeriesPoint struct {
 	TotalTokens  int64   `json:"total_tokens"`
 	CostUSD      float64 `json:"cost_usd"`
 	AvgLatencyMS float64 `json:"avg_latency_ms"`
+}
+
+type UsageDrilldowns struct {
+	Providers []UsageDrilldownRow `json:"providers"`
+	Models    []UsageDrilldownRow `json:"models"`
+}
+
+type UsageDrilldownRow struct {
+	ProviderID   string     `json:"provider_id"`
+	Model        string     `json:"model,omitempty"`
+	Requests     int64      `json:"requests"`
+	Errors       int64      `json:"errors"`
+	ErrorRate    float64    `json:"error_rate"`
+	InputTokens  int64      `json:"input_tokens"`
+	OutputTokens int64      `json:"output_tokens"`
+	TotalTokens  int64      `json:"total_tokens"`
+	CostUSD      float64    `json:"cost_usd"`
+	AvgLatencyMS float64    `json:"avg_latency_ms"`
+	LastUsedAt   *time.Time `json:"last_used_at,omitempty"`
 }
 
 type UsageExportRow struct {
@@ -1216,6 +1249,67 @@ func (s *Store) UsageAll(ctx context.Context) (UsageSummary, error) {
 	return s.usageSummary(ctx, ``)
 }
 
+func (s *Store) BudgetBurnDown(ctx context.Context, now time.Time) ([]BudgetBurnDownItem, error) {
+	start, end := monthBounds(now.UTC())
+	budgets, err := s.ListBudgets(ctx)
+	if err != nil {
+		return nil, err
+	}
+	elapsed := now.UTC().Sub(start)
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	total := end.Sub(start)
+	elapsedRatio := 0.0
+	if total > 0 {
+		elapsedRatio = elapsed.Seconds() / total.Seconds()
+	}
+	if elapsedRatio <= 0 {
+		elapsedRatio = 1 / total.Seconds()
+	}
+	daysElapsed := int(math.Ceil(elapsed.Hours() / 24))
+	if daysElapsed < 1 {
+		daysElapsed = 1
+	}
+	daysRemaining := int(math.Ceil(end.Sub(now.UTC()).Hours() / 24))
+	if daysRemaining < 0 {
+		daysRemaining = 0
+	}
+	items := make([]BudgetBurnDownItem, 0, len(budgets))
+	for _, budget := range budgets {
+		spend, err := s.spendForBudget(ctx, budget, start, end)
+		if err != nil {
+			return nil, err
+		}
+		spend = roundCost(spend)
+		remaining := roundCost(math.Max(budget.LimitUSD-spend, 0))
+		ratio := 0.0
+		if budget.LimitUSD > 0 {
+			ratio = spend / budget.LimitUSD
+		}
+		projected := roundCost(spend / elapsedRatio)
+		projectedRatio := 0.0
+		if budget.LimitUSD > 0 {
+			projectedRatio = projected / budget.LimitUSD
+		}
+		warnRatio := budget.WarnPct / 100
+		items = append(items, BudgetBurnDownItem{
+			Budget:               budget,
+			SpendUSD:             spend,
+			RemainingUSD:         remaining,
+			Ratio:                ratio,
+			DailyAverageUSD:      roundCost(spend / float64(daysElapsed)),
+			ProjectedMonthEndUSD: projected,
+			ProjectedRatio:       projectedRatio,
+			DaysElapsed:          daysElapsed,
+			DaysRemaining:        daysRemaining,
+			Blocked:              budget.IsActive && budget.LimitUSD > 0 && spend >= budget.LimitUSD,
+			Warning:              budget.IsActive && budget.LimitUSD > 0 && spend >= budget.LimitUSD*warnRatio,
+		})
+	}
+	return items, nil
+}
+
 func (s *Store) UsageTimeSeries(ctx context.Context, days int, now time.Time) ([]UsageTimeSeriesPoint, error) {
 	if days <= 0 {
 		days = 30
@@ -1262,6 +1356,89 @@ func (s *Store) UsageTimeSeries(ctx context.Context, days int, now time.Time) ([
 		}
 	}
 	return points, rows.Err()
+}
+
+func (s *Store) UsageDrilldowns(ctx context.Context, days int, now time.Time) (UsageDrilldowns, error) {
+	if days <= 0 {
+		days = 30
+	}
+	if days > 365 {
+		days = 365
+	}
+	start := time.Date(now.UTC().Year(), now.UTC().Month(), now.UTC().Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, -(days - 1))
+	providers, err := s.usageDrilldownRows(ctx, "provider", start)
+	if err != nil {
+		return UsageDrilldowns{}, err
+	}
+	models, err := s.usageDrilldownRows(ctx, "model", start)
+	if err != nil {
+		return UsageDrilldowns{}, err
+	}
+	return UsageDrilldowns{Providers: providers, Models: models}, nil
+}
+
+func (s *Store) usageDrilldownRows(ctx context.Context, dimension string, start time.Time) ([]UsageDrilldownRow, error) {
+	var query string
+	switch dimension {
+	case "provider":
+		query = `
+			SELECT provider_id, '' AS model,
+			       COUNT(*) AS requests,
+			       COALESCE(SUM(CASE WHEN status_code >= 400 OR error_text <> '' THEN 1 ELSE 0 END), 0) AS errors,
+			       COALESCE(SUM(input_tokens), 0),
+			       COALESCE(SUM(output_tokens), 0),
+			       COALESCE(SUM(total_tokens), 0),
+			       COALESCE(SUM(cost_usd), 0) AS cost,
+			       COALESCE(AVG(latency_ms), 0),
+			       MAX(created_at)
+			FROM usage_ledger
+			WHERE created_at >= ?
+			GROUP BY provider_id
+			ORDER BY cost DESC, requests DESC
+			LIMIT 100`
+	case "model":
+		query = `
+			SELECT provider_id, model,
+			       COUNT(*) AS requests,
+			       COALESCE(SUM(CASE WHEN status_code >= 400 OR error_text <> '' THEN 1 ELSE 0 END), 0) AS errors,
+			       COALESCE(SUM(input_tokens), 0),
+			       COALESCE(SUM(output_tokens), 0),
+			       COALESCE(SUM(total_tokens), 0),
+			       COALESCE(SUM(cost_usd), 0) AS cost,
+			       COALESCE(AVG(latency_ms), 0),
+			       MAX(created_at)
+			FROM usage_ledger
+			WHERE created_at >= ?
+			GROUP BY provider_id, model
+			ORDER BY cost DESC, requests DESC
+			LIMIT 100`
+	default:
+		return nil, fmt.Errorf("unsupported drilldown dimension %q", dimension)
+	}
+	rows, err := s.db.QueryContext(ctx, query, formatTime(start))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []UsageDrilldownRow
+	for rows.Next() {
+		var item UsageDrilldownRow
+		var lastUsed string
+		if err := rows.Scan(&item.ProviderID, &item.Model, &item.Requests, &item.Errors, &item.InputTokens, &item.OutputTokens, &item.TotalTokens, &item.CostUSD, &item.AvgLatencyMS, &lastUsed); err != nil {
+			return nil, err
+		}
+		if item.Requests > 0 {
+			item.ErrorRate = float64(item.Errors) / float64(item.Requests)
+		}
+		item.CostUSD = roundCost(item.CostUSD)
+		item.AvgLatencyMS = math.Round(item.AvgLatencyMS)
+		if lastUsed != "" {
+			t := parseTime(lastUsed)
+			item.LastUsedAt = &t
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) UsageExport(ctx context.Context) ([]UsageExportRow, error) {

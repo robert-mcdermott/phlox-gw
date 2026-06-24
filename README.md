@@ -49,7 +49,10 @@ This is the first implementation scaffold. It includes:
   and health-aware routing.
 - Model-level weighted route policies for traffic splitting across compatible backend
   routes.
-- Admin operations charts for 30-day cost, tokens, requests, errors, and average latency.
+- Admin operations charts for 30-day cost, tokens, requests, errors, average latency,
+  provider drilldowns, and model drilldowns.
+- Budget burn-down reporting with current-month spend, remaining budget, daily run rate,
+  and projected month-end spend.
 - `/v1/models`, `/v1/chat/completions`, and `/anthropic/v1/messages` gateway surfaces.
 - Bedrock models can be exposed through `/v1/chat/completions` for non-streaming text chat,
   with usage captured from Bedrock token metadata.
