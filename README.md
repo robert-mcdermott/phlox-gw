@@ -54,8 +54,11 @@ This is the first implementation scaffold. It includes:
 - Budget burn-down reporting with current-month spend, remaining budget, daily run rate,
   and projected month-end spend.
 - `/v1/models`, `/v1/chat/completions`, and `/anthropic/v1/messages` gateway surfaces.
-- Bedrock models can be exposed through `/v1/chat/completions` for non-streaming text chat,
-  with usage captured from Bedrock token metadata.
+- Bedrock models can be exposed through `/v1/chat/completions` for text chat and
+  streaming chat, with usage captured from Bedrock token metadata.
+- Bedrock OpenAI-shape requests support text, data URL image inputs, function tool
+  definitions, and tool-call/tool-result round trips where the selected Bedrock model
+  supports those features.
 - Streaming OpenAI-compatible calls are proxied through while recording usage when the
   upstream stream includes a final usage chunk.
 - Embedded dashboard assets under `frontend/dist`.

@@ -16,6 +16,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime"
+	bedrockdocument "github.com/aws/aws-sdk-go-v2/service/bedrockruntime/document"
 	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime/types"
 	"github.com/robert-mcdermott/phlox-gw/internal/auth"
 	"github.com/robert-mcdermott/phlox-gw/internal/config"
@@ -374,6 +375,89 @@ func TestBedrockConverseInputFromOpenAI(t *testing.T) {
 	}
 }
 
+func TestBedrockConverseInputMapsImagesAndTools(t *testing.T) {
+	input, err := bedrockConverseInput("anthropic.claude-3-5-sonnet-20240620-v1:0", map[string]any{
+		"messages": []any{
+			map[string]any{"role": "user", "content": []any{
+				map[string]any{"type": "text", "text": "Describe this image"},
+				map[string]any{"type": "image_url", "image_url": map[string]any{"url": "data:image/png;base64,aGVsbG8="}},
+			}},
+		},
+		"tools": []any{
+			map[string]any{
+				"type": "function",
+				"function": map[string]any{
+					"name":        "lookup_cost_center",
+					"description": "Find a cost center",
+					"parameters": map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"department": map[string]any{"type": "string"},
+						},
+					},
+				},
+			},
+		},
+		"tool_choice": "required",
+	})
+	if err != nil {
+		t.Fatalf("bedrockConverseInput: %v", err)
+	}
+	if len(input.Messages) != 1 || len(input.Messages[0].Content) != 2 {
+		t.Fatalf("unexpected content blocks: %#v", input.Messages)
+	}
+	image := input.Messages[0].Content[1].(*types.ContentBlockMemberImage).Value
+	if image.Format != types.ImageFormatPng || string(image.Source.(*types.ImageSourceMemberBytes).Value) != "hello" {
+		t.Fatalf("unexpected image block: %#v", image)
+	}
+	if input.ToolConfig == nil || len(input.ToolConfig.Tools) != 1 {
+		t.Fatalf("tool config not mapped: %#v", input.ToolConfig)
+	}
+	if _, ok := input.ToolConfig.ToolChoice.(*types.ToolChoiceMemberAny); !ok {
+		t.Fatalf("tool choice not mapped to required/any: %#v", input.ToolConfig.ToolChoice)
+	}
+	streamInput, err := bedrockConverseStreamInput("anthropic.claude-3-5-sonnet-20240620-v1:0", map[string]any{
+		"messages": []any{map[string]any{"role": "user", "content": "Hello"}},
+		"tools": []any{map[string]any{
+			"type":     "function",
+			"function": map[string]any{"name": "lookup_cost_center"},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("bedrockConverseStreamInput: %v", err)
+	}
+	if streamInput.ToolConfig == nil || streamInput.ToolConfig.Tools == nil {
+		t.Fatalf("stream input did not preserve tool config: %#v", streamInput)
+	}
+}
+
+func TestOpenAIResponseFromBedrockMapsToolUse(t *testing.T) {
+	route := store.RoutedModel{Model: store.Model{Route: "bedrock/claude"}}
+	response := openAIResponseFromBedrock(route, &bedrockruntime.ConverseOutput{
+		Output: &types.ConverseOutputMemberMessage{Value: types.Message{
+			Role: types.ConversationRoleAssistant,
+			Content: []types.ContentBlock{
+				&types.ContentBlockMemberToolUse{Value: types.ToolUseBlock{
+					ToolUseId: aws.String("tooluse_1"),
+					Name:      aws.String("lookup_cost_center"),
+					Input:     bedrockdocument.NewLazyDocument(map[string]any{"department": "AI"}),
+				}},
+			},
+		}},
+		StopReason: types.StopReasonToolUse,
+	})
+	choices := response["choices"].([]map[string]any)
+	message := choices[0]["message"].(map[string]any)
+	toolCalls := message["tool_calls"].([]map[string]any)
+	if choices[0]["finish_reason"] != "tool_calls" || len(toolCalls) != 1 {
+		t.Fatalf("unexpected tool response: %#v", response)
+	}
+	fn := toolCalls[0]["function"].(map[string]any)
+	if toolCalls[0]["id"] != "tooluse_1" || fn["name"] != "lookup_cost_center" || !strings.Contains(fn["arguments"].(string), "department") {
+		t.Fatalf("unexpected tool call mapping: %#v", toolCalls[0])
+	}
+}
+
 func TestOpenAIChatCompletionsRoutesToBedrockAndRecordsUsage(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
@@ -475,6 +559,110 @@ func TestOpenAIChatCompletionsRoutesToBedrockAndRecordsUsage(t *testing.T) {
 		t.Fatalf("UsageForUser: %v", err)
 	}
 	if usage.Requests != 1 || usage.InputTokens != 10 || usage.OutputTokens != 5 || usage.TotalTokens != 15 || usage.CostUSD != 0.00002 {
+		t.Fatalf("unexpected stored usage: %#v", usage)
+	}
+}
+
+func TestOpenAIChatCompletionsStreamsBedrockAndRecordsUsage(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer st.Close()
+	user := store.User{
+		ID:           "user_bedrock_stream",
+		Username:     "bedrock-stream-user",
+		Department:   "AI",
+		Role:         "user",
+		PasswordHash: "unused",
+		AuthProvider: "local",
+		IsActive:     true,
+	}
+	if err := st.CreateUser(ctx, user); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	plain, prefix, keyHash, err := auth.NewAPIKey()
+	if err != nil {
+		t.Fatalf("NewAPIKey: %v", err)
+	}
+	if err := st.CreateAPIKey(ctx, store.APIKey{ID: "key_bedrock_stream", UserID: user.ID, Name: "Bedrock stream key", Prefix: prefix, KeyHash: keyHash}); err != nil {
+		t.Fatalf("CreateAPIKey: %v", err)
+	}
+	provider := store.Provider{ID: "aws-bedrock-stream", Name: "AWS Bedrock Stream", Type: "bedrock", AWSRegion: "us-west-2", Enabled: true}
+	if err := st.CreateProvider(ctx, provider); err != nil {
+		t.Fatalf("CreateProvider: %v", err)
+	}
+	model := store.Model{
+		ID:                   "model_bedrock_stream",
+		ProviderID:           provider.ID,
+		ModelID:              "anthropic.claude-3-5-sonnet-20240620-v1:0",
+		Route:                "aws-bedrock-stream/claude-sonnet",
+		DisplayName:          "Bedrock Sonnet Stream",
+		InputCostPerMillion:  1,
+		OutputCostPerMillion: 2,
+		SupportsStreaming:    true,
+		Enabled:              true,
+	}
+	if err := st.CreateModel(ctx, model); err != nil {
+		t.Fatalf("CreateModel: %v", err)
+	}
+	fake := &fakeBedrockClient{streamEvents: []types.ConverseStreamOutput{
+		&types.ConverseStreamOutputMemberMessageStart{Value: types.MessageStartEvent{Role: types.ConversationRoleAssistant}},
+		&types.ConverseStreamOutputMemberContentBlockDelta{Value: types.ContentBlockDeltaEvent{
+			ContentBlockIndex: aws.Int32(0),
+			Delta:             &types.ContentBlockDeltaMemberText{Value: "hello"},
+		}},
+		&types.ConverseStreamOutputMemberContentBlockDelta{Value: types.ContentBlockDeltaEvent{
+			ContentBlockIndex: aws.Int32(0),
+			Delta:             &types.ContentBlockDeltaMemberText{Value: " world"},
+		}},
+		&types.ConverseStreamOutputMemberMessageStop{Value: types.MessageStopEvent{StopReason: types.StopReasonEndTurn}},
+		&types.ConverseStreamOutputMemberMetadata{Value: types.ConverseStreamMetadataEvent{Usage: &types.TokenUsage{
+			InputTokens:  aws.Int32(4),
+			OutputTokens: aws.Int32(2),
+			TotalTokens:  aws.Int32(6),
+		}}},
+	}}
+	handler, err := New(Options{
+		Config: config.Config{SessionSecret: "test-secret"},
+		Store:  st,
+		Frontend: fstest.MapFS{
+			"frontend/dist/index.html": &fstest.MapFile{Data: []byte("<html></html>")},
+		},
+		BedrockClientFactory: func(_ context.Context, _ store.Provider) (BedrockConverseClient, error) {
+			return fake, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	resp := jsonRequest(t, handler, http.MethodPost, "/v1/chat/completions", plain, map[string]any{
+		"model":          model.Route,
+		"stream":         true,
+		"stream_options": map[string]any{"include_usage": true},
+		"messages":       []map[string]string{{"role": "user", "content": "Hello"}},
+	})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", resp.Code, resp.Body.String())
+	}
+	if fake.streamInput == nil || *fake.streamInput.ModelId != model.ModelID {
+		t.Fatalf("stream input not captured correctly: %#v", fake.streamInput)
+	}
+	if got := resp.Header().Get("Content-Type"); !strings.HasPrefix(got, "text/event-stream") {
+		t.Fatalf("content type = %q", got)
+	}
+	body := resp.Body.String()
+	for _, want := range []string{`"role":"assistant"`, `"content":"hello"`, `"content":" world"`, `"prompt_tokens":4`, "data: [DONE]"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("stream body missing %q: %s", want, body)
+		}
+	}
+	usage, err := st.UsageForUser(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("UsageForUser: %v", err)
+	}
+	if usage.Requests != 1 || usage.InputTokens != 4 || usage.OutputTokens != 2 || usage.TotalTokens != 6 || usage.CostUSD != 0.000008 {
 		t.Fatalf("unexpected stored usage: %#v", usage)
 	}
 }
@@ -749,7 +937,10 @@ func TestOpenAIChatCompletionsUsesWeightedRoute(t *testing.T) {
 }
 
 type fakeBedrockClient struct {
-	input *bedrockruntime.ConverseInput
+	input        *bedrockruntime.ConverseInput
+	streamInput  *bedrockruntime.ConverseStreamInput
+	streamEvents []types.ConverseStreamOutput
+	streamErr    error
 }
 
 func (f *fakeBedrockClient) Converse(_ context.Context, input *bedrockruntime.ConverseInput, _ ...func(*bedrockruntime.Options)) (*bedrockruntime.ConverseOutput, error) {
@@ -766,6 +957,37 @@ func (f *fakeBedrockClient) Converse(_ context.Context, input *bedrockruntime.Co
 			TotalTokens:  aws.Int32(15),
 		},
 	}, nil
+}
+
+func (f *fakeBedrockClient) ConverseStream(_ context.Context, input *bedrockruntime.ConverseStreamInput, _ ...func(*bedrockruntime.Options)) (BedrockConverseEventStream, error) {
+	f.streamInput = input
+	return newFakeBedrockStream(f.streamEvents, f.streamErr), nil
+}
+
+type fakeBedrockStream struct {
+	events chan types.ConverseStreamOutput
+	err    error
+}
+
+func newFakeBedrockStream(events []types.ConverseStreamOutput, err error) *fakeBedrockStream {
+	ch := make(chan types.ConverseStreamOutput, len(events))
+	for _, event := range events {
+		ch <- event
+	}
+	close(ch)
+	return &fakeBedrockStream{events: ch, err: err}
+}
+
+func (s *fakeBedrockStream) Events() <-chan types.ConverseStreamOutput {
+	return s.events
+}
+
+func (s *fakeBedrockStream) Close() error {
+	return nil
+}
+
+func (s *fakeBedrockStream) Err() error {
+	return s.err
 }
 
 func TestOIDCLoginCallbackProvisionsUserAndIssuesSession(t *testing.T) {

@@ -24,11 +24,12 @@
 - [x] Provider reliability policies: ordered fallback routes, retry attempts, per-attempt request timeouts, and health-aware routing.
 - [x] Weighted routing and traffic-splitting policies.
 - [x] Budget burn-down, provider drilldowns, and model drilldowns.
+- [x] Bedrock ConverseStream support with OpenAI-compatible SSE translation, data URL image input mapping, and function tool-call mapping.
 
 ## Next
 
-- Add Bedrock streaming with ConverseStream and richer multimodal/tool-call mapping.
 - Add Anthropic streaming support and streamed usage capture where compatible endpoints expose it.
+- Add request and response metadata search without storing prompt content by default.
 
 ## Later
 

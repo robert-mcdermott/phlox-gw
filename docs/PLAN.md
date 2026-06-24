@@ -51,6 +51,8 @@ not complicate the first gateway release.
 - Implement Entra ID/OIDC browser login with department claim mapping.
 - Implement OpenAI-compatible and Anthropic-compatible pass-through routes.
 - Implement Bedrock Converse routing through the OpenAI-compatible chat endpoint.
+- Implement Bedrock ConverseStream routing, data URL image input mapping, and tool-call
+  mapping through the OpenAI-compatible chat endpoint.
 - Record usage and cost from provider response metadata when available.
 - Enforce user and department monthly budgets before dispatch.
 - Enforce API-key model allowlists, monthly key budgets, RPM limits, and TPM limits.
@@ -69,7 +71,8 @@ not complicate the first gateway release.
 ### Phase 2: Production Controls
 
 - Add request and response metadata search without storing prompt content by default.
-- Add Bedrock streaming, multimodal input mapping, and tool-call mapping.
+- Add Anthropic streaming support and streamed usage capture where compatible endpoints
+  expose it.
 
 ### Phase 3: Enterprise Operations
 

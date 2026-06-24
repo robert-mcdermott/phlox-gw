@@ -29,6 +29,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime"
+	bedrockdocument "github.com/aws/aws-sdk-go-v2/service/bedrockruntime/document"
 	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime/types"
 	smithy "github.com/aws/smithy-go"
 	oidc "github.com/coreos/go-oidc/v3/oidc"
@@ -63,9 +64,32 @@ const providerCircuitCooldown = 5 * time.Minute
 
 type BedrockConverseClient interface {
 	Converse(context.Context, *bedrockruntime.ConverseInput, ...func(*bedrockruntime.Options)) (*bedrockruntime.ConverseOutput, error)
+	ConverseStream(context.Context, *bedrockruntime.ConverseStreamInput, ...func(*bedrockruntime.Options)) (BedrockConverseEventStream, error)
 }
 
 type BedrockClientFactory func(context.Context, store.Provider) (BedrockConverseClient, error)
+
+type BedrockConverseEventStream interface {
+	Events() <-chan types.ConverseStreamOutput
+	Close() error
+	Err() error
+}
+
+type awsBedrockConverseClient struct {
+	client *bedrockruntime.Client
+}
+
+func (c awsBedrockConverseClient) Converse(ctx context.Context, input *bedrockruntime.ConverseInput, optFns ...func(*bedrockruntime.Options)) (*bedrockruntime.ConverseOutput, error) {
+	return c.client.Converse(ctx, input, optFns...)
+}
+
+func (c awsBedrockConverseClient) ConverseStream(ctx context.Context, input *bedrockruntime.ConverseStreamInput, optFns ...func(*bedrockruntime.Options)) (BedrockConverseEventStream, error) {
+	output, err := c.client.ConverseStream(ctx, input, optFns...)
+	if err != nil {
+		return nil, err
+	}
+	return output.GetStream(), nil
+}
 
 type OIDCAuthenticator interface {
 	AuthCodeURL(ctx context.Context, state, nonce, redirectURL string) (string, error)
@@ -1288,7 +1312,7 @@ func (s *Server) openAIChatCompletions(w http.ResponseWriter, r *http.Request, u
 		var responseBody []byte
 		var errText string
 		if selected.Provider.Type == "bedrock" {
-			statusCode, responseBody, errText = s.proxyBedrockOpenAI(w, r, selected, raw)
+			statusCode, responseBody, errText = s.proxyBedrockOpenAIStream(w, r, selected, raw)
 		} else {
 			attemptRaw := cloneJSONMap(raw)
 			attemptRaw["model"] = selected.Model.ModelID
@@ -1489,10 +1513,7 @@ func (s *Server) executeAnthropicPlan(ctx context.Context, candidates []store.Ro
 
 func (s *Server) selectOpenAIStreamCandidate(ctx context.Context, candidates []store.RoutedModel, user store.User, key store.APIKey, policy routeReliabilityPolicy) (store.RoutedModel, int, string, string, bool) {
 	for idx, route := range candidates {
-		if route.Provider.Type == "bedrock" {
-			continue
-		}
-		if route.Provider.Type != "openai" {
+		if route.Provider.Type != "openai" && route.Provider.Type != "bedrock" {
 			continue
 		}
 		if policy.HealthRoutingEnabled {
@@ -1513,7 +1534,7 @@ func (s *Server) selectOpenAIStreamCandidate(ctx context.Context, candidates []s
 		}
 		return route, 0, "", "", true
 	}
-	return store.RoutedModel{}, http.StatusServiceUnavailable, "no available streaming OpenAI-compatible provider candidate", "provider_unavailable", false
+	return store.RoutedModel{}, http.StatusServiceUnavailable, "no available streaming OpenAI-compatible or Bedrock provider candidate", "provider_unavailable", false
 }
 
 func (s *Server) checkRouteAdmission(ctx context.Context, user store.User, key store.APIKey, route store.RoutedModel) (bool, int, string, string) {
@@ -1915,6 +1936,91 @@ func openAIUsageBody(usage tokenUsage, streamedBytes int64) []byte {
 	return body
 }
 
+func writeOpenAIStreamData(w http.ResponseWriter, flusher http.Flusher, payload map[string]any) (int, error) {
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return 0, err
+	}
+	n, err := fmt.Fprintf(w, "data: %s\n\n", body)
+	if flusher != nil {
+		flusher.Flush()
+	}
+	return n, err
+}
+
+func writeOpenAIStreamDone(w http.ResponseWriter, flusher http.Flusher) (int, error) {
+	n, err := io.WriteString(w, "data: [DONE]\n\n")
+	if flusher != nil {
+		flusher.Flush()
+	}
+	return n, err
+}
+
+func openAIStreamChunk(route store.RoutedModel, id string, created int64, choices []map[string]any, usage map[string]int) map[string]any {
+	chunk := map[string]any{
+		"id":      id,
+		"object":  "chat.completion.chunk",
+		"created": created,
+		"model":   route.Model.Route,
+		"choices": choices,
+	}
+	if usage != nil {
+		chunk["usage"] = usage
+	}
+	return chunk
+}
+
+func openAIStreamIncludeUsage(raw map[string]any) bool {
+	options, ok := raw["stream_options"].(map[string]any)
+	if !ok {
+		return false
+	}
+	include, _ := options["include_usage"].(bool)
+	return include
+}
+
+func bedrockOpenAIStreamDelta(event types.ContentBlockDeltaEvent, toolCalls map[int32]int) map[string]any {
+	switch delta := event.Delta.(type) {
+	case *types.ContentBlockDeltaMemberText:
+		if delta.Value == "" {
+			return nil
+		}
+		return map[string]any{
+			"index": 0,
+			"delta": map[string]any{"content": delta.Value},
+		}
+	case *types.ContentBlockDeltaMemberToolUse:
+		if delta.Value.Input == nil || *delta.Value.Input == "" {
+			return nil
+		}
+		toolIndex, ok := toolCalls[aws.ToInt32(event.ContentBlockIndex)]
+		if !ok {
+			toolIndex = len(toolCalls)
+			toolCalls[aws.ToInt32(event.ContentBlockIndex)] = toolIndex
+		}
+		return map[string]any{
+			"index": 0,
+			"delta": map[string]any{
+				"tool_calls": []map[string]any{{
+					"index": toolIndex,
+					"function": map[string]any{
+						"arguments": *delta.Value.Input,
+					},
+				}},
+			},
+		}
+	default:
+		return nil
+	}
+}
+
+func bedrockConversationRole(role types.ConversationRole) string {
+	if role == types.ConversationRoleUser {
+		return "user"
+	}
+	return "assistant"
+}
+
 func (s *Server) proxyAnthropic(w http.ResponseWriter, r *http.Request, route store.RoutedModel, body []byte) (int, []byte, string) {
 	endpoint := strings.TrimRight(route.Provider.BaseURL, "/") + "/v1/messages"
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, endpoint, bytes.NewReader(body))
@@ -1992,6 +2098,121 @@ func (s *Server) proxyBedrockOpenAI(w http.ResponseWriter, r *http.Request, rout
 	return http.StatusOK, body, ""
 }
 
+func (s *Server) proxyBedrockOpenAIStream(w http.ResponseWriter, r *http.Request, route store.RoutedModel, raw map[string]any) (int, []byte, string) {
+	input, err := bedrockConverseStreamInput(route.Model.ModelID, raw)
+	if err != nil {
+		openAIError(w, http.StatusBadRequest, err.Error(), "invalid_request_error")
+		return http.StatusBadRequest, nil, err.Error()
+	}
+	client, err := s.bedrockClient(r.Context(), route.Provider)
+	if err != nil {
+		msg := "Bedrock configuration failed: " + err.Error()
+		openAIError(w, http.StatusBadGateway, msg, "provider_error")
+		return http.StatusBadGateway, nil, msg
+	}
+	stream, err := client.ConverseStream(r.Context(), input)
+	if err != nil {
+		status := bedrockErrorStatus(err)
+		msg := bedrockErrorMessage(err)
+		openAIError(w, status, msg, "provider_error")
+		return status, nil, msg
+	}
+	defer stream.Close()
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+
+	flusher, _ := w.(http.Flusher)
+	id := requestID()
+	created := time.Now().Unix()
+	includeUsage := openAIStreamIncludeUsage(raw)
+	toolCalls := map[int32]int{}
+	var usage tokenUsage
+	var written int64
+
+	writeChunk := func(chunk map[string]any) error {
+		n, err := writeOpenAIStreamData(w, flusher, chunk)
+		written += int64(n)
+		return err
+	}
+	for event := range stream.Events() {
+		switch ev := event.(type) {
+		case *types.ConverseStreamOutputMemberMessageStart:
+			chunk := openAIStreamChunk(route, id, created, []map[string]any{{
+				"index": 0,
+				"delta": map[string]any{"role": bedrockConversationRole(ev.Value.Role)},
+			}}, nil)
+			if err := writeChunk(chunk); err != nil {
+				return http.StatusOK, openAIUsageBody(usage, written), err.Error()
+			}
+		case *types.ConverseStreamOutputMemberContentBlockStart:
+			if start, ok := ev.Value.Start.(*types.ContentBlockStartMemberToolUse); ok {
+				blockIndex := aws.ToInt32(ev.Value.ContentBlockIndex)
+				toolIndex := len(toolCalls)
+				toolCalls[blockIndex] = toolIndex
+				chunk := openAIStreamChunk(route, id, created, []map[string]any{{
+					"index": 0,
+					"delta": map[string]any{
+						"tool_calls": []map[string]any{{
+							"index": toolIndex,
+							"id":    aws.ToString(start.Value.ToolUseId),
+							"type":  "function",
+							"function": map[string]any{
+								"name":      aws.ToString(start.Value.Name),
+								"arguments": "",
+							},
+						}},
+					},
+				}}, nil)
+				if err := writeChunk(chunk); err != nil {
+					return http.StatusOK, openAIUsageBody(usage, written), err.Error()
+				}
+			}
+		case *types.ConverseStreamOutputMemberContentBlockDelta:
+			choice := bedrockOpenAIStreamDelta(ev.Value, toolCalls)
+			if choice == nil {
+				continue
+			}
+			chunk := openAIStreamChunk(route, id, created, []map[string]any{choice}, nil)
+			if err := writeChunk(chunk); err != nil {
+				return http.StatusOK, openAIUsageBody(usage, written), err.Error()
+			}
+		case *types.ConverseStreamOutputMemberMessageStop:
+			chunk := openAIStreamChunk(route, id, created, []map[string]any{{
+				"index":         0,
+				"delta":         map[string]any{},
+				"finish_reason": bedrockFinishReason(ev.Value.StopReason),
+			}}, nil)
+			if err := writeChunk(chunk); err != nil {
+				return http.StatusOK, openAIUsageBody(usage, written), err.Error()
+			}
+		case *types.ConverseStreamOutputMemberMetadata:
+			usage = bedrockTokenUsage(ev.Value.Usage)
+		}
+	}
+	if err := stream.Err(); err != nil {
+		return http.StatusBadGateway, openAIUsageBody(usage, written), bedrockErrorMessage(err)
+	}
+	if includeUsage {
+		chunk := openAIStreamChunk(route, id, created, []map[string]any{}, map[string]int{
+			"prompt_tokens":     usage.Input,
+			"completion_tokens": usage.Output,
+			"total_tokens":      usage.Total,
+		})
+		if err := writeChunk(chunk); err != nil {
+			return http.StatusOK, openAIUsageBody(usage, written), err.Error()
+		}
+	}
+	n, err := writeOpenAIStreamDone(w, flusher)
+	written += int64(n)
+	if err != nil {
+		return http.StatusOK, openAIUsageBody(usage, written), err.Error()
+	}
+	return http.StatusOK, openAIUsageBody(usage, written), ""
+}
+
 func (s *Server) bedrockClient(ctx context.Context, p store.Provider) (BedrockConverseClient, error) {
 	if s.bedrockClientFactory != nil {
 		return s.bedrockClientFactory(ctx, p)
@@ -2004,7 +2225,7 @@ func (s *Server) bedrockClient(ctx context.Context, p store.Provider) (BedrockCo
 	if err != nil {
 		return nil, err
 	}
-	return bedrockruntime.NewFromConfig(cfg), nil
+	return awsBedrockConverseClient{client: bedrockruntime.NewFromConfig(cfg)}, nil
 }
 
 func (s *Server) recordUsage(ctx context.Context, requestID string, user store.User, key store.APIKey, route store.RoutedModel, protocol string, usage tokenUsage, latencyMS int64, status int, errText string) {
@@ -3104,28 +3325,50 @@ func bedrockConverseInput(modelID string, raw map[string]any) (*bedrockruntime.C
 		}
 		role, _ := msg["role"].(string)
 		role = strings.ToLower(strings.TrimSpace(role))
-		text, err := openAIMessageText(msg["content"])
-		if err != nil {
-			return nil, err
-		}
-		if strings.TrimSpace(text) == "" {
-			continue
-		}
 		switch role {
 		case "system", "developer":
+			text, err := openAIMessageText(msg["content"])
+			if err != nil {
+				return nil, err
+			}
+			if strings.TrimSpace(text) == "" {
+				continue
+			}
 			system = append(system, &types.SystemContentBlockMemberText{Value: text})
-		case "user":
+		case "user", "assistant":
+			content, err := openAIContentBlocks(msg["content"], role)
+			if err != nil {
+				return nil, err
+			}
+			if role == "assistant" {
+				toolCalls, err := openAIToolCallsToBedrock(msg["tool_calls"])
+				if err != nil {
+					return nil, err
+				}
+				content = append(content, toolCalls...)
+			}
+			if len(content) == 0 {
+				continue
+			}
+			bedrockRole := types.ConversationRoleUser
+			if role == "assistant" {
+				bedrockRole = types.ConversationRoleAssistant
+			}
 			messages = append(messages, types.Message{
-				Role:    types.ConversationRoleUser,
-				Content: []types.ContentBlock{&types.ContentBlockMemberText{Value: text}},
+				Role:    bedrockRole,
+				Content: content,
 			})
-		case "assistant":
-			messages = append(messages, types.Message{
-				Role:    types.ConversationRoleAssistant,
-				Content: []types.ContentBlock{&types.ContentBlockMemberText{Value: text}},
-			})
+		case "tool":
+			content, err := openAIToolResultBlocks(msg)
+			if err != nil {
+				return nil, err
+			}
+			if len(content) == 0 {
+				continue
+			}
+			messages = append(messages, types.Message{Role: types.ConversationRoleUser, Content: content})
 		default:
-			return nil, fmt.Errorf("Bedrock adapter supports user, assistant, system, and developer text messages only; got role %q", role)
+			return nil, fmt.Errorf("Bedrock adapter supports user, assistant, system, developer, and tool messages only; got role %q", role)
 		}
 	}
 	if len(messages) == 0 {
@@ -3164,7 +3407,26 @@ func bedrockConverseInput(modelID string, raw map[string]any) (*bedrockruntime.C
 	if inference.MaxTokens != nil || inference.Temperature != nil || inference.TopP != nil || len(inference.StopSequences) > 0 {
 		input.InferenceConfig = &inference
 	}
+	toolConfig, err := bedrockToolConfig(raw)
+	if err != nil {
+		return nil, err
+	}
+	input.ToolConfig = toolConfig
 	return input, nil
+}
+
+func bedrockConverseStreamInput(modelID string, raw map[string]any) (*bedrockruntime.ConverseStreamInput, error) {
+	input, err := bedrockConverseInput(modelID, raw)
+	if err != nil {
+		return nil, err
+	}
+	return &bedrockruntime.ConverseStreamInput{
+		ModelId:         input.ModelId,
+		Messages:        input.Messages,
+		System:          input.System,
+		InferenceConfig: input.InferenceConfig,
+		ToolConfig:      input.ToolConfig,
+	}, nil
 }
 
 func openAIMessageText(content any) (string, error) {
@@ -3188,12 +3450,233 @@ func openAIMessageText(content any) (string, error) {
 				}
 				continue
 			}
-			return "", fmt.Errorf("Bedrock adapter only supports text content parts; got %q", typ)
+			return "", fmt.Errorf("Bedrock system/developer messages only support text content parts; got %q", typ)
 		}
 		return strings.Join(parts, "\n"), nil
 	default:
 		return "", errors.New("message content must be a string or text content parts")
 	}
+}
+
+func openAIContentBlocks(content any, role string) ([]types.ContentBlock, error) {
+	switch v := content.(type) {
+	case nil:
+		return nil, nil
+	case string:
+		if strings.TrimSpace(v) == "" {
+			return nil, nil
+		}
+		return []types.ContentBlock{&types.ContentBlockMemberText{Value: v}}, nil
+	case []any:
+		var blocks []types.ContentBlock
+		var textParts []string
+		flushText := func() {
+			if len(textParts) == 0 {
+				return
+			}
+			blocks = append(blocks, &types.ContentBlockMemberText{Value: strings.Join(textParts, "\n")})
+			textParts = nil
+		}
+		for _, item := range v {
+			part, ok := item.(map[string]any)
+			if !ok {
+				return nil, errors.New("message content parts must be objects")
+			}
+			typ, _ := part["type"].(string)
+			switch typ {
+			case "", "text":
+				text, _ := part["text"].(string)
+				if text != "" {
+					textParts = append(textParts, text)
+				}
+			case "image_url":
+				if role != "user" {
+					return nil, errors.New("Bedrock adapter only supports image_url content on user messages")
+				}
+				flushText()
+				block, err := openAIImageURLToBedrock(part["image_url"])
+				if err != nil {
+					return nil, err
+				}
+				blocks = append(blocks, block)
+			default:
+				return nil, fmt.Errorf("Bedrock adapter supports text and image_url content parts; got %q", typ)
+			}
+		}
+		flushText()
+		return blocks, nil
+	default:
+		return nil, errors.New("message content must be a string or content parts")
+	}
+}
+
+func openAIImageURLToBedrock(raw any) (types.ContentBlock, error) {
+	var url string
+	switch v := raw.(type) {
+	case string:
+		url = v
+	case map[string]any:
+		url, _ = v["url"].(string)
+	}
+	if strings.TrimSpace(url) == "" {
+		return nil, errors.New("image_url.url is required")
+	}
+	meta, data, ok := strings.Cut(url, ",")
+	if !ok || !strings.HasPrefix(strings.ToLower(meta), "data:") {
+		return nil, errors.New("Bedrock adapter supports image_url data URLs only")
+	}
+	if !strings.Contains(strings.ToLower(meta), ";base64") {
+		return nil, errors.New("image_url data URL must be base64 encoded")
+	}
+	format, err := bedrockImageFormat(strings.TrimPrefix(strings.ToLower(strings.Split(meta, ";")[0]), "data:"))
+	if err != nil {
+		return nil, err
+	}
+	bytes, err := base64.StdEncoding.DecodeString(data)
+	if err != nil {
+		return nil, errors.New("image_url data URL contains invalid base64")
+	}
+	return &types.ContentBlockMemberImage{Value: types.ImageBlock{
+		Format: format,
+		Source: &types.ImageSourceMemberBytes{Value: bytes},
+	}}, nil
+}
+
+func bedrockImageFormat(mimeType string) (types.ImageFormat, error) {
+	switch mimeType {
+	case "image/png":
+		return types.ImageFormatPng, nil
+	case "image/jpeg", "image/jpg":
+		return types.ImageFormatJpeg, nil
+	case "image/gif":
+		return types.ImageFormatGif, nil
+	case "image/webp":
+		return types.ImageFormatWebp, nil
+	default:
+		return "", fmt.Errorf("unsupported Bedrock image format %q", mimeType)
+	}
+}
+
+func openAIToolCallsToBedrock(raw any) ([]types.ContentBlock, error) {
+	if raw == nil {
+		return nil, nil
+	}
+	items, ok := raw.([]any)
+	if !ok {
+		return nil, errors.New("assistant tool_calls must be an array")
+	}
+	blocks := make([]types.ContentBlock, 0, len(items))
+	for _, item := range items {
+		call, ok := item.(map[string]any)
+		if !ok {
+			return nil, errors.New("assistant tool_calls entries must be objects")
+		}
+		function, _ := call["function"].(map[string]any)
+		name, _ := function["name"].(string)
+		id, _ := call["id"].(string)
+		if strings.TrimSpace(name) == "" || strings.TrimSpace(id) == "" {
+			return nil, errors.New("assistant tool_calls require id and function.name")
+		}
+		var input any = map[string]any{}
+		if args, _ := function["arguments"].(string); strings.TrimSpace(args) != "" {
+			dec := json.NewDecoder(strings.NewReader(args))
+			dec.UseNumber()
+			if err := dec.Decode(&input); err != nil {
+				return nil, errors.New("assistant tool_calls function.arguments must be valid JSON")
+			}
+		}
+		blocks = append(blocks, &types.ContentBlockMemberToolUse{Value: types.ToolUseBlock{
+			ToolUseId: aws.String(id),
+			Name:      aws.String(name),
+			Input:     bedrockdocument.NewLazyDocument(input),
+		}})
+	}
+	return blocks, nil
+}
+
+func openAIToolResultBlocks(msg map[string]any) ([]types.ContentBlock, error) {
+	toolUseID, _ := msg["tool_call_id"].(string)
+	if strings.TrimSpace(toolUseID) == "" {
+		return nil, errors.New("tool messages require tool_call_id")
+	}
+	text, err := openAIMessageText(msg["content"])
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(text) == "" {
+		return nil, nil
+	}
+	return []types.ContentBlock{&types.ContentBlockMemberToolResult{Value: types.ToolResultBlock{
+		ToolUseId: aws.String(toolUseID),
+		Content:   []types.ToolResultContentBlock{&types.ToolResultContentBlockMemberText{Value: text}},
+	}}}, nil
+}
+
+func bedrockToolConfig(raw map[string]any) (*types.ToolConfiguration, error) {
+	if choice, _ := raw["tool_choice"].(string); strings.EqualFold(choice, "none") {
+		return nil, nil
+	}
+	rawTools, ok := raw["tools"].([]any)
+	if !ok || len(rawTools) == 0 {
+		return nil, nil
+	}
+	tools := make([]types.Tool, 0, len(rawTools))
+	for _, item := range rawTools {
+		tool, ok := item.(map[string]any)
+		if !ok {
+			return nil, errors.New("tools entries must be objects")
+		}
+		typ, _ := tool["type"].(string)
+		if typ != "" && typ != "function" {
+			return nil, fmt.Errorf("Bedrock adapter only supports function tools; got %q", typ)
+		}
+		function, ok := tool["function"].(map[string]any)
+		if !ok {
+			return nil, errors.New("function tool entries require a function object")
+		}
+		name, _ := function["name"].(string)
+		if strings.TrimSpace(name) == "" {
+			return nil, errors.New("function tools require function.name")
+		}
+		parameters := function["parameters"]
+		if parameters == nil {
+			parameters = map[string]any{"type": "object", "properties": map[string]any{}}
+		}
+		description, _ := function["description"].(string)
+		tools = append(tools, &types.ToolMemberToolSpec{Value: types.ToolSpecification{
+			Name:        aws.String(name),
+			Description: aws.String(description),
+			InputSchema: &types.ToolInputSchemaMemberJson{Value: bedrockdocument.NewLazyDocument(parameters)},
+		}})
+	}
+	if len(tools) == 0 {
+		return nil, nil
+	}
+	config := &types.ToolConfiguration{Tools: tools}
+	switch choice := raw["tool_choice"].(type) {
+	case string:
+		switch strings.ToLower(strings.TrimSpace(choice)) {
+		case "", "auto":
+			config.ToolChoice = &types.ToolChoiceMemberAuto{Value: types.AutoToolChoice{}}
+		case "required":
+			config.ToolChoice = &types.ToolChoiceMemberAny{Value: types.AnyToolChoice{}}
+		case "none":
+			return nil, nil
+		default:
+			return nil, fmt.Errorf("unsupported tool_choice %q", choice)
+		}
+	case map[string]any:
+		if typ, _ := choice["type"].(string); typ != "function" {
+			return nil, errors.New("object tool_choice must use type function")
+		}
+		function, _ := choice["function"].(map[string]any)
+		name, _ := function["name"].(string)
+		if strings.TrimSpace(name) == "" {
+			return nil, errors.New("function tool_choice requires function.name")
+		}
+		config.ToolChoice = &types.ToolChoiceMemberTool{Value: types.SpecificToolChoice{Name: aws.String(name)}}
+	}
+	return config, nil
 }
 
 func int32Field(raw map[string]any, key string) (int32, bool, error) {
@@ -3248,17 +3731,15 @@ func stopSequences(value any) ([]string, error) {
 
 func openAIResponseFromBedrock(route store.RoutedModel, output *bedrockruntime.ConverseOutput) map[string]any {
 	usage := bedrockUsage(output)
+	message := bedrockOpenAIMessage(output)
 	return map[string]any{
 		"id":      requestID(),
 		"object":  "chat.completion",
 		"created": time.Now().Unix(),
 		"model":   route.Model.Route,
 		"choices": []map[string]any{{
-			"index": 0,
-			"message": map[string]any{
-				"role":    "assistant",
-				"content": bedrockOutputText(output),
-			},
+			"index":         0,
+			"message":       message,
 			"finish_reason": bedrockFinishReason(output.StopReason),
 		}},
 		"usage": map[string]int{
@@ -3273,20 +3754,39 @@ func bedrockUsage(output *bedrockruntime.ConverseOutput) tokenUsage {
 	if output == nil || output.Usage == nil {
 		return tokenUsage{}
 	}
+	return bedrockTokenUsage(output.Usage)
+}
+
+func bedrockTokenUsage(raw *types.TokenUsage) tokenUsage {
+	if raw == nil {
+		return tokenUsage{}
+	}
 	usage := tokenUsage{}
-	if output.Usage.InputTokens != nil {
-		usage.Input = int(*output.Usage.InputTokens)
+	if raw.InputTokens != nil {
+		usage.Input = int(*raw.InputTokens)
 	}
-	if output.Usage.OutputTokens != nil {
-		usage.Output = int(*output.Usage.OutputTokens)
+	if raw.OutputTokens != nil {
+		usage.Output = int(*raw.OutputTokens)
 	}
-	if output.Usage.TotalTokens != nil {
-		usage.Total = int(*output.Usage.TotalTokens)
+	if raw.TotalTokens != nil {
+		usage.Total = int(*raw.TotalTokens)
 	}
 	if usage.Total == 0 {
 		usage.Total = usage.Input + usage.Output
 	}
 	return usage
+}
+
+func bedrockOpenAIMessage(output *bedrockruntime.ConverseOutput) map[string]any {
+	message := map[string]any{
+		"role":    "assistant",
+		"content": bedrockOutputText(output),
+	}
+	toolCalls := bedrockOutputToolCalls(output)
+	if len(toolCalls) > 0 {
+		message["tool_calls"] = toolCalls
+	}
+	return message
 }
 
 func bedrockOutputText(output *bedrockruntime.ConverseOutput) string {
@@ -3304,6 +3804,51 @@ func bedrockOutputText(output *bedrockruntime.ConverseOutput) string {
 		}
 	}
 	return strings.Join(parts, "\n")
+}
+
+func bedrockOutputToolCalls(output *bedrockruntime.ConverseOutput) []map[string]any {
+	if output == nil {
+		return nil
+	}
+	message, ok := output.Output.(*types.ConverseOutputMemberMessage)
+	if !ok {
+		return nil
+	}
+	var calls []map[string]any
+	for _, content := range message.Value.Content {
+		toolUse, ok := content.(*types.ContentBlockMemberToolUse)
+		if !ok {
+			continue
+		}
+		calls = append(calls, map[string]any{
+			"id":   aws.ToString(toolUse.Value.ToolUseId),
+			"type": "function",
+			"function": map[string]any{
+				"name":      aws.ToString(toolUse.Value.Name),
+				"arguments": bedrockDocumentJSON(toolUse.Value.Input),
+			},
+		})
+	}
+	return calls
+}
+
+func bedrockDocumentJSON(value any) string {
+	if value == nil {
+		return "{}"
+	}
+	if marshaler, ok := value.(interface {
+		MarshalSmithyDocument() ([]byte, error)
+	}); ok {
+		body, err := marshaler.MarshalSmithyDocument()
+		if err == nil && len(body) > 0 {
+			return string(body)
+		}
+	}
+	body, err := json.Marshal(value)
+	if err != nil || len(body) == 0 {
+		return "{}"
+	}
+	return string(body)
 }
 
 func bedrockFinishReason(reason types.StopReason) string {
