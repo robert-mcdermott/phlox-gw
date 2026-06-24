@@ -343,6 +343,10 @@ draft pattern changes before saving.
 - [Plan](docs/PLAN.md): product scope and implementation phases.
 - [Roadmap](docs/ROADMAP.md): completed and planned work.
 
+## License
+
+Phlox-GW is licensed under the [Apache License 2.0](LICENSE).
+
 ## Repository Map
 
 ```text
@@ -353,7 +357,7 @@ internal/config/     Environment and data path loading
 internal/httpapi/    Browser, admin, API key, provider, and gateway handlers
 internal/store/      SQLite schema, migrations, and persistence methods
 frontend/dist/       Embedded dashboard assets
-frontend/src/        React/Vite source scaffold for future dashboard work
+frontend/src/static/ Source dashboard assets used by the frontend build
 docs/                Design, operator, API, routing, plan, and roadmap docs
 ```
 
