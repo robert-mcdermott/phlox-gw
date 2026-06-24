@@ -76,6 +76,22 @@ type OIDCClaims struct {
 	Values  map[string]any
 }
 
+type routeReliabilityPolicy struct {
+	RetryAttempts        int
+	RequestTimeout       time.Duration
+	HealthRoutingEnabled bool
+}
+
+type upstreamResult struct {
+	Route     store.RoutedModel
+	Protocol  string
+	Status    int
+	Headers   http.Header
+	Body      []byte
+	ErrorText string
+	LatencyMS int64
+}
+
 func New(opts Options) (http.Handler, error) {
 	if opts.Store == nil {
 		return nil, errors.New("store is required")
@@ -1188,22 +1204,19 @@ func (s *Server) openAIModels(w http.ResponseWriter, r *http.Request, user store
 }
 
 func (s *Server) openAIChatCompletions(w http.ResponseWriter, r *http.Request, user store.User, key store.APIKey) {
-	body, raw, ok := readObjectBody(w, r, true)
+	_, raw, ok := readObjectBody(w, r, true)
 	if !ok {
 		return
 	}
 	modelName, _ := raw["model"].(string)
-	route, err := s.store.ResolveModel(r.Context(), modelName)
+	candidates, err := s.store.ResolveModelCandidates(r.Context(), modelName)
 	if err != nil {
 		openAIError(w, http.StatusBadRequest, "unknown or disabled model", "invalid_request_error")
 		return
 	}
+	route := candidates[0]
 	if route.Provider.Type != "openai" && route.Provider.Type != "bedrock" {
 		openAIError(w, http.StatusNotImplemented, "model is not on an OpenAI-compatible or Bedrock provider", "unsupported_provider")
-		return
-	}
-	if open, reason := providerCircuitOpen(route.Provider, time.Now().UTC()); open {
-		openAIError(w, http.StatusServiceUnavailable, reason, "provider_unavailable")
 		return
 	}
 	if blocked, status, reason, typ := s.checkAPIKeyPolicy(r.Context(), key, route); blocked {
@@ -1218,49 +1231,50 @@ func (s *Server) openAIChatCompletions(w http.ResponseWriter, r *http.Request, u
 		openAIError(w, status, reason, typ)
 		return
 	}
-	if route.Provider.Type == "bedrock" {
-		if stream, _ := raw["stream"].(bool); stream {
-			openAIError(w, http.StatusNotImplemented, "Bedrock streaming is not implemented yet", "unsupported_provider")
+	policy := reliabilityPolicy(route.Model)
+	requestID := requestID()
+	if stream, _ := raw["stream"].(bool); stream {
+		selected, status, reason, typ, ok := s.selectOpenAIStreamCandidate(r.Context(), candidates, user, key, policy)
+		if !ok {
+			openAIError(w, status, reason, typ)
 			return
 		}
 		start := time.Now()
-		requestID := requestID()
-		statusCode, responseBody, errText := s.proxyBedrockOpenAI(w, r, route, raw)
+		var statusCode int
+		var responseBody []byte
+		var errText string
+		if selected.Provider.Type == "bedrock" {
+			statusCode, responseBody, errText = s.proxyBedrockOpenAI(w, r, selected, raw)
+		} else {
+			attemptRaw := cloneJSONMap(raw)
+			attemptRaw["model"] = selected.Model.ModelID
+			body, _ := json.Marshal(attemptRaw)
+			statusCode, responseBody, errText = s.proxyOpenAI(w, r, selected, body, attemptRaw)
+		}
 		latency := time.Since(start).Milliseconds()
 		usage := parseOpenAIUsage(responseBody)
-		s.recordProviderOutcome(r.Context(), route.Provider.ID, statusCode, errText)
-		s.recordUsage(r.Context(), requestID, user, key, route, "bedrock", usage, latency, statusCode, errText)
+		s.recordProviderOutcome(r.Context(), selected.Provider.ID, statusCode, errText)
+		s.recordUsage(r.Context(), requestID, user, key, selected, selected.Provider.Type, usage, latency, statusCode, errText)
 		return
 	}
-
-	raw["model"] = route.Model.ModelID
-	body, _ = json.Marshal(raw)
-	start := time.Now()
-	requestID := requestID()
-	statusCode, responseBody, errText := s.proxyOpenAI(w, r, route, body, raw)
-	latency := time.Since(start).Milliseconds()
-	usage := parseOpenAIUsage(responseBody)
-	s.recordProviderOutcome(r.Context(), route.Provider.ID, statusCode, errText)
-	s.recordUsage(r.Context(), requestID, user, key, route, "openai", usage, latency, statusCode, errText)
+	result := s.executeOpenAIPlan(r.Context(), candidates, raw, user, key, requestID, policy)
+	writeOpenAIResult(w, result)
 }
 
 func (s *Server) anthropicMessages(w http.ResponseWriter, r *http.Request, user store.User, key store.APIKey) {
-	body, raw, ok := readObjectBody(w, r, false)
+	_, raw, ok := readObjectBody(w, r, false)
 	if !ok {
 		return
 	}
 	modelName, _ := raw["model"].(string)
-	route, err := s.store.ResolveModel(r.Context(), modelName)
+	candidates, err := s.store.ResolveModelCandidates(r.Context(), modelName)
 	if err != nil {
 		anthropicError(w, http.StatusBadRequest, "unknown or disabled model")
 		return
 	}
+	route := candidates[0]
 	if route.Provider.Type != "anthropic" {
 		anthropicError(w, http.StatusNotImplemented, "model is not on an Anthropic-compatible provider")
-		return
-	}
-	if open, reason := providerCircuitOpen(route.Provider, time.Now().UTC()); open {
-		anthropicError(w, http.StatusServiceUnavailable, reason)
 		return
 	}
 	if blocked, status, reason, _ := s.checkAPIKeyPolicy(r.Context(), key, route); blocked {
@@ -1275,15 +1289,362 @@ func (s *Server) anthropicMessages(w http.ResponseWriter, r *http.Request, user 
 		anthropicError(w, status, reason)
 		return
 	}
-	raw["model"] = route.Model.ModelID
-	body, _ = json.Marshal(raw)
+	result := s.executeAnthropicPlan(r.Context(), candidates, raw, r.Header, user, key, requestID(), reliabilityPolicy(route.Model))
+	writeAnthropicResult(w, result)
+}
+
+func (s *Server) executeOpenAIPlan(ctx context.Context, candidates []store.RoutedModel, raw map[string]any, user store.User, key store.APIKey, requestID string, policy routeReliabilityPolicy) upstreamResult {
+	var last upstreamResult
+	attemptSeq := 0
+	for idx, route := range candidates {
+		if route.Provider.Type != "openai" && route.Provider.Type != "bedrock" {
+			continue
+		}
+		if policy.HealthRoutingEnabled {
+			if open, reason := providerCircuitOpen(route.Provider, time.Now().UTC()); open {
+				last = openAIPlanError(route, http.StatusServiceUnavailable, reason)
+				continue
+			}
+		}
+		if idx > 0 {
+			if blocked, status, reason, typ := s.checkRouteAdmission(ctx, user, key, route); blocked {
+				last = openAIPlanError(route, status, reason)
+				if typ == "permission_error" {
+					continue
+				}
+				continue
+			}
+		}
+		attempts := policy.RetryAttempts + 1
+		for attempt := 0; attempt < attempts; attempt++ {
+			attemptSeq++
+			result := s.callOpenAINonStreaming(ctx, route, raw, policy.RequestTimeout)
+			s.recordProviderOutcome(ctx, route.Provider.ID, result.Status, result.ErrorText)
+			s.recordUsage(ctx, attemptRequestID(requestID, attemptSeq), user, key, route, result.Protocol, parseOpenAIUsage(result.Body), result.LatencyMS, result.Status, result.ErrorText)
+			last = result
+			if !providerStatusIsFailure(result.Status) {
+				return result
+			}
+			if attempt+1 < attempts && providerStatusAllowsRetry(result.Status) {
+				continue
+			}
+			break
+		}
+	}
+	if last.Status == 0 {
+		return upstreamResult{Status: http.StatusServiceUnavailable, ErrorText: "no available OpenAI-compatible provider candidate"}
+	}
+	return last
+}
+
+func (s *Server) executeAnthropicPlan(ctx context.Context, candidates []store.RoutedModel, raw map[string]any, inbound http.Header, user store.User, key store.APIKey, requestID string, policy routeReliabilityPolicy) upstreamResult {
+	var last upstreamResult
+	attemptSeq := 0
+	for idx, route := range candidates {
+		if route.Provider.Type != "anthropic" {
+			continue
+		}
+		if policy.HealthRoutingEnabled {
+			if open, reason := providerCircuitOpen(route.Provider, time.Now().UTC()); open {
+				last = upstreamResult{Route: route, Protocol: "anthropic", Status: http.StatusServiceUnavailable, ErrorText: reason}
+				continue
+			}
+		}
+		if idx > 0 {
+			if blocked, status, reason, _ := s.checkRouteAdmission(ctx, user, key, route); blocked {
+				last = upstreamResult{Route: route, Protocol: "anthropic", Status: status, ErrorText: reason}
+				continue
+			}
+		}
+		attempts := policy.RetryAttempts + 1
+		for attempt := 0; attempt < attempts; attempt++ {
+			attemptSeq++
+			result := s.callAnthropicNonStreaming(ctx, route, raw, inbound, policy.RequestTimeout)
+			s.recordProviderOutcome(ctx, route.Provider.ID, result.Status, result.ErrorText)
+			s.recordUsage(ctx, attemptRequestID(requestID, attemptSeq), user, key, route, "anthropic", parseAnthropicUsage(result.Body), result.LatencyMS, result.Status, result.ErrorText)
+			last = result
+			if !providerStatusIsFailure(result.Status) {
+				return result
+			}
+			if attempt+1 < attempts && providerStatusAllowsRetry(result.Status) {
+				continue
+			}
+			break
+		}
+	}
+	if last.Status == 0 {
+		return upstreamResult{Status: http.StatusServiceUnavailable, ErrorText: "no available Anthropic-compatible provider candidate"}
+	}
+	return last
+}
+
+func (s *Server) selectOpenAIStreamCandidate(ctx context.Context, candidates []store.RoutedModel, user store.User, key store.APIKey, policy routeReliabilityPolicy) (store.RoutedModel, int, string, string, bool) {
+	for idx, route := range candidates {
+		if route.Provider.Type == "bedrock" {
+			continue
+		}
+		if route.Provider.Type != "openai" {
+			continue
+		}
+		if policy.HealthRoutingEnabled {
+			if open, reason := providerCircuitOpen(route.Provider, time.Now().UTC()); open {
+				if idx == 0 && len(candidates) == 1 {
+					return store.RoutedModel{}, http.StatusServiceUnavailable, reason, "provider_unavailable", false
+				}
+				continue
+			}
+		}
+		if idx > 0 {
+			if blocked, status, reason, typ := s.checkRouteAdmission(ctx, user, key, route); blocked {
+				if idx == 0 {
+					return store.RoutedModel{}, status, reason, typ, false
+				}
+				continue
+			}
+		}
+		return route, 0, "", "", true
+	}
+	return store.RoutedModel{}, http.StatusServiceUnavailable, "no available streaming OpenAI-compatible provider candidate", "provider_unavailable", false
+}
+
+func (s *Server) checkRouteAdmission(ctx context.Context, user store.User, key store.APIKey, route store.RoutedModel) (bool, int, string, string) {
+	if blocked, status, reason, typ := s.checkAPIKeyPolicy(ctx, key, route); blocked {
+		return true, status, reason, typ
+	}
+	if blocked, reason := s.checkBudget(ctx, user, route.Model); blocked {
+		return true, http.StatusPaymentRequired, reason, "insufficient_quota"
+	}
+	if blocked, status, reason, typ := s.checkRateLimits(ctx, user, route); blocked {
+		return true, status, reason, typ
+	}
+	return false, 0, "", ""
+}
+
+func (s *Server) callOpenAINonStreaming(parent context.Context, route store.RoutedModel, raw map[string]any, timeout time.Duration) upstreamResult {
+	if route.Provider.Type == "bedrock" {
+		return s.callBedrockOpenAINonStreaming(parent, route, raw, timeout)
+	}
+	attemptRaw := cloneJSONMap(raw)
+	attemptRaw["model"] = route.Model.ModelID
+	body, err := json.Marshal(attemptRaw)
+	if err != nil {
+		return upstreamResult{Route: route, Protocol: "openai", Status: http.StatusInternalServerError, ErrorText: err.Error()}
+	}
+	ctx, cancel := contextWithOptionalTimeout(parent, timeout)
+	defer cancel()
+	endpoint := strings.TrimRight(route.Provider.BaseURL, "/") + "/chat/completions"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return upstreamResult{Route: route, Protocol: "openai", Status: http.StatusInternalServerError, ErrorText: err.Error()}
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if apiKey := providerAPIKey(route.Provider); apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	req.Header.Set("User-Agent", "Phlox-GW/0.1")
 	start := time.Now()
-	requestID := requestID()
-	statusCode, responseBody, errText := s.proxyAnthropic(w, r, route, body)
+	resp, err := s.httpClient.Do(req)
 	latency := time.Since(start).Milliseconds()
-	usage := parseAnthropicUsage(responseBody)
-	s.recordProviderOutcome(r.Context(), route.Provider.ID, statusCode, errText)
-	s.recordUsage(r.Context(), requestID, user, key, route, "anthropic", usage, latency, statusCode, errText)
+	if err != nil {
+		status := http.StatusBadGateway
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			status = http.StatusGatewayTimeout
+		}
+		return upstreamResult{Route: route, Protocol: "openai", Status: status, ErrorText: err.Error(), LatencyMS: latency}
+	}
+	defer resp.Body.Close()
+	responseBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return upstreamResult{Route: route, Protocol: "openai", Status: resp.StatusCode, Headers: resp.Header.Clone(), ErrorText: err.Error(), LatencyMS: latency}
+	}
+	result := upstreamResult{Route: route, Protocol: "openai", Status: resp.StatusCode, Headers: resp.Header.Clone(), Body: responseBody, LatencyMS: latency}
+	if resp.StatusCode >= 400 {
+		result.ErrorText = string(responseBody)
+	}
+	return result
+}
+
+func (s *Server) callAnthropicNonStreaming(parent context.Context, route store.RoutedModel, raw map[string]any, inbound http.Header, timeout time.Duration) upstreamResult {
+	attemptRaw := cloneJSONMap(raw)
+	attemptRaw["model"] = route.Model.ModelID
+	body, err := json.Marshal(attemptRaw)
+	if err != nil {
+		return upstreamResult{Route: route, Protocol: "anthropic", Status: http.StatusInternalServerError, ErrorText: err.Error()}
+	}
+	ctx, cancel := contextWithOptionalTimeout(parent, timeout)
+	defer cancel()
+	endpoint := strings.TrimRight(route.Provider.BaseURL, "/") + "/v1/messages"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return upstreamResult{Route: route, Protocol: "anthropic", Status: http.StatusInternalServerError, ErrorText: err.Error()}
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "Phlox-GW/0.1")
+	version := inbound.Get("anthropic-version")
+	if version == "" {
+		version = "2023-06-01"
+	}
+	req.Header.Set("anthropic-version", version)
+	if beta := inbound.Get("anthropic-beta"); beta != "" {
+		req.Header.Set("anthropic-beta", beta)
+	}
+	if apiKey := providerAPIKey(route.Provider); apiKey != "" {
+		req.Header.Set("x-api-key", apiKey)
+	}
+	start := time.Now()
+	resp, err := s.httpClient.Do(req)
+	latency := time.Since(start).Milliseconds()
+	if err != nil {
+		status := http.StatusBadGateway
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			status = http.StatusGatewayTimeout
+		}
+		return upstreamResult{Route: route, Protocol: "anthropic", Status: status, ErrorText: err.Error(), LatencyMS: latency}
+	}
+	defer resp.Body.Close()
+	responseBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return upstreamResult{Route: route, Protocol: "anthropic", Status: resp.StatusCode, Headers: resp.Header.Clone(), ErrorText: err.Error(), LatencyMS: latency}
+	}
+	result := upstreamResult{Route: route, Protocol: "anthropic", Status: resp.StatusCode, Headers: resp.Header.Clone(), Body: responseBody, LatencyMS: latency}
+	if resp.StatusCode >= 400 {
+		result.ErrorText = string(responseBody)
+	}
+	return result
+}
+
+func (s *Server) callBedrockOpenAINonStreaming(parent context.Context, route store.RoutedModel, raw map[string]any, timeout time.Duration) upstreamResult {
+	input, err := bedrockConverseInput(route.Model.ModelID, raw)
+	if err != nil {
+		return upstreamResult{Route: route, Protocol: "bedrock", Status: http.StatusBadRequest, ErrorText: err.Error()}
+	}
+	ctx, cancel := contextWithOptionalTimeout(parent, timeout)
+	defer cancel()
+	client, err := s.bedrockClient(ctx, route.Provider)
+	if err != nil {
+		msg := "Bedrock configuration failed: " + err.Error()
+		return upstreamResult{Route: route, Protocol: "bedrock", Status: http.StatusBadGateway, ErrorText: msg}
+	}
+	start := time.Now()
+	output, err := client.Converse(ctx, input)
+	latency := time.Since(start).Milliseconds()
+	if err != nil {
+		status := bedrockErrorStatus(err)
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			status = http.StatusGatewayTimeout
+		}
+		return upstreamResult{Route: route, Protocol: "bedrock", Status: status, ErrorText: bedrockErrorMessage(err), LatencyMS: latency}
+	}
+	response := openAIResponseFromBedrock(route, output)
+	body, err := json.Marshal(response)
+	if err != nil {
+		return upstreamResult{Route: route, Protocol: "bedrock", Status: http.StatusInternalServerError, ErrorText: err.Error(), LatencyMS: latency}
+	}
+	return upstreamResult{
+		Route:     route,
+		Protocol:  "bedrock",
+		Status:    http.StatusOK,
+		Headers:   http.Header{"Content-Type": []string{"application/json"}},
+		Body:      body,
+		LatencyMS: latency,
+	}
+}
+
+func writeOpenAIResult(w http.ResponseWriter, result upstreamResult) {
+	if result.Body == nil {
+		openAIError(w, resultStatus(result), fallbackString(result.ErrorText, "provider unavailable"), "provider_error")
+		return
+	}
+	writeUpstreamResult(w, result)
+}
+
+func writeAnthropicResult(w http.ResponseWriter, result upstreamResult) {
+	if result.Body == nil {
+		anthropicError(w, resultStatus(result), fallbackString(result.ErrorText, "provider unavailable"))
+		return
+	}
+	writeUpstreamResult(w, result)
+}
+
+func writeUpstreamResult(w http.ResponseWriter, result upstreamResult) {
+	for k, values := range result.Headers {
+		if shouldProxyHeader(k) {
+			for _, v := range values {
+				w.Header().Add(k, v)
+			}
+		}
+	}
+	if w.Header().Get("Content-Type") == "" {
+		w.Header().Set("Content-Type", "application/json")
+	}
+	w.WriteHeader(resultStatus(result))
+	_, _ = w.Write(result.Body)
+}
+
+func resultStatus(result upstreamResult) int {
+	if result.Status == 0 {
+		return http.StatusServiceUnavailable
+	}
+	return result.Status
+}
+
+func openAIPlanError(route store.RoutedModel, status int, reason string) upstreamResult {
+	return upstreamResult{Route: route, Protocol: route.Provider.Type, Status: status, ErrorText: reason}
+}
+
+func attemptRequestID(requestID string, attempt int) string {
+	if attempt <= 1 {
+		return requestID
+	}
+	return fmt.Sprintf("%s-attempt-%d", requestID, attempt)
+}
+
+func reliabilityPolicy(m store.Model) routeReliabilityPolicy {
+	retries := m.RetryAttempts
+	if retries < 0 {
+		retries = 0
+	}
+	if retries > 5 {
+		retries = 5
+	}
+	var timeout time.Duration
+	if m.RequestTimeoutMS > 0 {
+		timeout = time.Duration(m.RequestTimeoutMS) * time.Millisecond
+		if timeout > 30*time.Minute {
+			timeout = 30 * time.Minute
+		}
+	}
+	return routeReliabilityPolicy{
+		RetryAttempts:        retries,
+		RequestTimeout:       timeout,
+		HealthRoutingEnabled: m.HealthRoutingEnabled,
+	}
+}
+
+func contextWithOptionalTimeout(parent context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if timeout > 0 {
+		return context.WithTimeout(parent, timeout)
+	}
+	return context.WithCancel(parent)
+}
+
+func cloneJSONMap(raw map[string]any) map[string]any {
+	out := make(map[string]any, len(raw))
+	for k, v := range raw {
+		out[k] = v
+	}
+	return out
+}
+
+func providerStatusAllowsRetry(statusCode int) bool {
+	return statusCode == http.StatusRequestTimeout || statusCode == http.StatusTooManyRequests || statusCode >= 500
+}
+
+func fallbackString(v, fallback string) string {
+	if strings.TrimSpace(v) == "" {
+		return fallback
+	}
+	return v
 }
 
 func (s *Server) proxyOpenAI(w http.ResponseWriter, r *http.Request, route store.RoutedModel, body []byte, raw map[string]any) (int, []byte, string) {
@@ -2223,6 +2584,10 @@ func (s *Server) modelFromRequest(w http.ResponseWriter, r *http.Request, pathID
 		ContextWindow        int     `json:"context_window"`
 		SupportsStreaming    bool    `json:"supports_streaming"`
 		Enabled              bool    `json:"enabled"`
+		FallbackRoutes       string  `json:"fallback_routes"`
+		RetryAttempts        int     `json:"retry_attempts"`
+		RequestTimeoutMS     int     `json:"request_timeout_ms"`
+		HealthRoutingEnabled *bool   `json:"health_routing_enabled"`
 	}
 	if !decodeJSON(w, r, &req) {
 		return store.Model{}, false
@@ -2249,6 +2614,14 @@ func (s *Server) modelFromRequest(w http.ResponseWriter, r *http.Request, pathID
 		respondError(w, http.StatusBadRequest, "model prices cannot be negative")
 		return store.Model{}, false
 	}
+	if req.RetryAttempts < 0 || req.RetryAttempts > 5 {
+		respondError(w, http.StatusBadRequest, "retry_attempts must be between 0 and 5")
+		return store.Model{}, false
+	}
+	if req.RequestTimeoutMS < 0 {
+		respondError(w, http.StatusBadRequest, "request_timeout_ms cannot be negative")
+		return store.Model{}, false
+	}
 	route := strings.TrimSpace(req.Route)
 	if route == "" {
 		route = providerID + "/" + modelID
@@ -2256,6 +2629,10 @@ func (s *Server) modelFromRequest(w http.ResponseWriter, r *http.Request, pathID
 	displayName := strings.TrimSpace(req.DisplayName)
 	if displayName == "" {
 		displayName = modelID
+	}
+	healthRoutingEnabled := true
+	if req.HealthRoutingEnabled != nil {
+		healthRoutingEnabled = *req.HealthRoutingEnabled
 	}
 	return store.Model{
 		ID:                   id,
@@ -2268,6 +2645,10 @@ func (s *Server) modelFromRequest(w http.ResponseWriter, r *http.Request, pathID
 		ContextWindow:        req.ContextWindow,
 		SupportsStreaming:    req.SupportsStreaming,
 		Enabled:              req.Enabled,
+		FallbackRoutes:       req.FallbackRoutes,
+		RetryAttempts:        req.RetryAttempts,
+		RequestTimeoutMS:     req.RequestTimeoutMS,
+		HealthRoutingEnabled: healthRoutingEnabled,
 	}, true
 }
 
@@ -2344,6 +2725,10 @@ func modelAuditDetails(m store.Model) map[string]any {
 		"context_window":          m.ContextWindow,
 		"supports_streaming":      m.SupportsStreaming,
 		"enabled":                 m.Enabled,
+		"fallback_routes":         m.FallbackRoutes,
+		"retry_attempts":          m.RetryAttempts,
+		"request_timeout_ms":      m.RequestTimeoutMS,
+		"health_routing_enabled":  m.HealthRoutingEnabled,
 	}
 }
 

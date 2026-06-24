@@ -45,6 +45,8 @@ This is the first implementation scaffold. It includes:
   key lifecycle events.
 - Provider health state with automatic failure tracking and circuit-open blocking after
   repeated provider failures.
+- Model-level reliability controls for fallback routes, retry attempts, request timeouts,
+  and health-aware routing.
 - Admin operations charts for 30-day cost, tokens, requests, errors, and average latency.
 - `/v1/models`, `/v1/chat/completions`, and `/anthropic/v1/messages` gateway surfaces.
 - Bedrock models can be exposed through `/v1/chat/completions` for non-streaming text chat,
@@ -53,7 +55,7 @@ This is the first implementation scaffold. It includes:
   upstream stream includes a final usage chunk.
 - Embedded dashboard assets under `frontend/dist`.
 
-Advanced load balancing, guardrails, semantic caching, and full Prometheus/OpenTelemetry
+Weighted load balancing, guardrails, semantic caching, and full Prometheus/OpenTelemetry
 integrations are documented in the roadmap and will be added behind the existing provider,
 policy, and usage seams.
 

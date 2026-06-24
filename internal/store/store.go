@@ -91,6 +91,10 @@ type Model struct {
 	ContextWindow        int       `json:"context_window"`
 	SupportsStreaming    bool      `json:"supports_streaming"`
 	Enabled              bool      `json:"enabled"`
+	FallbackRoutes       string    `json:"fallback_routes"`
+	RetryAttempts        int       `json:"retry_attempts"`
+	RequestTimeoutMS     int       `json:"request_timeout_ms"`
+	HealthRoutingEnabled bool      `json:"health_routing_enabled"`
 	CreatedAt            time.Time `json:"created_at"`
 	UpdatedAt            time.Time `json:"updated_at"`
 }
@@ -281,6 +285,10 @@ func (s *Store) migrate(ctx context.Context) error {
 		{table: "providers", column: "last_health_check_at", spec: "TEXT"},
 		{table: "providers", column: "last_error", spec: "TEXT NOT NULL DEFAULT ''"},
 		{table: "providers", column: "circuit_open_until", spec: "TEXT"},
+		{table: "models", column: "fallback_routes", spec: "TEXT NOT NULL DEFAULT ''"},
+		{table: "models", column: "retry_attempts", spec: "INTEGER NOT NULL DEFAULT 0"},
+		{table: "models", column: "request_timeout_ms", spec: "INTEGER NOT NULL DEFAULT 0"},
+		{table: "models", column: "health_routing_enabled", spec: "INTEGER NOT NULL DEFAULT 1"},
 	}
 	for _, migration := range migrations {
 		if err := s.ensureColumn(ctx, migration.table, migration.column, migration.spec); err != nil {
@@ -814,7 +822,7 @@ func (s *Store) DeleteProvider(ctx context.Context, id string) error {
 }
 
 func (s *Store) ListModels(ctx context.Context, includeDisabled bool) ([]Model, error) {
-	query := `SELECT id, provider_id, model_id, route, display_name, input_cost_per_million, output_cost_per_million, context_window, supports_streaming, enabled, created_at, updated_at FROM models`
+	query := `SELECT ` + modelColumns + ` FROM models`
 	if !includeDisabled {
 		query += ` WHERE enabled = 1`
 	}
@@ -839,9 +847,11 @@ func (s *Store) CreateModel(ctx context.Context, m Model) error {
 	now := time.Now().UTC()
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO models
-		(id, provider_id, model_id, route, display_name, input_cost_per_million, output_cost_per_million, context_window, supports_streaming, enabled, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		m.ID, m.ProviderID, m.ModelID, m.Route, m.DisplayName, m.InputCostPerMillion, m.OutputCostPerMillion, m.ContextWindow, boolInt(m.SupportsStreaming), boolInt(m.Enabled), formatTime(now), formatTime(now))
+		(id, provider_id, model_id, route, display_name, input_cost_per_million, output_cost_per_million, context_window,
+		 supports_streaming, enabled, fallback_routes, retry_attempts, request_timeout_ms, health_routing_enabled, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		m.ID, m.ProviderID, m.ModelID, m.Route, m.DisplayName, m.InputCostPerMillion, m.OutputCostPerMillion, m.ContextWindow,
+		boolInt(m.SupportsStreaming), boolInt(m.Enabled), normalizeList(m.FallbackRoutes), clampNonNegative(m.RetryAttempts), clampNonNegative(m.RequestTimeoutMS), boolInt(m.HealthRoutingEnabled), formatTime(now), formatTime(now))
 	if isUniqueErr(err) {
 		return ErrConflict
 	}
@@ -853,9 +863,12 @@ func (s *Store) UpdateModel(ctx context.Context, m Model) error {
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE models
 		SET provider_id = ?, model_id = ?, route = ?, display_name = ?, input_cost_per_million = ?, output_cost_per_million = ?,
-		    context_window = ?, supports_streaming = ?, enabled = ?, updated_at = ?
+		    context_window = ?, supports_streaming = ?, enabled = ?, fallback_routes = ?, retry_attempts = ?, request_timeout_ms = ?,
+		    health_routing_enabled = ?, updated_at = ?
 		WHERE id = ?`,
-		m.ProviderID, m.ModelID, m.Route, m.DisplayName, m.InputCostPerMillion, m.OutputCostPerMillion, m.ContextWindow, boolInt(m.SupportsStreaming), boolInt(m.Enabled), formatTime(now), m.ID)
+		m.ProviderID, m.ModelID, m.Route, m.DisplayName, m.InputCostPerMillion, m.OutputCostPerMillion, m.ContextWindow,
+		boolInt(m.SupportsStreaming), boolInt(m.Enabled), normalizeList(m.FallbackRoutes), clampNonNegative(m.RetryAttempts), clampNonNegative(m.RequestTimeoutMS),
+		boolInt(m.HealthRoutingEnabled), formatTime(now), m.ID)
 	if err != nil {
 		if isUniqueErr(err) {
 			return ErrConflict
@@ -932,6 +945,31 @@ func (s *Store) ResolveModel(ctx context.Context, requested string) (RoutedModel
 		return matches[0], nil
 	}
 	return scanRoutedModel(row)
+}
+
+func (s *Store) ResolveModelCandidates(ctx context.Context, requested string) ([]RoutedModel, error) {
+	primary, err := s.ResolveModel(ctx, requested)
+	if err != nil {
+		return nil, err
+	}
+	candidates := []RoutedModel{primary}
+	seen := map[string]bool{primary.Model.Route: true, primary.Model.ID: true}
+	for _, fallback := range splitNormalizedList(primary.Model.FallbackRoutes) {
+		if seen[fallback] {
+			continue
+		}
+		route, err := s.ResolveModel(ctx, fallback)
+		if err != nil {
+			continue
+		}
+		if seen[route.Model.Route] || seen[route.Model.ID] {
+			continue
+		}
+		seen[route.Model.Route] = true
+		seen[route.Model.ID] = true
+		candidates = append(candidates, route)
+	}
+	return candidates, nil
 }
 
 func (s *Store) ListBudgets(ctx context.Context) ([]Budget, error) {
@@ -1463,6 +1501,10 @@ const providerColumns = `id, name, type, base_url, api_key, api_key_env, aws_reg
 
 const providerColumnsAliased = `p.id, p.name, p.type, p.base_url, p.api_key, p.api_key_env, p.aws_region, p.enabled, p.health_status, p.consecutive_failures, p.last_health_check_at, p.last_error, p.circuit_open_until, p.created_at, p.updated_at`
 
+const modelColumns = `id, provider_id, model_id, route, display_name, input_cost_per_million, output_cost_per_million, context_window, supports_streaming, enabled, fallback_routes, retry_attempts, request_timeout_ms, health_routing_enabled, created_at, updated_at`
+
+const modelColumnsAliased = `m.id, m.provider_id, m.model_id, m.route, m.display_name, m.input_cost_per_million, m.output_cost_per_million, m.context_window, m.supports_streaming, m.enabled, m.fallback_routes, m.retry_attempts, m.request_timeout_ms, m.health_routing_enabled, m.created_at, m.updated_at`
+
 func scanProvider(row scanner) (Provider, error) {
 	var p Provider
 	var enabled int
@@ -1494,9 +1536,10 @@ func scanProvider(row scanner) (Provider, error) {
 
 func scanModel(row scanner) (Model, error) {
 	var m Model
-	var streaming, enabled int
+	var streaming, enabled, healthRouting int
 	var created, updated string
-	err := row.Scan(&m.ID, &m.ProviderID, &m.ModelID, &m.Route, &m.DisplayName, &m.InputCostPerMillion, &m.OutputCostPerMillion, &m.ContextWindow, &streaming, &enabled, &created, &updated)
+	err := row.Scan(&m.ID, &m.ProviderID, &m.ModelID, &m.Route, &m.DisplayName, &m.InputCostPerMillion, &m.OutputCostPerMillion, &m.ContextWindow,
+		&streaming, &enabled, &m.FallbackRoutes, &m.RetryAttempts, &m.RequestTimeoutMS, &healthRouting, &created, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Model{}, ErrNotFound
 	}
@@ -1505,13 +1548,14 @@ func scanModel(row scanner) (Model, error) {
 	}
 	m.SupportsStreaming = streaming == 1
 	m.Enabled = enabled == 1
+	m.HealthRoutingEnabled = healthRouting == 1
 	m.CreatedAt = parseTime(created)
 	m.UpdatedAt = parseTime(updated)
 	return m, nil
 }
 
 const routedModelQuery = `
-	SELECT m.id, m.provider_id, m.model_id, m.route, m.display_name, m.input_cost_per_million, m.output_cost_per_million, m.context_window, m.supports_streaming, m.enabled, m.created_at, m.updated_at,
+	SELECT ` + modelColumnsAliased + `,
 	       ` + providerColumnsAliased + `
 	FROM models m
 	JOIN providers p ON p.id = m.provider_id`
@@ -1519,10 +1563,11 @@ const routedModelQuery = `
 func scanRoutedModel(row scanner) (RoutedModel, error) {
 	var m Model
 	var p Provider
-	var mStreaming, mEnabled, pEnabled int
+	var mStreaming, mEnabled, mHealthRouting, pEnabled int
 	var pLastCheck, pCircuitOpen sql.NullString
 	var mCreated, mUpdated, pCreated, pUpdated string
-	err := row.Scan(&m.ID, &m.ProviderID, &m.ModelID, &m.Route, &m.DisplayName, &m.InputCostPerMillion, &m.OutputCostPerMillion, &m.ContextWindow, &mStreaming, &mEnabled, &mCreated, &mUpdated,
+	err := row.Scan(&m.ID, &m.ProviderID, &m.ModelID, &m.Route, &m.DisplayName, &m.InputCostPerMillion, &m.OutputCostPerMillion, &m.ContextWindow,
+		&mStreaming, &mEnabled, &m.FallbackRoutes, &m.RetryAttempts, &m.RequestTimeoutMS, &mHealthRouting, &mCreated, &mUpdated,
 		&p.ID, &p.Name, &p.Type, &p.BaseURL, &p.APIKey, &p.APIKeyEnv, &p.AWSRegion, &pEnabled, &p.HealthStatus, &p.ConsecutiveFailures, &pLastCheck, &p.LastError, &pCircuitOpen, &pCreated, &pUpdated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return RoutedModel{}, ErrNotFound
@@ -1532,6 +1577,7 @@ func scanRoutedModel(row scanner) (RoutedModel, error) {
 	}
 	m.SupportsStreaming = mStreaming == 1
 	m.Enabled = mEnabled == 1
+	m.HealthRoutingEnabled = mHealthRouting == 1
 	m.CreatedAt = parseTime(mCreated)
 	m.UpdatedAt = parseTime(mUpdated)
 	p.Enabled = pEnabled == 1
@@ -1638,6 +1684,10 @@ func rateLimitUsageField(scopeType string) (string, bool) {
 }
 
 func normalizeList(v string) string {
+	return strings.Join(splitNormalizedList(v), "\n")
+}
+
+func splitNormalizedList(v string) []string {
 	parts := strings.FieldsFunc(v, func(r rune) bool {
 		return r == ',' || r == '\n' || r == '\r' || r == '\t'
 	})
@@ -1648,7 +1698,14 @@ func normalizeList(v string) string {
 			out = append(out, part)
 		}
 	}
-	return strings.Join(out, "\n")
+	return out
+}
+
+func clampNonNegative(v int) int {
+	if v < 0 {
+		return 0
+	}
+	return v
 }
 
 func limitProviderError(v string) string {
@@ -1722,6 +1779,10 @@ var schema = []string{
 		context_window INTEGER NOT NULL DEFAULT 0,
 		supports_streaming INTEGER NOT NULL DEFAULT 1,
 		enabled INTEGER NOT NULL DEFAULT 1,
+		fallback_routes TEXT NOT NULL DEFAULT '',
+		retry_attempts INTEGER NOT NULL DEFAULT 0,
+		request_timeout_ms INTEGER NOT NULL DEFAULT 0,
+		health_routing_enabled INTEGER NOT NULL DEFAULT 1,
 		created_at TEXT NOT NULL,
 		updated_at TEXT NOT NULL
 	)`,

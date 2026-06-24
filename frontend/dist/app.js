@@ -388,8 +388,12 @@ function adminContentView(usage) {
           <input id="model-input-cost" placeholder="Input $ / 1M" type="number" min="0" step="0.0001" value="0" />
           <input id="model-output-cost" placeholder="Output $ / 1M" type="number" min="0" step="0.0001" value="0" />
           <input id="model-context" placeholder="Context window" type="number" min="0" step="1" value="0" />
+          <textarea id="model-fallback-routes" placeholder="Fallback routes, one per line, in order"></textarea>
+          <input id="model-retry-attempts" placeholder="Retries per candidate" type="number" min="0" max="5" step="1" value="0" />
+          <input id="model-timeout-ms" placeholder="Timeout ms (0 = default)" type="number" min="0" step="1000" value="0" />
           <label class="check"><input id="model-streaming" type="checkbox" checked /> Streaming</label>
           <label class="check"><input id="model-enabled" type="checkbox" checked /> Enabled</label>
+          <label class="check"><input id="model-health-routing" type="checkbox" checked /> Health routing</label>
           <button class="btn primary" id="create-model">${icon('plus', 'btn-icon')}Add model</button>
         </div>
       `)}
@@ -570,7 +574,7 @@ function modelRows() {
   return `
     <div class="table-scroll">
       <table>
-        <thead><tr><th>Route</th><th>Provider</th><th>Model id</th><th>Name</th><th>Input</th><th>Output</th><th>Context</th><th>Streaming</th><th>Enabled</th><th>Actions</th></tr></thead>
+        <thead><tr><th>Route</th><th>Provider</th><th>Model id</th><th>Name</th><th>Input</th><th>Output</th><th>Context</th><th>Fallback routes</th><th>Retries</th><th>Timeout ms</th><th>Health routing</th><th>Streaming</th><th>Enabled</th><th>Actions</th></tr></thead>
         <tbody>
           ${state.adminModels.map(m => `
             <tr data-model-row="${esc(m.id)}">
@@ -581,6 +585,10 @@ function modelRows() {
               <td><input data-model-field="input_cost_per_million" type="number" min="0" step="0.0001" value="${attr(m.input_cost_per_million)}" /></td>
               <td><input data-model-field="output_cost_per_million" type="number" min="0" step="0.0001" value="${attr(m.output_cost_per_million)}" /></td>
               <td><input data-model-field="context_window" type="number" min="0" step="1" value="${attr(m.context_window)}" /></td>
+              <td><textarea data-model-field="fallback_routes" placeholder="route-a&#10;route-b">${attr(m.fallback_routes || '')}</textarea></td>
+              <td><input data-model-field="retry_attempts" type="number" min="0" max="5" step="1" value="${attr(m.retry_attempts || 0)}" /></td>
+              <td><input data-model-field="request_timeout_ms" type="number" min="0" step="1000" value="${attr(m.request_timeout_ms || 0)}" /></td>
+              <td><input data-model-field="health_routing_enabled" type="checkbox" ${m.health_routing_enabled !== false ? 'checked' : ''} /></td>
               <td><input data-model-field="supports_streaming" type="checkbox" ${m.supports_streaming ? 'checked' : ''} /></td>
               <td><input data-model-field="enabled" type="checkbox" ${m.enabled ? 'checked' : ''} /></td>
               <td><div class="actions"><button class="btn" data-test-model="${esc(m.id)}">Test</button><button class="btn" data-save-model="${esc(m.id)}">Save</button><button class="btn danger" data-delete-model="${esc(m.id)}">Delete</button></div></td>
@@ -812,6 +820,10 @@ function afterRender() {
         input_cost_per_million: num('model-input-cost'),
         output_cost_per_million: num('model-output-cost'),
         context_window: intNum('model-context'),
+        fallback_routes: val('model-fallback-routes'),
+        retry_attempts: intNum('model-retry-attempts'),
+        request_timeout_ms: intNum('model-timeout-ms'),
+        health_routing_enabled: checked('model-health-routing'),
         supports_streaming: checked('model-streaming'),
         enabled: checked('model-enabled')
       })});
@@ -828,6 +840,8 @@ function afterRender() {
       body.input_cost_per_million = Number(body.input_cost_per_million || 0);
       body.output_cost_per_million = Number(body.output_cost_per_million || 0);
       body.context_window = Number.parseInt(body.context_window || '0', 10);
+      body.retry_attempts = Number.parseInt(body.retry_attempts || '0', 10);
+      body.request_timeout_ms = Number.parseInt(body.request_timeout_ms || '0', 10);
       await api(`/api/admin/models/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(body) });
       state.notice = 'Model pricing saved.';
       await refresh();

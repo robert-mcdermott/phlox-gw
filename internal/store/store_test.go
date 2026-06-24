@@ -95,6 +95,9 @@ func TestProviderAndModelCRUD(t *testing.T) {
 		OutputCostPerMillion: 0.60,
 		SupportsStreaming:    true,
 		Enabled:              true,
+		RetryAttempts:        2,
+		RequestTimeoutMS:     30000,
+		HealthRoutingEnabled: true,
 	}
 	if err := s.CreateModel(ctx, model); err != nil {
 		t.Fatalf("CreateModel: %v", err)
@@ -109,6 +112,43 @@ func TestProviderAndModelCRUD(t *testing.T) {
 	}
 	if routed.Provider.Name != provider.Name || routed.Model.InputCostPerMillion != 0.25 {
 		t.Fatalf("unexpected routed model: %#v", routed)
+	}
+	if routed.Model.RetryAttempts != 2 || routed.Model.RequestTimeoutMS != 30000 || !routed.Model.HealthRoutingEnabled {
+		t.Fatalf("model reliability fields were not persisted: %#v", routed.Model)
+	}
+	fallbackProvider := Provider{
+		ID:      "backup-vllm",
+		Name:    "Backup vLLM",
+		Type:    "openai",
+		BaseURL: "http://127.0.0.1:8001/v1",
+		Enabled: true,
+	}
+	if err := s.CreateProvider(ctx, fallbackProvider); err != nil {
+		t.Fatalf("CreateProvider fallback: %v", err)
+	}
+	fallback := Model{
+		ID:                   "model_backup_qwen",
+		ProviderID:           fallbackProvider.ID,
+		ModelID:              "qwen3:32b",
+		Route:                "backup-vllm/qwen3:32b",
+		DisplayName:          "Qwen 32B Backup",
+		SupportsStreaming:    true,
+		Enabled:              true,
+		HealthRoutingEnabled: true,
+	}
+	if err := s.CreateModel(ctx, fallback); err != nil {
+		t.Fatalf("CreateModel fallback: %v", err)
+	}
+	model.FallbackRoutes = fallback.Route
+	if err := s.UpdateModel(ctx, model); err != nil {
+		t.Fatalf("UpdateModel fallback route: %v", err)
+	}
+	candidates, err := s.ResolveModelCandidates(ctx, model.Route)
+	if err != nil {
+		t.Fatalf("ResolveModelCandidates: %v", err)
+	}
+	if len(candidates) != 2 || candidates[0].Model.Route != model.Route || candidates[1].Model.Route != fallback.Route {
+		t.Fatalf("unexpected candidates: %#v", candidates)
 	}
 }
 

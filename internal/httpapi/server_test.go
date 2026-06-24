@@ -479,6 +479,161 @@ func TestOpenAIChatCompletionsRoutesToBedrockAndRecordsUsage(t *testing.T) {
 	}
 }
 
+func TestOpenAIChatCompletionsFallsBackAfterPrimaryProviderFailure(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer st.Close()
+	user := store.User{
+		ID:           "user_fallback",
+		Username:     "fallback-user",
+		Department:   "AI",
+		Role:         "user",
+		PasswordHash: "unused",
+		AuthProvider: "local",
+		IsActive:     true,
+	}
+	if err := st.CreateUser(ctx, user); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	plain, prefix, keyHash, err := auth.NewAPIKey()
+	if err != nil {
+		t.Fatalf("NewAPIKey: %v", err)
+	}
+	if err := st.CreateAPIKey(ctx, store.APIKey{ID: "key_fallback", UserID: user.ID, Name: "Fallback key", Prefix: prefix, KeyHash: keyHash}); err != nil {
+		t.Fatalf("CreateAPIKey: %v", err)
+	}
+
+	primaryHits := 0
+	fallbackHits := 0
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		var body string
+		status := http.StatusOK
+		switch r.URL.Host {
+		case "primary.test":
+			primaryHits++
+			if r.URL.Path != "/v1/chat/completions" {
+				t.Fatalf("unexpected primary path: %s", r.URL.Path)
+			}
+			status = http.StatusServiceUnavailable
+			body = `{"error":{"message":"primary down"}}`
+		case "fallback.test":
+			fallbackHits++
+			if r.URL.Path != "/v1/chat/completions" {
+				t.Fatalf("unexpected fallback path: %s", r.URL.Path)
+			}
+			var req map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("fallback decode: %v", err)
+			}
+			if req["model"] != "backup-model" {
+				t.Fatalf("fallback upstream model = %#v", req["model"])
+			}
+			body = `{"id":"chatcmpl_backup","object":"chat.completion","model":"backup-model","choices":[{"message":{"role":"assistant","content":"backup ok"}}],"usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7}}`
+		default:
+			t.Fatalf("unexpected upstream host: %s", r.URL.Host)
+		}
+		return &http.Response{
+			StatusCode: status,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Request:    r,
+		}, nil
+	})
+
+	primaryProvider := store.Provider{ID: "primary-openai", Name: "Primary", Type: "openai", BaseURL: "http://primary.test/v1", Enabled: true}
+	fallbackProvider := store.Provider{ID: "backup-openai", Name: "Backup", Type: "openai", BaseURL: "http://fallback.test/v1", Enabled: true}
+	if err := st.CreateProvider(ctx, primaryProvider); err != nil {
+		t.Fatalf("CreateProvider primary: %v", err)
+	}
+	if err := st.CreateProvider(ctx, fallbackProvider); err != nil {
+		t.Fatalf("CreateProvider fallback: %v", err)
+	}
+	primaryModel := store.Model{
+		ID:                   "model_primary_fallback",
+		ProviderID:           primaryProvider.ID,
+		ModelID:              "primary-model",
+		Route:                "gateway/primary-model",
+		DisplayName:          "Primary model",
+		Enabled:              true,
+		SupportsStreaming:    true,
+		FallbackRoutes:       "backup-openai/backup-model",
+		HealthRoutingEnabled: true,
+	}
+	fallbackModel := store.Model{
+		ID:                   "model_backup_fallback",
+		ProviderID:           fallbackProvider.ID,
+		ModelID:              "backup-model",
+		Route:                "backup-openai/backup-model",
+		DisplayName:          "Backup model",
+		Enabled:              true,
+		SupportsStreaming:    true,
+		HealthRoutingEnabled: true,
+	}
+	if err := st.CreateModel(ctx, primaryModel); err != nil {
+		t.Fatalf("CreateModel primary: %v", err)
+	}
+	if err := st.CreateModel(ctx, fallbackModel); err != nil {
+		t.Fatalf("CreateModel fallback: %v", err)
+	}
+
+	handler, err := New(Options{
+		Config: config.Config{SessionSecret: "test-secret"},
+		Store:  st,
+		Frontend: fstest.MapFS{
+			"frontend/dist/index.html": &fstest.MapFile{Data: []byte("<html></html>")},
+		},
+		HTTPClient: &http.Client{Transport: transport},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	resp := jsonRequest(t, handler, http.MethodPost, "/v1/chat/completions", plain, map[string]any{
+		"model":    primaryModel.Route,
+		"messages": []map[string]string{{"role": "user", "content": "hello"}},
+	})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", resp.Code, resp.Body.String())
+	}
+	if primaryHits != 1 || fallbackHits != 1 {
+		t.Fatalf("unexpected hit counts primary=%d fallback=%d", primaryHits, fallbackHits)
+	}
+	var body struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	decodeRecorder(t, resp, &body)
+	if len(body.Choices) != 1 || body.Choices[0].Message.Content != "backup ok" {
+		t.Fatalf("unexpected response body: %#v", body)
+	}
+	primaryHealth, err := st.GetProvider(ctx, primaryProvider.ID)
+	if err != nil {
+		t.Fatalf("GetProvider primary: %v", err)
+	}
+	if primaryHealth.ConsecutiveFailures != 1 || primaryHealth.HealthStatus != "degraded" {
+		t.Fatalf("primary health not updated: %#v", primaryHealth)
+	}
+	fallbackHealth, err := st.GetProvider(ctx, fallbackProvider.ID)
+	if err != nil {
+		t.Fatalf("GetProvider fallback: %v", err)
+	}
+	if fallbackHealth.ConsecutiveFailures != 0 || fallbackHealth.HealthStatus != "healthy" {
+		t.Fatalf("fallback health not updated: %#v", fallbackHealth)
+	}
+	usage, err := st.UsageForUser(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("UsageForUser: %v", err)
+	}
+	if usage.Requests != 2 || usage.InputTokens != 3 || usage.OutputTokens != 4 || usage.TotalTokens != 7 {
+		t.Fatalf("unexpected usage after fallback: %#v", usage)
+	}
+}
+
 type fakeBedrockClient struct {
 	input *bedrockruntime.ConverseInput
 }
@@ -743,4 +898,10 @@ func decodeRecorder(t *testing.T, resp *httptest.ResponseRecorder, dest any) {
 	if err := json.NewDecoder(resp.Body).Decode(dest); err != nil {
 		t.Fatalf("Decode: %v", err)
 	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
 }

@@ -60,11 +60,13 @@ not complicate the first gateway release.
 - Support API key rotation and self-service expiration controls.
 - Record admin, login, and API key lifecycle events in an immutable audit log.
 - Track provider health and block dispatch while a provider circuit is open.
+- Apply model-level provider reliability policies for retries, fallback routes, request
+  timeouts, and health-aware routing.
 - Show 30-day operational monitoring charts from the usage ledger.
 
 ### Phase 2: Production Controls
 
-- Add provider retries, failover policies, and weighted routing.
+- Add weighted routing and traffic-splitting policies.
 - Add request and response metadata search without storing prompt content by default.
 - Add budget burn-down, provider drilldowns, and model drilldowns.
 - Add Bedrock streaming, multimodal input mapping, and tool-call mapping.
