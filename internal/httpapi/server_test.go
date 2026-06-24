@@ -1470,6 +1470,135 @@ func TestAnthropicMessagesStreamsOpenAICompatibleRoute(t *testing.T) {
 	}
 }
 
+func TestPrometheusMetricsEndpointRecordsGatewayAndUpstreamMetrics(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer st.Close()
+	user := store.User{
+		ID:           "user_metrics",
+		Username:     "metrics-user",
+		Department:   "AI",
+		Role:         "user",
+		PasswordHash: "unused",
+		AuthProvider: "local",
+		IsActive:     true,
+	}
+	if err := st.CreateUser(ctx, user); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	plain, _, keyHash, err := auth.NewAPIKey()
+	if err != nil {
+		t.Fatalf("NewAPIKey: %v", err)
+	}
+	if err := st.CreateAPIKey(ctx, store.APIKey{ID: "key_metrics", UserID: user.ID, Name: "Metrics key", Prefix: "pgw-sk-met", KeyHash: keyHash}); err != nil {
+		t.Fatalf("CreateAPIKey: %v", err)
+	}
+	provider := store.Provider{ID: "metrics-openai", Name: "Metrics OpenAI", Type: "openai", BaseURL: "http://metrics-openai.test/v1", Enabled: true}
+	if err := st.CreateProvider(ctx, provider); err != nil {
+		t.Fatalf("CreateProvider: %v", err)
+	}
+	model := store.Model{
+		ID:                   "model_metrics",
+		ProviderID:           provider.ID,
+		ModelID:              "upstream-metrics",
+		Route:                "metrics/route",
+		DisplayName:          "Metrics Route",
+		InputCostPerMillion:  1,
+		OutputCostPerMillion: 2,
+		Enabled:              true,
+	}
+	if err := st.CreateModel(ctx, model); err != nil {
+		t.Fatalf("CreateModel: %v", err)
+	}
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body: io.NopCloser(strings.NewReader(`{
+				"id":"chatcmpl_metrics",
+				"object":"chat.completion",
+				"model":"upstream-metrics",
+				"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],
+				"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}
+			}`)),
+			Request: r,
+		}, nil
+	})
+	handler, err := New(Options{
+		Config: config.Config{
+			SessionSecret: "test-secret",
+			Telemetry: config.TelemetryConfig{
+				MetricsEnabled: true,
+				MetricsPath:    "/metrics",
+				ServiceName:    "phlox-gw-test",
+			},
+		},
+		Store: st,
+		Frontend: fstest.MapFS{
+			"frontend/dist/index.html": &fstest.MapFile{Data: []byte("<html></html>")},
+		},
+		HTTPClient: &http.Client{Transport: transport},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	health := httptest.NewRecorder()
+	handler.ServeHTTP(health, httptest.NewRequest(http.MethodGet, "/api/health", nil))
+	if health.Code != http.StatusOK {
+		t.Fatalf("health status = %d body = %s", health.Code, health.Body.String())
+	}
+	resp := jsonRequest(t, handler, http.MethodPost, "/v1/chat/completions", plain, map[string]any{
+		"model":    model.Route,
+		"messages": []map[string]string{{"role": "user", "content": "ping"}},
+	})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("chat status = %d body = %s", resp.Code, resp.Body.String())
+	}
+	metrics := httptest.NewRecorder()
+	handler.ServeHTTP(metrics, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if metrics.Code != http.StatusOK {
+		t.Fatalf("metrics status = %d body = %s", metrics.Code, metrics.Body.String())
+	}
+	body := metrics.Body.String()
+	for _, want := range []string{
+		`phlox_gw_http_requests_total{method="GET",route="/api/health",status="200"} 1`,
+		`phlox_gw_http_requests_total{method="POST",route="/v1/chat/completions",status="200"} 1`,
+		`phlox_gw_upstream_requests_total{model_route="metrics/route",protocol="openai",provider_id="metrics-openai",provider_type="openai",status="200"} 1`,
+		`phlox_gw_upstream_tokens_total{direction="input",model_route="metrics/route",protocol="openai",provider_id="metrics-openai",provider_type="openai"} 3`,
+		`phlox_gw_upstream_tokens_total{direction="output",model_route="metrics/route",protocol="openai",provider_id="metrics-openai",provider_type="openai"} 2`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("metrics body missing %q:\n%s", want, body)
+		}
+	}
+}
+
+func TestPrometheusMetricsEndpointDisabledByDefault(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer st.Close()
+	handler, err := New(Options{
+		Config: config.Config{SessionSecret: "test-secret"},
+		Store:  st,
+		Frontend: fstest.MapFS{
+			"frontend/dist/index.html": &fstest.MapFile{Data: []byte("<html></html>")},
+		},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if resp.Code != http.StatusNotFound {
+		t.Fatalf("metrics status = %d body = %s", resp.Code, resp.Body.String())
+	}
+}
+
 func TestOpenAIChatCompletionsFallsBackAfterPrimaryProviderFailure(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))

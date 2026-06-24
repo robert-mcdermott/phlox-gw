@@ -29,14 +29,14 @@
 - [x] Request/response metadata search and CSV export without storing prompt content by default.
 - [x] Built-in guardrail policy layer with PII/API-key redaction and blocking controls.
 - [x] Custom regex guardrail patterns with admin preview testing.
+- [x] Prometheus metrics and OpenTelemetry traces.
 
 ## Next
 
-- Prometheus metrics and OpenTelemetry traces.
+- Semantic response cache.
 
 ## Later
 
-- Semantic response cache.
 - Signed admin configuration export.
 - Cluster mode with Postgres.
 - External secrets management.

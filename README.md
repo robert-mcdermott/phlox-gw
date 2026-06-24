@@ -313,6 +313,17 @@ OIDC and Entra ID settings:
 | `PHLOX_GW_OIDC_ADMIN_GROUPS` | Space or comma separated groups that grant Phlox-GW admin role. |
 | `PHLOX_GW_OIDC_AUTO_PROVISION` | Creates local users on first SSO login. Defaults to `true`. |
 
+Telemetry settings:
+
+| Variable | Purpose |
+| --- | --- |
+| `PHLOX_GW_METRICS_ENABLED` | Exposes Prometheus metrics when `true`. Defaults to `false`. |
+| `PHLOX_GW_METRICS_PATH` | Metrics scrape path. Defaults to `/metrics`. |
+| `PHLOX_GW_OTEL_TRACES_ENABLED` | Enables OpenTelemetry trace export when `true`. Defaults to `false`. |
+| `PHLOX_GW_OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | OTLP/HTTP traces endpoint, for example `http://localhost:4318/v1/traces`. |
+| `PHLOX_GW_OTEL_EXPORTER_OTLP_INSECURE` | Allows insecure OTLP transport when `true`. |
+| `PHLOX_GW_OTEL_SAMPLE_RATIO` | Trace sampling ratio from `0.0` to `1.0`. Defaults to `1.0`. |
+
 The full configuration reference is in the [Operator Guide](docs/OPERATIONS.md).
 
 ## Accounting And Privacy
@@ -365,7 +376,6 @@ docs/                Design, operator, API, routing, plan, and roadmap docs
 
 ## Current Roadmap Focus
 
-The gateway foundation and first guardrail policy layer are in place. The next major
-implementation area is Prometheus metrics and OpenTelemetry tracing, followed by semantic
-cache support, external secrets management, signed configuration export, and cluster
-database options.
+The gateway foundation, first guardrail policy layer, and observability hooks are in
+place. The next major implementation area is semantic cache support, followed by external
+secrets management, signed configuration export, and cluster database options.

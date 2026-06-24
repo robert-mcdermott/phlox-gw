@@ -37,6 +37,7 @@ import (
 	"github.com/robert-mcdermott/phlox-gw/internal/auth"
 	"github.com/robert-mcdermott/phlox-gw/internal/config"
 	"github.com/robert-mcdermott/phlox-gw/internal/store"
+	"github.com/robert-mcdermott/phlox-gw/internal/telemetry"
 	"golang.org/x/oauth2"
 )
 
@@ -48,6 +49,7 @@ type Options struct {
 	HTTPClient           *http.Client
 	BedrockClientFactory BedrockClientFactory
 	OIDCAuthenticator    OIDCAuthenticator
+	Telemetry            *telemetry.Telemetry
 }
 
 type Server struct {
@@ -58,6 +60,7 @@ type Server struct {
 	frontend             fs.FS
 	bedrockClientFactory BedrockClientFactory
 	oidcAuthenticator    OIDCAuthenticator
+	telemetry            *telemetry.Telemetry
 }
 
 const providerFailureThreshold = 3
@@ -146,6 +149,13 @@ func New(opts Options) (http.Handler, error) {
 	if opts.HTTPClient == nil {
 		opts.HTTPClient = &http.Client{Timeout: 10 * time.Minute}
 	}
+	if opts.Telemetry == nil {
+		tel, err := telemetry.New(context.Background(), opts.Config.Telemetry, opts.Logger)
+		if err != nil {
+			return nil, err
+		}
+		opts.Telemetry = tel
+	}
 	sub, err := fs.Sub(opts.Frontend, "frontend/dist")
 	if err != nil {
 		return nil, err
@@ -158,12 +168,18 @@ func New(opts Options) (http.Handler, error) {
 		frontend:             sub,
 		bedrockClientFactory: opts.BedrockClientFactory,
 		oidcAuthenticator:    opts.OIDCAuthenticator,
+		telemetry:            opts.Telemetry,
 	}
 	if s.oidcAuthenticator == nil && s.cfg.OIDC.Enabled {
 		s.oidcAuthenticator = newDefaultOIDCAuthenticator(s.cfg.OIDC, s.httpClient)
 	}
 
 	mux := http.NewServeMux()
+	if s.telemetry.MetricsEnabled() {
+		mux.Handle("GET "+s.telemetry.MetricsPath(), s.telemetry.MetricsHandler())
+	} else {
+		mux.HandleFunc("GET "+s.telemetry.MetricsPath(), http.NotFound)
+	}
 	mux.HandleFunc("GET /api/health", s.health)
 	mux.HandleFunc("POST /api/auth/login", s.login)
 	mux.HandleFunc("GET /api/auth/oidc/config", s.oidcConfig)
@@ -226,12 +242,32 @@ func New(opts Options) (http.Handler, error) {
 func (s *Server) requestLog(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
+		ctx, span := s.telemetry.StartHTTPRequestFromHeaders(r.Context(), r.Header, r.Method, r.URL.Path)
+		r = r.WithContext(ctx)
 		rw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(rw, r)
+		duration := time.Since(start)
+		route := requestMetricRoute(r)
+		s.telemetry.ObserveHTTPRequest(r.Method, route, rw.status, duration)
+		s.telemetry.FinishHTTPRequest(span, r.Method, route, rw.status, duration)
 		if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/v1/") || strings.HasPrefix(r.URL.Path, "/anthropic/") {
-			s.logger.Info("request", "method", r.Method, "path", r.URL.Path, "status", rw.status, "duration_ms", time.Since(start).Milliseconds())
+			s.logger.Info("request", "method", r.Method, "path", r.URL.Path, "status", rw.status, "duration_ms", duration.Milliseconds())
 		}
 	})
+}
+
+func requestMetricRoute(r *http.Request) string {
+	if r.Pattern != "" {
+		if _, route, ok := strings.Cut(r.Pattern, " "); ok {
+			return route
+		}
+		return r.Pattern
+	}
+	path := strings.TrimSpace(r.URL.Path)
+	if path == "" {
+		return "/"
+	}
+	return path
 }
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
@@ -1892,9 +1928,11 @@ func (s *Server) callOpenAINonStreaming(parent context.Context, route store.Rout
 	}
 	ctx, cancel := contextWithOptionalTimeout(parent, timeout)
 	defer cancel()
+	ctx, finishTrace := s.upstreamTrace(ctx, route, "openai", "chat.completions")
 	endpoint := strings.TrimRight(route.Provider.BaseURL, "/") + "/chat/completions"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
+		finishTrace(http.StatusInternalServerError, err.Error(), 0)
 		return upstreamResult{Route: route, Protocol: "openai", Status: http.StatusInternalServerError, ErrorText: err.Error()}
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -1904,23 +1942,27 @@ func (s *Server) callOpenAINonStreaming(parent context.Context, route store.Rout
 	req.Header.Set("User-Agent", "Phlox-GW/0.1")
 	start := time.Now()
 	resp, err := s.httpClient.Do(req)
-	latency := time.Since(start).Milliseconds()
+	latencyDuration := time.Since(start)
+	latency := latencyDuration.Milliseconds()
 	if err != nil {
 		status := http.StatusBadGateway
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			status = http.StatusGatewayTimeout
 		}
+		finishTrace(status, err.Error(), latencyDuration)
 		return upstreamResult{Route: route, Protocol: "openai", Status: status, ErrorText: err.Error(), LatencyMS: latency}
 	}
 	defer resp.Body.Close()
 	responseBody, err := io.ReadAll(resp.Body)
 	if err != nil {
+		finishTrace(resp.StatusCode, err.Error(), latencyDuration)
 		return upstreamResult{Route: route, Protocol: "openai", Status: resp.StatusCode, Headers: resp.Header.Clone(), ErrorText: err.Error(), LatencyMS: latency}
 	}
 	result := upstreamResult{Route: route, Protocol: "openai", Status: resp.StatusCode, Headers: resp.Header.Clone(), Body: responseBody, LatencyMS: latency}
 	if resp.StatusCode >= 400 {
 		result.ErrorText = string(responseBody)
 	}
+	finishTrace(result.Status, result.ErrorText, latencyDuration)
 	return result
 }
 
@@ -1933,9 +1975,11 @@ func (s *Server) callAnthropicNonStreaming(parent context.Context, route store.R
 	}
 	ctx, cancel := contextWithOptionalTimeout(parent, timeout)
 	defer cancel()
+	ctx, finishTrace := s.upstreamTrace(ctx, route, "anthropic", "messages")
 	endpoint := strings.TrimRight(route.Provider.BaseURL, "/") + "/v1/messages"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
+		finishTrace(http.StatusInternalServerError, err.Error(), 0)
 		return upstreamResult{Route: route, Protocol: "anthropic", Status: http.StatusInternalServerError, ErrorText: err.Error()}
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -1953,23 +1997,27 @@ func (s *Server) callAnthropicNonStreaming(parent context.Context, route store.R
 	}
 	start := time.Now()
 	resp, err := s.httpClient.Do(req)
-	latency := time.Since(start).Milliseconds()
+	latencyDuration := time.Since(start)
+	latency := latencyDuration.Milliseconds()
 	if err != nil {
 		status := http.StatusBadGateway
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			status = http.StatusGatewayTimeout
 		}
+		finishTrace(status, err.Error(), latencyDuration)
 		return upstreamResult{Route: route, Protocol: "anthropic", Status: status, ErrorText: err.Error(), LatencyMS: latency}
 	}
 	defer resp.Body.Close()
 	responseBody, err := io.ReadAll(resp.Body)
 	if err != nil {
+		finishTrace(resp.StatusCode, err.Error(), latencyDuration)
 		return upstreamResult{Route: route, Protocol: "anthropic", Status: resp.StatusCode, Headers: resp.Header.Clone(), ErrorText: err.Error(), LatencyMS: latency}
 	}
 	result := upstreamResult{Route: route, Protocol: "anthropic", Status: resp.StatusCode, Headers: resp.Header.Clone(), Body: responseBody, LatencyMS: latency}
 	if resp.StatusCode >= 400 {
 		result.ErrorText = string(responseBody)
 	}
+	finishTrace(result.Status, result.ErrorText, latencyDuration)
 	return result
 }
 
@@ -2492,21 +2540,27 @@ func (s *Server) callBedrockOpenAINonStreaming(parent context.Context, route sto
 		msg := "Bedrock configuration failed: " + err.Error()
 		return upstreamResult{Route: route, Protocol: "bedrock", Status: http.StatusBadGateway, ErrorText: msg}
 	}
+	traceCtx, finishTrace := s.upstreamTrace(ctx, route, "bedrock", "converse")
 	start := time.Now()
-	output, err := client.Converse(ctx, input)
-	latency := time.Since(start).Milliseconds()
+	output, err := client.Converse(traceCtx, input)
+	latencyDuration := time.Since(start)
+	latency := latencyDuration.Milliseconds()
 	if err != nil {
 		status := bedrockErrorStatus(err)
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			status = http.StatusGatewayTimeout
 		}
-		return upstreamResult{Route: route, Protocol: "bedrock", Status: status, ErrorText: bedrockErrorMessage(err), LatencyMS: latency}
+		msg := bedrockErrorMessage(err)
+		finishTrace(status, msg, latencyDuration)
+		return upstreamResult{Route: route, Protocol: "bedrock", Status: status, ErrorText: msg, LatencyMS: latency}
 	}
 	response := openAIResponseFromBedrock(route, output)
 	body, err := json.Marshal(response)
 	if err != nil {
+		finishTrace(http.StatusInternalServerError, err.Error(), latencyDuration)
 		return upstreamResult{Route: route, Protocol: "bedrock", Status: http.StatusInternalServerError, ErrorText: err.Error(), LatencyMS: latency}
 	}
+	finishTrace(http.StatusOK, "", latencyDuration)
 	return upstreamResult{
 		Route:     route,
 		Protocol:  "bedrock",
@@ -2595,6 +2649,13 @@ func contextWithOptionalTimeout(parent context.Context, timeout time.Duration) (
 	return context.WithCancel(parent)
 }
 
+func (s *Server) upstreamTrace(ctx context.Context, route store.RoutedModel, protocol, operation string) (context.Context, func(int, string, time.Duration)) {
+	ctx, span := s.telemetry.StartUpstream(ctx, route.Provider.ID, route.Provider.Type, route.Model.Route, route.Model.ModelID, protocol, operation)
+	return ctx, func(status int, errText string, latency time.Duration) {
+		s.telemetry.FinishUpstream(span, status, errText, latency)
+	}
+}
+
 func cloneJSONMap(raw map[string]any) map[string]any {
 	out := make(map[string]any, len(raw))
 	for k, v := range raw {
@@ -2674,8 +2735,10 @@ func fallbackString(v, fallback string) string {
 
 func (s *Server) proxyOpenAI(w http.ResponseWriter, r *http.Request, route store.RoutedModel, body []byte, raw map[string]any, guardrails store.GuardrailPolicy) (int, []byte, string) {
 	endpoint := strings.TrimRight(route.Provider.BaseURL, "/") + "/chat/completions"
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, endpoint, bytes.NewReader(body))
+	ctx, finishTrace := s.upstreamTrace(r.Context(), route, "openai", "chat.completions")
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
+		finishTrace(http.StatusInternalServerError, err.Error(), 0)
 		openAIError(w, http.StatusInternalServerError, err.Error(), "server_error")
 		return http.StatusInternalServerError, nil, err.Error()
 	}
@@ -2685,8 +2748,10 @@ func (s *Server) proxyOpenAI(w http.ResponseWriter, r *http.Request, route store
 	}
 	req.Header.Set("User-Agent", "Phlox-GW/0.1")
 
+	start := time.Now()
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
+		finishTrace(http.StatusBadGateway, err.Error(), time.Since(start))
 		openAIError(w, http.StatusBadGateway, err.Error(), "provider_error")
 		return http.StatusBadGateway, nil, err.Error()
 	}
@@ -2708,18 +2773,23 @@ func (s *Server) proxyOpenAI(w http.ResponseWriter, r *http.Request, route store
 		}
 		usage, n, err := proxyOpenAIStream(w, resp.Body, fallbackInput, guardrails)
 		if err != nil {
+			finishTrace(resp.StatusCode, err.Error(), time.Since(start))
 			return resp.StatusCode, nil, err.Error()
 		}
+		finishTrace(resp.StatusCode, "", time.Since(start))
 		return resp.StatusCode, openAIUsageBody(usage, n), ""
 	}
 	responseBody, err := io.ReadAll(resp.Body)
 	if err != nil {
+		finishTrace(resp.StatusCode, err.Error(), time.Since(start))
 		return resp.StatusCode, nil, err.Error()
 	}
 	_, _ = w.Write(responseBody)
 	if resp.StatusCode >= 400 {
+		finishTrace(resp.StatusCode, string(responseBody), time.Since(start))
 		return resp.StatusCode, responseBody, string(responseBody)
 	}
+	finishTrace(resp.StatusCode, "", time.Since(start))
 	return resp.StatusCode, responseBody, ""
 }
 
@@ -3097,8 +3167,10 @@ func bedrockConversationRole(role types.ConversationRole) string {
 
 func (s *Server) proxyAnthropic(w http.ResponseWriter, r *http.Request, route store.RoutedModel, body []byte) (int, []byte, string) {
 	endpoint := strings.TrimRight(route.Provider.BaseURL, "/") + "/v1/messages"
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, endpoint, bytes.NewReader(body))
+	ctx, finishTrace := s.upstreamTrace(r.Context(), route, "anthropic", "messages")
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
+		finishTrace(http.StatusInternalServerError, err.Error(), 0)
 		anthropicError(w, http.StatusInternalServerError, err.Error())
 		return http.StatusInternalServerError, nil, err.Error()
 	}
@@ -3116,8 +3188,10 @@ func (s *Server) proxyAnthropic(w http.ResponseWriter, r *http.Request, route st
 		req.Header.Set("x-api-key", apiKey)
 	}
 
+	start := time.Now()
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
+		finishTrace(http.StatusBadGateway, err.Error(), time.Since(start))
 		anthropicError(w, http.StatusBadGateway, err.Error())
 		return http.StatusBadGateway, nil, err.Error()
 	}
@@ -3132,19 +3206,24 @@ func (s *Server) proxyAnthropic(w http.ResponseWriter, r *http.Request, route st
 	w.WriteHeader(resp.StatusCode)
 	responseBody, err := io.ReadAll(resp.Body)
 	if err != nil {
+		finishTrace(resp.StatusCode, err.Error(), time.Since(start))
 		return resp.StatusCode, nil, err.Error()
 	}
 	_, _ = w.Write(responseBody)
 	if resp.StatusCode >= 400 {
+		finishTrace(resp.StatusCode, string(responseBody), time.Since(start))
 		return resp.StatusCode, responseBody, string(responseBody)
 	}
+	finishTrace(resp.StatusCode, "", time.Since(start))
 	return resp.StatusCode, responseBody, ""
 }
 
 func (s *Server) proxyAnthropicStream(w http.ResponseWriter, r *http.Request, route store.RoutedModel, body []byte, guardrails store.GuardrailPolicy) (int, []byte, string) {
 	endpoint := strings.TrimRight(route.Provider.BaseURL, "/") + "/v1/messages"
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, endpoint, bytes.NewReader(body))
+	ctx, finishTrace := s.upstreamTrace(r.Context(), route, "anthropic", "messages.stream")
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
+		finishTrace(http.StatusInternalServerError, err.Error(), 0)
 		anthropicError(w, http.StatusInternalServerError, err.Error())
 		return http.StatusInternalServerError, nil, err.Error()
 	}
@@ -3162,8 +3241,10 @@ func (s *Server) proxyAnthropicStream(w http.ResponseWriter, r *http.Request, ro
 		req.Header.Set("x-api-key", apiKey)
 	}
 
+	start := time.Now()
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
+		finishTrace(http.StatusBadGateway, err.Error(), time.Since(start))
 		anthropicError(w, http.StatusBadGateway, err.Error())
 		return http.StatusBadGateway, nil, err.Error()
 	}
@@ -3185,16 +3266,20 @@ func (s *Server) proxyAnthropicStream(w http.ResponseWriter, r *http.Request, ro
 	if resp.StatusCode >= 400 {
 		responseBody, err := io.ReadAll(resp.Body)
 		if err != nil {
+			finishTrace(resp.StatusCode, err.Error(), time.Since(start))
 			return resp.StatusCode, nil, err.Error()
 		}
 		_, _ = w.Write(responseBody)
+		finishTrace(resp.StatusCode, string(responseBody), time.Since(start))
 		return resp.StatusCode, responseBody, string(responseBody)
 	}
 	usage, n, err := proxyAnthropicStream(w, resp.Body, guardrails)
 	body = anthropicUsageBody(usage, n)
 	if err != nil {
+		finishTrace(resp.StatusCode, err.Error(), time.Since(start))
 		return resp.StatusCode, body, err.Error()
 	}
+	finishTrace(resp.StatusCode, "", time.Since(start))
 	return resp.StatusCode, body, ""
 }
 
@@ -3241,8 +3326,10 @@ func (s *Server) proxyAnthropicViaOpenAIStream(w http.ResponseWriter, r *http.Re
 		return http.StatusInternalServerError, nil, err.Error()
 	}
 	endpoint := strings.TrimRight(route.Provider.BaseURL, "/") + "/chat/completions"
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, endpoint, bytes.NewReader(body))
+	ctx, finishTrace := s.upstreamTrace(r.Context(), route, "anthropic", "messages.stream.translate_openai")
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
+		finishTrace(http.StatusInternalServerError, err.Error(), 0)
 		anthropicError(w, http.StatusInternalServerError, err.Error())
 		return http.StatusInternalServerError, nil, err.Error()
 	}
@@ -3251,8 +3338,10 @@ func (s *Server) proxyAnthropicViaOpenAIStream(w http.ResponseWriter, r *http.Re
 	if apiKey := providerAPIKey(route.Provider); apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
+	start := time.Now()
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
+		finishTrace(http.StatusBadGateway, err.Error(), time.Since(start))
 		anthropicError(w, http.StatusBadGateway, err.Error())
 		return http.StatusBadGateway, nil, err.Error()
 	}
@@ -3260,10 +3349,12 @@ func (s *Server) proxyAnthropicViaOpenAIStream(w http.ResponseWriter, r *http.Re
 	if resp.StatusCode >= 400 {
 		responseBody, readErr := io.ReadAll(resp.Body)
 		if readErr != nil {
+			finishTrace(resp.StatusCode, readErr.Error(), time.Since(start))
 			anthropicError(w, resp.StatusCode, readErr.Error())
 			return resp.StatusCode, nil, readErr.Error()
 		}
 		message := providerErrorText(responseBody, string(responseBody))
+		finishTrace(resp.StatusCode, message, time.Since(start))
 		anthropicError(w, resp.StatusCode, message)
 		return resp.StatusCode, responseBody, message
 	}
@@ -3282,8 +3373,10 @@ func (s *Server) proxyAnthropicViaOpenAIStream(w http.ResponseWriter, r *http.Re
 	usage, n, err := proxyOpenAIStreamAsAnthropic(w, resp.Body, route, estimateOpenAIInputTokens(openAIRaw), guardrails)
 	responseBody := anthropicUsageBody(usage, n)
 	if err != nil {
+		finishTrace(resp.StatusCode, err.Error(), time.Since(start))
 		return resp.StatusCode, responseBody, err.Error()
 	}
+	finishTrace(resp.StatusCode, "", time.Since(start))
 	return resp.StatusCode, responseBody, ""
 }
 
@@ -3617,22 +3710,27 @@ func (s *Server) proxyBedrockOpenAI(w http.ResponseWriter, r *http.Request, rout
 		openAIError(w, http.StatusBadGateway, msg, "provider_error")
 		return http.StatusBadGateway, nil, msg
 	}
-	output, err := client.Converse(r.Context(), input)
+	traceCtx, finishTrace := s.upstreamTrace(r.Context(), route, "bedrock", "converse")
+	start := time.Now()
+	output, err := client.Converse(traceCtx, input)
 	if err != nil {
 		status := bedrockErrorStatus(err)
 		msg := bedrockErrorMessage(err)
+		finishTrace(status, msg, time.Since(start))
 		openAIError(w, status, msg, "provider_error")
 		return status, nil, msg
 	}
 	response := openAIResponseFromBedrock(route, output)
 	body, err := json.Marshal(response)
 	if err != nil {
+		finishTrace(http.StatusInternalServerError, err.Error(), time.Since(start))
 		openAIError(w, http.StatusInternalServerError, err.Error(), "server_error")
 		return http.StatusInternalServerError, nil, err.Error()
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(body)
+	finishTrace(http.StatusOK, "", time.Since(start))
 	return http.StatusOK, body, ""
 }
 
@@ -3648,10 +3746,13 @@ func (s *Server) proxyBedrockOpenAIStream(w http.ResponseWriter, r *http.Request
 		openAIError(w, http.StatusBadGateway, msg, "provider_error")
 		return http.StatusBadGateway, nil, msg
 	}
-	stream, err := client.ConverseStream(r.Context(), input)
+	traceCtx, finishTrace := s.upstreamTrace(r.Context(), route, "bedrock", "converse_stream")
+	start := time.Now()
+	stream, err := client.ConverseStream(traceCtx, input)
 	if err != nil {
 		status := bedrockErrorStatus(err)
 		msg := bedrockErrorMessage(err)
+		finishTrace(status, msg, time.Since(start))
 		openAIError(w, status, msg, "provider_error")
 		return status, nil, msg
 	}
@@ -3684,10 +3785,11 @@ func (s *Server) proxyBedrockOpenAIStream(w http.ResponseWriter, r *http.Request
 				"delta": map[string]any{"role": bedrockConversationRole(ev.Value.Role)},
 			}}, nil)
 			if err := writeChunk(chunk); err != nil {
+				finishTrace(http.StatusOK, err.Error(), time.Since(start))
 				return http.StatusOK, openAIUsageBody(usage, written), err.Error()
 			}
 		case *types.ConverseStreamOutputMemberContentBlockStart:
-			if start, ok := ev.Value.Start.(*types.ContentBlockStartMemberToolUse); ok {
+			if toolStart, ok := ev.Value.Start.(*types.ContentBlockStartMemberToolUse); ok {
 				blockIndex := aws.ToInt32(ev.Value.ContentBlockIndex)
 				toolIndex := len(toolCalls)
 				toolCalls[blockIndex] = toolIndex
@@ -3696,16 +3798,17 @@ func (s *Server) proxyBedrockOpenAIStream(w http.ResponseWriter, r *http.Request
 					"delta": map[string]any{
 						"tool_calls": []map[string]any{{
 							"index": toolIndex,
-							"id":    aws.ToString(start.Value.ToolUseId),
+							"id":    aws.ToString(toolStart.Value.ToolUseId),
 							"type":  "function",
 							"function": map[string]any{
-								"name":      aws.ToString(start.Value.Name),
+								"name":      aws.ToString(toolStart.Value.Name),
 								"arguments": "",
 							},
 						}},
 					},
 				}}, nil)
 				if err := writeChunk(chunk); err != nil {
+					finishTrace(http.StatusOK, err.Error(), time.Since(start))
 					return http.StatusOK, openAIUsageBody(usage, written), err.Error()
 				}
 			}
@@ -3716,6 +3819,7 @@ func (s *Server) proxyBedrockOpenAIStream(w http.ResponseWriter, r *http.Request
 			}
 			chunk := openAIStreamChunk(route, id, created, []map[string]any{choice}, nil)
 			if err := writeChunk(chunk); err != nil {
+				finishTrace(http.StatusOK, err.Error(), time.Since(start))
 				return http.StatusOK, openAIUsageBody(usage, written), err.Error()
 			}
 		case *types.ConverseStreamOutputMemberMessageStop:
@@ -3725,6 +3829,7 @@ func (s *Server) proxyBedrockOpenAIStream(w http.ResponseWriter, r *http.Request
 				"finish_reason": bedrockFinishReason(ev.Value.StopReason),
 			}}, nil)
 			if err := writeChunk(chunk); err != nil {
+				finishTrace(http.StatusOK, err.Error(), time.Since(start))
 				return http.StatusOK, openAIUsageBody(usage, written), err.Error()
 			}
 		case *types.ConverseStreamOutputMemberMetadata:
@@ -3732,7 +3837,9 @@ func (s *Server) proxyBedrockOpenAIStream(w http.ResponseWriter, r *http.Request
 		}
 	}
 	if err := stream.Err(); err != nil {
-		return http.StatusBadGateway, openAIUsageBody(usage, written), bedrockErrorMessage(err)
+		msg := bedrockErrorMessage(err)
+		finishTrace(http.StatusBadGateway, msg, time.Since(start))
+		return http.StatusBadGateway, openAIUsageBody(usage, written), msg
 	}
 	if includeUsage {
 		chunk := openAIStreamChunk(route, id, created, []map[string]any{}, map[string]int{
@@ -3741,14 +3848,17 @@ func (s *Server) proxyBedrockOpenAIStream(w http.ResponseWriter, r *http.Request
 			"total_tokens":      usage.Total,
 		})
 		if err := writeChunk(chunk); err != nil {
+			finishTrace(http.StatusOK, err.Error(), time.Since(start))
 			return http.StatusOK, openAIUsageBody(usage, written), err.Error()
 		}
 	}
 	n, err := writeOpenAIStreamDone(w, flusher)
 	written += int64(n)
 	if err != nil {
+		finishTrace(http.StatusOK, err.Error(), time.Since(start))
 		return http.StatusOK, openAIUsageBody(usage, written), err.Error()
 	}
+	finishTrace(http.StatusOK, "", time.Since(start))
 	return http.StatusOK, openAIUsageBody(usage, written), ""
 }
 
@@ -3778,6 +3888,18 @@ func (s *Server) recordUsage(ctx context.Context, requestID string, user store.U
 	}
 	now := time.Now().UTC()
 	cost := store.Cost(usage.Input, usage.Output, route.Model)
+	s.telemetry.ObserveUpstream(telemetry.UpstreamObservation{
+		ProviderID:   route.Provider.ID,
+		ProviderType: route.Provider.Type,
+		ModelRoute:   route.Model.Route,
+		Protocol:     protocol,
+		Status:       status,
+		Latency:      time.Duration(latencyMS) * time.Millisecond,
+		InputTokens:  usage.Input,
+		OutputTokens: usage.Output,
+		TotalTokens:  usage.Total,
+		CostUSD:      cost,
+	})
 	rec := store.UsageRecord{
 		ID:           id,
 		RequestID:    requestID,
@@ -5584,6 +5706,12 @@ type statusWriter struct {
 func (w *statusWriter) WriteHeader(status int) {
 	w.status = status
 	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *statusWriter) Flush() {
+	if flusher, ok := w.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
 }
 
 type readSeeker struct {

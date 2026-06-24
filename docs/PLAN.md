@@ -75,7 +75,7 @@ not complicate the first gateway release.
 ### Phase 2: Production Controls
 
 - Extend guardrails with external policy plugins and richer policy composition.
-- Add Prometheus metrics and OpenTelemetry tracing.
+- Add Prometheus metrics and OpenTelemetry tracing. `[implemented]`
 
 ### Phase 3: Enterprise Operations
 

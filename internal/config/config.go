@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -15,6 +16,7 @@ type Config struct {
 	SessionSecret      string
 	UsingDefaultSecret bool
 	OIDC               OIDCConfig
+	Telemetry          TelemetryConfig
 }
 
 type OIDCConfig struct {
@@ -30,6 +32,17 @@ type OIDCConfig struct {
 	GroupsClaim     string
 	AdminGroups     []string
 	AutoProvision   bool
+}
+
+type TelemetryConfig struct {
+	MetricsEnabled  bool
+	MetricsPath     string
+	TracesEnabled   bool
+	ServiceName     string
+	ServiceVersion  string
+	OTLPEndpointURL string
+	OTLPInsecure    bool
+	SampleRatio     float64
 }
 
 func Load() (Config, error) {
@@ -67,6 +80,7 @@ func Load() (Config, error) {
 		SessionSecret:      secret,
 		UsingDefaultSecret: usingDefault,
 		OIDC:               oidc,
+		Telemetry:          loadTelemetryConfig(),
 	}, nil
 }
 
@@ -95,6 +109,33 @@ func loadOIDCConfig() OIDCConfig {
 	}
 }
 
+func loadTelemetryConfig() TelemetryConfig {
+	metricsPath := strings.TrimSpace(getenv("PHLOX_GW_METRICS_PATH", "/metrics"))
+	if metricsPath == "" || !strings.HasPrefix(metricsPath, "/") {
+		metricsPath = "/metrics"
+	}
+	endpoint := strings.TrimSpace(os.Getenv("PHLOX_GW_OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"))
+	if endpoint == "" {
+		endpoint = strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"))
+	}
+	if endpoint == "" {
+		endpoint = strings.TrimSpace(os.Getenv("PHLOX_GW_OTEL_EXPORTER_OTLP_ENDPOINT"))
+	}
+	if endpoint == "" {
+		endpoint = strings.TrimSpace(os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"))
+	}
+	return TelemetryConfig{
+		MetricsEnabled:  boolEnv("PHLOX_GW_METRICS_ENABLED", false),
+		MetricsPath:     metricsPath,
+		TracesEnabled:   boolEnv("PHLOX_GW_OTEL_TRACES_ENABLED", false),
+		ServiceName:     getenv("PHLOX_GW_OTEL_SERVICE_NAME", "phlox-gw"),
+		ServiceVersion:  strings.TrimSpace(os.Getenv("PHLOX_GW_OTEL_SERVICE_VERSION")),
+		OTLPEndpointURL: endpoint,
+		OTLPInsecure:    boolEnv("PHLOX_GW_OTEL_EXPORTER_OTLP_INSECURE", boolEnv("OTEL_EXPORTER_OTLP_INSECURE", false)),
+		SampleRatio:     floatEnv("PHLOX_GW_OTEL_SAMPLE_RATIO", 1.0),
+	}
+}
+
 func boolEnv(key string, fallback bool) bool {
 	value := strings.ToLower(strings.TrimSpace(os.Getenv(key)))
 	if value == "" {
@@ -108,6 +149,18 @@ func boolEnv(key string, fallback bool) bool {
 	default:
 		return fallback
 	}
+}
+
+func floatEnv(key string, fallback float64) float64 {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		return fallback
+	}
+	return parsed
 }
 
 func scopesEnv(key string, fallback []string) []string {

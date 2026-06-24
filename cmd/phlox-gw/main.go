@@ -15,6 +15,7 @@ import (
 	"github.com/robert-mcdermott/phlox-gw/internal/config"
 	"github.com/robert-mcdermott/phlox-gw/internal/httpapi"
 	"github.com/robert-mcdermott/phlox-gw/internal/store"
+	"github.com/robert-mcdermott/phlox-gw/internal/telemetry"
 )
 
 func main() {
@@ -42,12 +43,26 @@ func main() {
 		os.Exit(1)
 	}
 
+	tel, err := telemetry.New(context.Background(), cfg.Telemetry, logger)
+	if err != nil {
+		logger.Error("initialize telemetry", "error", err)
+		os.Exit(1)
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := tel.Shutdown(ctx); err != nil {
+			logger.Warn("telemetry shutdown failed", "error", err)
+		}
+	}()
+
 	handler, err := httpapi.New(httpapi.Options{
 		Config:     cfg,
 		Store:      db,
 		Frontend:   phloxgw.Frontend,
 		Logger:     logger,
 		HTTPClient: &http.Client{Timeout: 10 * time.Minute},
+		Telemetry:  tel,
 	})
 	if err != nil {
 		logger.Error("initialize api", "error", err)

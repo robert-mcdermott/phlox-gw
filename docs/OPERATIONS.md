@@ -142,6 +142,74 @@ In Entra ID, configure the application redirect URI to match
 group membership in the ID token, admin group mapping may require additional identity
 work in a future release.
 
+## Observability
+
+Phlox-GW can expose Prometheus metrics and export OpenTelemetry traces. Both are disabled
+by default so a new local install does not expose an unauthenticated scrape endpoint or
+attempt outbound telemetry export.
+
+### Prometheus Metrics
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `PHLOX_GW_METRICS_ENABLED` | `false` | Exposes a Prometheus scrape endpoint when `true`. |
+| `PHLOX_GW_METRICS_PATH` | `/metrics` | Metrics scrape path. |
+
+Example:
+
+```bash
+export PHLOX_GW_METRICS_ENABLED=true
+export PHLOX_GW_METRICS_PATH=/metrics
+```
+
+Scrape target:
+
+```yaml
+scrape_configs:
+  - job_name: phlox-gw
+    static_configs:
+      - targets: ["127.0.0.1:8080"]
+```
+
+Gateway metrics include:
+
+- `phlox_gw_http_requests_total`
+- `phlox_gw_http_request_duration_seconds`
+- `phlox_gw_upstream_requests_total`
+- `phlox_gw_upstream_request_duration_seconds`
+- `phlox_gw_upstream_tokens_total`
+- `phlox_gw_upstream_cost_usd_total`
+- `phlox_gw_build_info`
+
+Labels intentionally avoid user IDs, usernames, API-key IDs, prompts, responses, tool
+contents, and provider secrets. Use the SQLite usage ledger and admin reports for
+per-user and per-department chargeback.
+
+### OpenTelemetry Traces
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `PHLOX_GW_OTEL_TRACES_ENABLED` | `false` | Enables OTLP/HTTP trace export. |
+| `PHLOX_GW_OTEL_SERVICE_NAME` | `phlox-gw` | Service name attached to exported traces. |
+| `PHLOX_GW_OTEL_SERVICE_VERSION` | empty | Optional service version label. |
+| `PHLOX_GW_OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` or `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP/HTTP traces endpoint. |
+| `PHLOX_GW_OTEL_EXPORTER_OTLP_INSECURE` | `OTEL_EXPORTER_OTLP_INSECURE` or `false` | Allows insecure OTLP transport. |
+| `PHLOX_GW_OTEL_SAMPLE_RATIO` | `1.0` | Trace sampling ratio from `0.0` to `1.0`. |
+
+Example with a local OpenTelemetry Collector:
+
+```bash
+export PHLOX_GW_OTEL_TRACES_ENABLED=true
+export PHLOX_GW_OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://127.0.0.1:4318/v1/traces
+export PHLOX_GW_OTEL_EXPORTER_OTLP_INSECURE=true
+export PHLOX_GW_OTEL_SAMPLE_RATIO=1.0
+```
+
+Trace spans include inbound HTTP requests and child spans around upstream provider calls.
+Attributes include method, route, provider ID, provider type, model route, upstream model
+ID, protocol, status, and latency. Spans do not include prompt text, response text, tool
+contents, API keys, or provider secrets.
+
 ## Provider Configuration
 
 Create providers in `Admin -> Providers`.
