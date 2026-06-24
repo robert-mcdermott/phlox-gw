@@ -221,6 +221,7 @@ func New(opts Options) (http.Handler, error) {
 	mux.HandleFunc("POST /api/admin/api-keys/{id}/rotate", s.requireAdmin(s.rotateAPIKeyAdmin))
 	mux.HandleFunc("DELETE /api/admin/api-keys/{id}", s.requireAdmin(s.revokeAPIKeyAdmin))
 	mux.HandleFunc("GET /api/admin/audit-log", s.requireAdmin(s.auditLog))
+	mux.HandleFunc("GET /api/admin/config/export", s.requireAdmin(s.adminConfigExport))
 	mux.HandleFunc("GET /api/admin/request-log", s.requireAdmin(s.requestLogSearch))
 	mux.HandleFunc("GET /api/admin/request-log/export.csv", s.requireAdmin(s.requestLogCSV))
 	mux.HandleFunc("GET /api/admin/guardrails", s.requireAdmin(s.guardrailPolicy))

@@ -49,6 +49,7 @@ const ADMIN_SECTIONS = [
   { id: 'operations', label: 'Operations', icon: 'chart', description: '30-day usage, latency, cost, and error movement.' },
   { id: 'requests', label: 'Requests', icon: 'file', description: 'Search gateway request metadata without prompt or response bodies.' },
   { id: 'guardrails', label: 'Guardrails', icon: 'shield', description: 'Configure built-in PII detection, redaction, and blocking policies.' },
+  { id: 'config', label: 'Configuration', icon: 'file', description: 'Export signed, sanitized admin configuration for review or migration.' },
   { id: 'providers', label: 'Providers', icon: 'server', description: 'Configure upstream providers and health state.' },
   { id: 'models', label: 'Models', icon: 'cpu', description: 'Expose model routes, prices, context metadata, and health tests.' },
   { id: 'users', label: 'Users', icon: 'users', description: 'Manage local users, departments, roles, and passwords.' },
@@ -453,6 +454,9 @@ function adminContentView(usage) {
       ${adminPanel('PII policy', 'shield', 'Built-in detector for email, phone, SSN, credit card, and API key patterns. Content is inspected in memory and not stored.', guardrailPolicyView())}
     `;
   }
+  if (state.adminTab === 'config') {
+    return adminPanel('Signed configuration export', 'file', 'Downloads provider, model, pricing, budget, rate-limit, and guardrail configuration without secrets or usage data.', configExportView());
+  }
   if (state.adminTab === 'providers') {
     return `
       ${adminPanel('Add provider', 'server', 'OpenAI-compatible covers Ollama, vLLM, LM Studio, OpenRouter, and LiteLLM. Bedrock uses AWS region and the AWS credential chain.', `
@@ -577,6 +581,7 @@ function adminSectionCount(id) {
   const counts = {
     requests: state.requestLog?.total || 0,
     guardrails: state.guardrailPolicy?.enabled ? 'on' : 'off',
+    config: 'JSON',
     providers: state.providers.length,
     models: state.adminModels.length,
     users: state.users.length,
@@ -597,6 +602,22 @@ function adminPanel(title, glyph, note, content) {
       </div>
       ${content}
     </section>
+  `;
+}
+
+function configExportView() {
+  return `
+    <div class="metric-strip">
+      ${miniMetric('Providers', state.providers.length)}
+      ${miniMetric('Models', state.adminModels.length)}
+      ${miniMetric('Budgets', state.budgets.length)}
+      ${miniMetric('Rate limits', state.rateLimits.length)}
+      ${miniMetric('Guardrails', state.guardrailPolicy?.enabled ? 'enabled' : 'disabled')}
+    </div>
+    <div class="actions">
+      <button class="btn primary" id="config-export">${icon('file', 'btn-icon')}Download signed JSON</button>
+      <span class="muted">Excludes direct provider secrets, user credentials, API key hashes, sessions, usage ledger rows, request logs, and audit logs.</span>
+    </div>
   `;
 }
 
@@ -1490,6 +1511,24 @@ function afterRender() {
       link.click();
       link.remove();
       URL.revokeObjectURL(objectUrl);
+    };
+  }
+  const configExport = document.getElementById('config-export');
+  if (configExport) {
+    configExport.onclick = async () => {
+      const res = await fetch('/api/admin/config/export', { headers: { Authorization: `Bearer ${state.token}` } });
+      if (!res.ok) throw new Error(`Configuration export failed: ${res.status}`);
+      const blob = await res.blob();
+      const objectUrl = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = objectUrl;
+      link.download = `phlox-gw-admin-config-${new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)}.json`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(objectUrl);
+      state.notice = 'Signed configuration export downloaded.';
+      render();
     };
   }
   const csvExport = document.getElementById('csv-export');

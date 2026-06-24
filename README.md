@@ -36,6 +36,8 @@ Phlox-GW provides:
   bytes, tool contents, API keys, or provider secrets by default.
 - Built-in guardrail policy controls for PII/API-key detection, request redaction or
   blocking, and response redaction or non-stream blocking.
+- Signed, sanitized admin configuration export for review, backup, and environment
+  promotion without exporting secrets or user credentials.
 - A browser dashboard embedded into the same Go binary as the gateway API.
 - A SQLite database that can live next to the application binary or in a configured data
   directory.

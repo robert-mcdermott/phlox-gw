@@ -79,6 +79,52 @@ If `PHLOX_GW_DATA_DIR` is not set, the current working directory is used.
 Keep the database on persistent local storage. Do not place the same SQLite database file
 behind multiple running Phlox-GW nodes.
 
+Phlox-GW may also create an Ed25519 signing key used for admin configuration exports:
+
+```text
+<PHLOX_GW_DATA_DIR>/phlox-gw-signing-key.json
+```
+
+Protect this file like other instance secrets. It contains the private key used to sign
+future configuration exports from the same gateway instance.
+
+## Signed Configuration Export
+
+Administrators can download a signed JSON configuration bundle from
+`Admin -> Configuration` or directly from:
+
+```text
+GET /api/admin/config/export
+```
+
+The endpoint requires an admin browser session token. The response is a JSON document with
+`kind`, `version`, `generated_at`, `payload`, and `signature` fields. The signature uses
+Ed25519 and covers the bundle version, kind, generation timestamp, and payload. The public
+key and key ID are included with the export so another process can verify that the file has
+not been changed after download.
+
+The exported payload includes:
+
+- Providers, including base URLs, provider type, AWS region, enabled state, and
+  environment-variable secret references.
+- Models, routes, upstream model IDs, pricing, context window, fallback routes, weighted
+  routes, retry settings, timeouts, streaming support, and health-routing settings.
+- Budgets and rate limits.
+- Guardrail policy, built-in detector toggles, custom regex patterns, actions, and
+  redaction text.
+
+The export deliberately excludes:
+
+- Direct provider API key values.
+- Users, password hashes, user-minted API keys, and API-key hashes.
+- Sessions, request metadata logs, usage ledger rows, and audit log rows.
+- Runtime provider health state.
+- Runtime environment secrets such as the session secret and OIDC client secret.
+
+If a provider used a direct stored API key, the export marks its `secret_source` as
+`direct-redacted`. Re-enter that secret manually, or move it to an environment variable,
+when recreating the provider in another environment.
+
 ## Environment Variables
 
 ### Core Settings

@@ -30,13 +30,13 @@
 - [x] Built-in guardrail policy layer with PII/API-key redaction and blocking controls.
 - [x] Custom regex guardrail patterns with admin preview testing.
 - [x] Prometheus metrics and OpenTelemetry traces.
+- [x] Signed admin configuration export.
 
 ## Next
 
-- Semantic response cache.
+- Cluster mode with Postgres.
 
 ## Later
 
-- Signed admin configuration export.
-- Cluster mode with Postgres.
+- Semantic response cache.
 - External secrets management.
