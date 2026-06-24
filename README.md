@@ -18,8 +18,9 @@ Phlox-GW provides:
 - OpenAI-compatible gateway endpoints for OpenAI, Ollama, OpenRouter, LiteLLM, vLLM,
   LM Studio, and other compatible endpoints.
 - Anthropic-compatible gateway endpoint support, including request/response translation
-  to OpenAI-compatible routes and non-streaming translation to Bedrock routes.
-- AWS Bedrock access through the OpenAI-compatible chat endpoint using Bedrock Converse.
+  to OpenAI-compatible and Bedrock routes.
+- AWS Bedrock access through OpenAI-compatible and Anthropic-compatible endpoints using
+  Bedrock Converse and ConverseStream.
 - Provider and model catalog management from the admin UI.
 - Public model routes that can be stable aliases instead of provider-specific names.
 - Per-model input and output prices in USD per 1 million tokens.
@@ -270,7 +271,9 @@ curl -N http://127.0.0.1:8080/v1/chat/completions \
 ```
 
 Call the Anthropic-compatible endpoint. The route may point to an Anthropic-compatible
-provider, an OpenAI-compatible provider, or a Bedrock provider for non-streaming requests:
+provider or an OpenAI-compatible provider for both streaming and non-streaming requests.
+Bedrock routes are also supported for both streaming and non-streaming requests through
+Bedrock Converse and ConverseStream translation:
 
 ```bash
 curl -sS http://127.0.0.1:8080/anthropic/v1/messages \

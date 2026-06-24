@@ -1679,8 +1679,7 @@ func (s *Server) anthropicMessages(w http.ResponseWriter, r *http.Request, user 
 		} else if selected.Provider.Type == "openai" {
 			statusCode, responseBody, errText = s.proxyAnthropicViaOpenAIStream(w, r, selected, raw, guardrails)
 		} else {
-			anthropicError(w, http.StatusNotImplemented, "streaming Anthropic-to-Bedrock translation is not supported yet; use non-streaming or /v1/chat/completions")
-			return
+			statusCode, responseBody, errText = s.proxyAnthropicViaBedrockStream(w, r, selected, raw, guardrails)
 		}
 		latency := time.Since(start).Milliseconds()
 		s.recordProviderOutcome(r.Context(), selected.Provider.ID, statusCode, errText)
@@ -3379,6 +3378,132 @@ func (s *Server) proxyAnthropicViaOpenAIStream(w http.ResponseWriter, r *http.Re
 	}
 	finishTrace(resp.StatusCode, "", time.Since(start))
 	return resp.StatusCode, responseBody, ""
+}
+
+func (s *Server) proxyAnthropicViaBedrockStream(w http.ResponseWriter, r *http.Request, route store.RoutedModel, raw map[string]any, guardrails store.GuardrailPolicy) (int, []byte, string) {
+	openAIRaw, err := anthropicRequestToOpenAI(raw)
+	if err != nil {
+		anthropicError(w, http.StatusBadRequest, err.Error())
+		return http.StatusBadRequest, nil, err.Error()
+	}
+	openAIRaw["stream"] = true
+	openAIRaw["model"] = route.Model.ModelID
+	input, err := bedrockConverseStreamInput(route.Model.ModelID, openAIRaw)
+	if err != nil {
+		anthropicError(w, http.StatusBadRequest, err.Error())
+		return http.StatusBadRequest, nil, err.Error()
+	}
+	client, err := s.bedrockClient(r.Context(), route.Provider)
+	if err != nil {
+		msg := "Bedrock configuration failed: " + err.Error()
+		anthropicError(w, http.StatusBadGateway, msg)
+		return http.StatusBadGateway, nil, msg
+	}
+	ctx, finishTrace := s.upstreamTrace(r.Context(), route, "anthropic", "messages.stream.translate_bedrock")
+	start := time.Now()
+	stream, err := client.ConverseStream(ctx, input)
+	if err != nil {
+		status := bedrockErrorStatus(err)
+		msg := bedrockErrorMessage(err)
+		finishTrace(status, msg, time.Since(start))
+		anthropicError(w, status, msg)
+		return status, nil, msg
+	}
+	defer stream.Close()
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+
+	state := &anthropicOpenAIStreamState{
+		w:              w,
+		flusher:        httpFlusher(w),
+		route:          route,
+		id:             "msg_" + requestID(),
+		inputTokens:    estimateOpenAIInputTokens(openAIRaw),
+		guardrails:     guardrails,
+		textBlockIndex: -1,
+		toolBlocks:     map[int]*anthropicOpenAIStreamToolBlock{},
+	}
+	if err := state.writeMessageStart(); err != nil {
+		finishTrace(http.StatusOK, err.Error(), time.Since(start))
+		return http.StatusOK, anthropicUsageBody(tokenUsage{}, state.written), err.Error()
+	}
+
+	var usage tokenUsage
+	estimatedOutputTokens := 0
+	stopReason := "end_turn"
+	for event := range stream.Events() {
+		switch ev := event.(type) {
+		case *types.ConverseStreamOutputMemberContentBlockStart:
+			if toolStart, ok := ev.Value.Start.(*types.ContentBlockStartMemberToolUse); ok {
+				blockIndex := int(aws.ToInt32(ev.Value.ContentBlockIndex))
+				block := state.toolBlocks[blockIndex]
+				if block == nil {
+					block = &anthropicOpenAIStreamToolBlock{openAIIndex: blockIndex, blockIndex: -1}
+					state.toolBlocks[blockIndex] = block
+					state.toolOrder = append(state.toolOrder, blockIndex)
+				}
+				block.id = aws.ToString(toolStart.Value.ToolUseId)
+				block.name = aws.ToString(toolStart.Value.Name)
+				if err := state.startToolBlock(block); err != nil {
+					finishTrace(http.StatusOK, err.Error(), time.Since(start))
+					return http.StatusOK, anthropicUsageBody(usage, state.written), err.Error()
+				}
+			}
+		case *types.ConverseStreamOutputMemberContentBlockDelta:
+			switch delta := ev.Value.Delta.(type) {
+			case *types.ContentBlockDeltaMemberText:
+				if delta.Value != "" {
+					estimatedOutputTokens += estimateTextTokens(delta.Value)
+					if err := state.writeTextDelta(delta.Value); err != nil {
+						finishTrace(http.StatusOK, err.Error(), time.Since(start))
+						return http.StatusOK, anthropicUsageBody(usage, state.written), err.Error()
+					}
+				}
+			case *types.ContentBlockDeltaMemberToolUse:
+				inputDelta := aws.ToString(delta.Value.Input)
+				if inputDelta == "" {
+					continue
+				}
+				estimatedOutputTokens += estimateTextTokens(inputDelta)
+				blockIndex := int(aws.ToInt32(ev.Value.ContentBlockIndex))
+				block := state.toolBlocks[blockIndex]
+				if block == nil {
+					block = &anthropicOpenAIStreamToolBlock{openAIIndex: blockIndex, blockIndex: -1}
+					state.toolBlocks[blockIndex] = block
+					state.toolOrder = append(state.toolOrder, blockIndex)
+				}
+				if !block.started {
+					if err := state.startToolBlock(block); err != nil {
+						finishTrace(http.StatusOK, err.Error(), time.Since(start))
+						return http.StatusOK, anthropicUsageBody(usage, state.written), err.Error()
+					}
+				}
+				if err := state.writeToolInputDelta(block, inputDelta); err != nil {
+					finishTrace(http.StatusOK, err.Error(), time.Since(start))
+					return http.StatusOK, anthropicUsageBody(usage, state.written), err.Error()
+				}
+			}
+		case *types.ConverseStreamOutputMemberMessageStop:
+			stopReason = anthropicStopReason(bedrockFinishReason(ev.Value.StopReason))
+		case *types.ConverseStreamOutputMemberMetadata:
+			usage = bedrockTokenUsage(ev.Value.Usage)
+		}
+	}
+	if err := stream.Err(); err != nil {
+		msg := bedrockErrorMessage(err)
+		finishTrace(http.StatusBadGateway, msg, time.Since(start))
+		return http.StatusBadGateway, anthropicUsageBody(usage, state.written), msg
+	}
+	usage = mergeEstimatedUsage(usage, state.inputTokens, estimatedOutputTokens)
+	if err := state.finish(stopReason, usage.Output); err != nil {
+		finishTrace(http.StatusOK, err.Error(), time.Since(start))
+		return http.StatusOK, anthropicUsageBody(usage, state.written), err.Error()
+	}
+	finishTrace(http.StatusOK, "", time.Since(start))
+	return http.StatusOK, anthropicUsageBody(usage, state.written), ""
 }
 
 type anthropicOpenAIStreamToolBlock struct {

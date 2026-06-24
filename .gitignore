@@ -7,6 +7,7 @@
 /.phlox-gw-data/
 phlox-gw.db
 phlox-gw.db-*
+phlox-gw-signing-key.json
 node_modules/
 output/playwright/
 .playwright-cli/

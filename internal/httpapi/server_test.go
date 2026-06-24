@@ -698,6 +698,160 @@ func TestOpenAIChatCompletionsStreamsBedrockAndRecordsUsage(t *testing.T) {
 	}
 }
 
+func TestAnthropicMessagesStreamsBedrockWithToolUseAndRecordsUsage(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer st.Close()
+	user := store.User{
+		ID:           "user_bedrock_anthropic_stream",
+		Username:     "bedrock-anthropic-stream-user",
+		Department:   "AI",
+		Role:         "user",
+		PasswordHash: "unused",
+		AuthProvider: "local",
+		IsActive:     true,
+	}
+	if err := st.CreateUser(ctx, user); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	plain, prefix, keyHash, err := auth.NewAPIKey()
+	if err != nil {
+		t.Fatalf("NewAPIKey: %v", err)
+	}
+	if err := st.CreateAPIKey(ctx, store.APIKey{ID: "key_bedrock_anthropic_stream", UserID: user.ID, Name: "Bedrock Anthropic stream key", Prefix: prefix, KeyHash: keyHash}); err != nil {
+		t.Fatalf("CreateAPIKey: %v", err)
+	}
+	provider := store.Provider{ID: "aws-bedrock-anthropic-stream", Name: "AWS Bedrock Anthropic Stream", Type: "bedrock", AWSRegion: "us-west-2", Enabled: true}
+	if err := st.CreateProvider(ctx, provider); err != nil {
+		t.Fatalf("CreateProvider: %v", err)
+	}
+	model := store.Model{
+		ID:                   "model_bedrock_anthropic_stream",
+		ProviderID:           provider.ID,
+		ModelID:              "anthropic.claude-3-5-sonnet-20240620-v1:0",
+		Route:                "aws-bedrock-anthropic-stream/claude-sonnet",
+		DisplayName:          "Bedrock Sonnet Anthropic Stream",
+		InputCostPerMillion:  1,
+		OutputCostPerMillion: 2,
+		SupportsStreaming:    true,
+		Enabled:              true,
+	}
+	if err := st.CreateModel(ctx, model); err != nil {
+		t.Fatalf("CreateModel: %v", err)
+	}
+	fake := &fakeBedrockClient{streamEvents: []types.ConverseStreamOutput{
+		&types.ConverseStreamOutputMemberMessageStart{Value: types.MessageStartEvent{Role: types.ConversationRoleAssistant}},
+		&types.ConverseStreamOutputMemberContentBlockDelta{Value: types.ContentBlockDeltaEvent{
+			ContentBlockIndex: aws.Int32(0),
+			Delta:             &types.ContentBlockDeltaMemberText{Value: "I'll inspect the file."},
+		}},
+		&types.ConverseStreamOutputMemberContentBlockStart{Value: types.ContentBlockStartEvent{
+			ContentBlockIndex: aws.Int32(1),
+			Start: &types.ContentBlockStartMemberToolUse{Value: types.ToolUseBlockStart{
+				ToolUseId: aws.String("tooluse_1"),
+				Name:      aws.String("Read"),
+			}},
+		}},
+		&types.ConverseStreamOutputMemberContentBlockDelta{Value: types.ContentBlockDeltaEvent{
+			ContentBlockIndex: aws.Int32(1),
+			Delta:             &types.ContentBlockDeltaMemberToolUse{Value: types.ToolUseBlockDelta{Input: aws.String(`{"file_path":"`)}},
+		}},
+		&types.ConverseStreamOutputMemberContentBlockDelta{Value: types.ContentBlockDeltaEvent{
+			ContentBlockIndex: aws.Int32(1),
+			Delta:             &types.ContentBlockDeltaMemberToolUse{Value: types.ToolUseBlockDelta{Input: aws.String(`README.md"}`)}},
+		}},
+		&types.ConverseStreamOutputMemberMessageStop{Value: types.MessageStopEvent{StopReason: types.StopReasonToolUse}},
+		&types.ConverseStreamOutputMemberMetadata{Value: types.ConverseStreamMetadataEvent{Usage: &types.TokenUsage{
+			InputTokens:  aws.Int32(7),
+			OutputTokens: aws.Int32(3),
+			TotalTokens:  aws.Int32(10),
+		}}},
+	}}
+	handler, err := New(Options{
+		Config: config.Config{SessionSecret: "test-secret"},
+		Store:  st,
+		Frontend: fstest.MapFS{
+			"frontend/dist/index.html": &fstest.MapFile{Data: []byte("<html></html>")},
+		},
+		BedrockClientFactory: func(_ context.Context, _ store.Provider) (BedrockConverseClient, error) {
+			return fake, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	resp := jsonRequest(t, handler, http.MethodPost, "/anthropic/v1/messages", plain, map[string]any{
+		"model":      model.Route,
+		"stream":     true,
+		"max_tokens": 128,
+		"messages":   []map[string]string{{"role": "user", "content": "Read the README"}},
+		"tools": []map[string]any{{
+			"name":        "Read",
+			"description": "Read a file from disk",
+			"input_schema": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"file_path": map[string]string{"type": "string"},
+				},
+			},
+		}},
+	})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", resp.Code, resp.Body.String())
+	}
+	if fake.streamInput == nil || *fake.streamInput.ModelId != model.ModelID {
+		t.Fatalf("stream input not captured correctly: %#v", fake.streamInput)
+	}
+	if fake.streamInput.ToolConfig == nil || len(fake.streamInput.ToolConfig.Tools) != 1 {
+		t.Fatalf("tool config not mapped to Bedrock stream input: %#v", fake.streamInput.ToolConfig)
+	}
+	if got := resp.Header().Get("Content-Type"); !strings.HasPrefix(got, "text/event-stream") {
+		t.Fatalf("content type = %q", got)
+	}
+	body := resp.Body.String()
+	for _, want := range []string{
+		"event: message_start",
+		"event: content_block_start",
+		"event: content_block_delta",
+		"event: message_stop",
+		`"text":"I'll inspect the file."`,
+		`"type":"tool_use"`,
+		`"id":"tooluse_1"`,
+		`"name":"Read"`,
+		`"partial_json"`,
+		`README.md`,
+		`"stop_reason":"tool_use"`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("stream body missing %q: %s", want, body)
+		}
+	}
+	usage, err := st.UsageForUser(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("UsageForUser: %v", err)
+	}
+	if usage.Requests != 1 || usage.InputTokens != 7 || usage.OutputTokens != 3 || usage.TotalTokens != 10 || usage.CostUSD != 0.000013 {
+		t.Fatalf("unexpected stored usage: %#v", usage)
+	}
+	requests, err := st.SearchRequestLogs(ctx, store.RequestLogQuery{ProviderID: provider.ID, Limit: 10})
+	if err != nil {
+		t.Fatalf("SearchRequestLogs: %v", err)
+	}
+	if requests.Total != 1 || len(requests.Items) != 1 {
+		t.Fatalf("unexpected request logs: %#v", requests)
+	}
+	reqLog := requests.Items[0]
+	if reqLog.RequestID == "" || reqLog.Username != user.Username || reqLog.APIKeyPrefix != prefix || reqLog.ProviderType != "bedrock" || reqLog.ModelRoute != model.Route || reqLog.UpstreamModelID != model.ModelID || reqLog.Endpoint != "/anthropic/v1/messages" || !reqLog.Streaming {
+		t.Fatalf("unexpected request metadata: %#v", reqLog)
+	}
+	if reqLog.TotalTokens != 10 || reqLog.CostUSD != 0.000013 || reqLog.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected request usage metadata: %#v", reqLog)
+	}
+}
+
 func TestOpenAIChatCompletionsStreamsWithoutUsageEstimatesTokens(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))

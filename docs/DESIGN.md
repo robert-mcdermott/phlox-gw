@@ -114,10 +114,11 @@ Provider adapters are deliberately thin:
   streams SSE responses through while capturing usage from compatible stream events.
 - `bedrock`: uses the AWS SDK default credential chain and the provider `aws_region` to
   call Bedrock Converse and ConverseStream. Bedrock models are exposed through the
-  OpenAI-compatible `/v1/chat/completions` surface for text, streaming text, data URL
-  image inputs, and function tool-call round trips where the selected Bedrock model
-  supports those features. Responses are normalized back to the OpenAI response shape for
-  clients and usage accounting.
+  OpenAI-compatible `/v1/chat/completions` surface and the Anthropic-compatible
+  `/anthropic/v1/messages` surface for text, streaming text, and function tool-call round
+  trips where the selected Bedrock model supports those features. OpenAI-compatible
+  Bedrock routes also support data URL image inputs. Responses are normalized back to the
+  client protocol shape for clients and usage accounting.
 
 The model route format is `provider_id/model_id`. Bare model IDs are accepted only when
 they resolve unambiguously.

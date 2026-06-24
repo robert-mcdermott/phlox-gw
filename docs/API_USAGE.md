@@ -51,7 +51,7 @@ are configured, run `claude /logout` when you want it to use only the gateway AP
 | --- | --- | --- |
 | `GET` | `/v1/models` | List enabled models visible through the OpenAI-compatible surface. |
 | `POST` | `/v1/chat/completions` | OpenAI-compatible chat completions for OpenAI-compatible providers and Bedrock routes. |
-| `POST` | `/anthropic/v1/messages` | Anthropic-compatible messages for Anthropic-compatible providers, with request/response translation to OpenAI-compatible routes and non-streaming translation to Bedrock routes. |
+| `POST` | `/anthropic/v1/messages` | Anthropic-compatible messages for Anthropic-compatible providers, with streaming and non-streaming translation to OpenAI-compatible and Bedrock routes. |
 | `GET` | `/api/health` | Unauthenticated process health check. |
 
 ## Model Names
@@ -184,16 +184,17 @@ The model field may also be a Phlox-GW route ID backed by an OpenAI-compatible p
 such as Ollama, vLLM, LM Studio, OpenRouter, or LiteLLM. In that case Phlox-GW translates
 Anthropic Messages requests, tools, tool results, and stream events to OpenAI chat shape
 for the upstream call, then returns Anthropic-shaped responses to the client.
-Non-streaming Anthropic requests can also target Bedrock routes.
+Anthropic requests can also target Bedrock routes. Phlox-GW translates the request to
+Bedrock Converse or ConverseStream and returns Anthropic-shaped responses to the client.
 
 Streaming Anthropic-compatible responses are proxied when `stream` is `true` and the
 selected route is backed by an Anthropic-compatible provider. When the selected route is
 backed by an OpenAI-compatible provider, Phlox-GW translates streamed OpenAI chat chunks
 to Anthropic `message_start`, `content_block_delta`, `tool_use`, and `message_stop`
-events. Anthropic streaming translation to Bedrock routes is not implemented yet; use
-non-streaming `/anthropic/v1/messages` or `/v1/chat/completions` for those routes. Usage
-is captured from compatible stream usage events when present, with token estimates used
-when upstream providers omit streaming usage.
+events. When the selected route is backed by Bedrock, Phlox-GW translates Bedrock
+ConverseStream text and tool-use events to the same Anthropic event shape. Usage is
+captured from compatible stream usage events when present, with token estimates used when
+upstream providers omit streaming usage.
 
 ## Guardrails
 

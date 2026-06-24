@@ -31,6 +31,7 @@
 - [x] Custom regex guardrail patterns with admin preview testing.
 - [x] Prometheus metrics and OpenTelemetry traces.
 - [x] Signed admin configuration export.
+- [x] Anthropic-compatible streaming translation to Bedrock ConverseStream.
 
 ## Next
 
