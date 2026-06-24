@@ -4,6 +4,16 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Phlox-GW</title>
+    <link rel="icon" type="image/svg+xml" href="/phlox-logo.svg" />
+    <script>
+      (() => {
+        try {
+          document.documentElement.setAttribute('data-theme', localStorage.getItem('phlox-gw-theme') || 'phlox-dark');
+        } catch (_) {
+          document.documentElement.setAttribute('data-theme', 'phlox-dark');
+        }
+      })();
+    </script>
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
@@ -11,4 +21,3 @@
     <script src="/app.js"></script>
   </body>
 </html>
-

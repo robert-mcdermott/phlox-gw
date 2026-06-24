@@ -1,7 +1,21 @@
+const THEME_STORAGE_KEY = 'phlox-gw-theme';
+const DEFAULT_THEME = 'phlox-dark';
+const THEMES = [
+  { id: 'phlox-dark', name: 'Phlox Dark', swatch: ['#160821', '#DF00FF', '#f0e6f7'], dark: true },
+  { id: 'phlox-light', name: 'Phlox Light', swatch: ['#faf5fe', '#C200DE', '#2a1438'], dark: false },
+  { id: 'fred-hutch', name: 'Fred Hutch', swatch: ['#1B365D', '#00ABC8', '#FFB500'], dark: false },
+  { id: 'light', name: 'Light', swatch: ['#ffffff', '#0ea5b7', '#111827'], dark: false },
+  { id: 'dark', name: 'Dark', swatch: ['#0f172a', '#22d3ee', '#e2e8f0'], dark: true },
+  { id: 'hutch-night', name: 'Hutch Night', swatch: ['#10192b', '#AA4AC4', '#00ABC8'], dark: true },
+  { id: 'sandstone', name: 'Sandstone', swatch: ['#faf5ee', '#b8860b', '#1B365D'], dark: false },
+  { id: 'terminal', name: 'Terminal', swatch: ['#000000', '#00ff41', '#00ff41'], dark: true }
+];
+
 const state = {
   token: localStorage.getItem('phlox_gw_token') || '',
   user: null,
   tab: 'overview',
+  theme: initialTheme(),
   health: null,
   models: [],
   providers: [],
@@ -21,6 +35,8 @@ const state = {
   error: '',
   notice: ''
 };
+
+applyTheme(state.theme, false);
 
 const ADMIN_SECTIONS = [
   { id: 'operations', label: 'Operations', icon: 'chart', description: '30-day usage, latency, cost, and error movement.' },
@@ -101,7 +117,7 @@ function loginView() {
   app.innerHTML = `
     <div class="login">
       <div class="brand">
-        <div class="mark">P</div>
+        <div class="mark logo-mark"><img src="/phlox-logo.svg" alt="" /></div>
         <div><h1>Phlox-GW</h1><p>Enterprise LLM gateway</p></div>
       </div>
       <p>Sign in with the local admin account to configure models, keys, budgets, and usage reporting.</p>
@@ -142,13 +158,14 @@ function shell(content) {
     ['keys', 'API Keys', 'key'],
     ['models', 'Models', 'cpu'],
     ['usage', 'Usage', 'chart'],
+    ['appearance', 'Appearance', 'palette'],
     ['admin', 'Admin', 'shield']
   ];
   app.innerHTML = `
     <div class="app">
       <aside class="sidebar">
         <div class="brand">
-          <div class="mark">P</div>
+          <div class="mark logo-mark"><img src="/phlox-logo.svg" alt="" /></div>
           <div><h1>Phlox-GW</h1><p>LLM gateway</p></div>
         </div>
         <nav class="nav">
@@ -202,6 +219,7 @@ function render() {
   if (state.tab === 'keys') return shell(keysView());
   if (state.tab === 'models') return shell(modelsView());
   if (state.tab === 'usage') return shell(usageView());
+  if (state.tab === 'appearance') return shell(appearanceView());
   if (state.tab === 'admin') return shell(adminView());
   return shell(overviewView());
 }
@@ -295,6 +313,29 @@ function usageView() {
         ${state.user?.role === 'admin' ? '<button class="btn" id="csv-export">Export CSV</button>' : ''}
       </div>
       ${usageTable(u.by_model || [])}
+    </section>
+  `;
+}
+
+function appearanceView() {
+  return `
+    <section class="panel">
+      <div class="section-head">
+        <h3 class="section-title">${icon('palette', 'section-icon')}Theme</h3>
+        <span>Phlox Dark is the default. Themes apply instantly and are remembered on this device.</span>
+      </div>
+      <div class="theme-grid">
+        ${THEMES.map(t => `
+          <button class="theme-card ${state.theme === t.id ? 'active' : ''}" data-theme-id="${attr(t.id)}" aria-pressed="${state.theme === t.id ? 'true' : 'false'}">
+            ${state.theme === t.id ? `<span class="theme-check">${icon('check', 'tiny-icon')}</span>` : ''}
+            <span class="theme-swatches">
+              ${t.swatch.map(color => `<span style="background:${attr(color)}"></span>`).join('')}
+            </span>
+            <strong>${esc(t.name)}</strong>
+            <small>${t.dark ? 'Dark' : 'Light'}</small>
+          </button>
+        `).join('')}
+      </div>
     </section>
   `;
 }
@@ -678,6 +719,12 @@ function auditLogRows() {
 }
 
 function afterRender() {
+  document.querySelectorAll('[data-theme-id]').forEach((btn) => {
+    btn.onclick = () => {
+      state.theme = applyTheme(btn.dataset.themeId);
+      render();
+    };
+  });
   document.querySelectorAll('[data-admin-tab]').forEach((btn) => {
     btn.onclick = () => {
       state.adminTab = btn.dataset.adminTab;
@@ -982,7 +1029,9 @@ function icon(name, className = 'icon') {
     wallet: '<path d="M3 7a3 3 0 0 1 3-3h14v16H6a3 3 0 0 1-3-3V7Z"/><path d="M3 7h17"/><path d="M16 13h4v4h-4a2 2 0 0 1 0-4Z"/>',
     gauge: '<path d="M4 14a8 8 0 1 1 16 0"/><path d="M12 14l4-4"/><path d="M5 20h14"/><path d="M7 14h.01M17 14h.01"/>',
     file: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6"/><path d="M8 13h8M8 17h8"/>',
-    plus: '<path d="M12 5v14M5 12h14"/>'
+    plus: '<path d="M12 5v14M5 12h14"/>',
+    palette: '<circle cx="13.5" cy="6.5" r=".5"/><circle cx="17.5" cy="10.5" r=".5"/><circle cx="8.5" cy="7.5" r=".5"/><circle cx="6.5" cy="12.5" r=".5"/><path d="M12 2a10 10 0 0 0 0 20h1.5a2.5 2.5 0 0 0 0-5H12a1.5 1.5 0 0 1 0-3h2a8 8 0 0 0 0-16h-2Z"/>',
+    check: '<path d="M20 6 9 17l-5-5"/>'
   };
   return `<svg class="${className}" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${paths[name] || paths.grid}</svg>`;
 }
@@ -1113,8 +1162,31 @@ function auditDetails(details) {
   }
 }
 
+function initialTheme() {
+  try {
+    return normalizedTheme(localStorage.getItem(THEME_STORAGE_KEY) || DEFAULT_THEME);
+  } catch (_) {
+    return DEFAULT_THEME;
+  }
+}
+
+function normalizedTheme(id) {
+  return THEMES.some(theme => theme.id === id) ? id : DEFAULT_THEME;
+}
+
+function applyTheme(id, persist = true) {
+  const theme = normalizedTheme(id);
+  document.documentElement.setAttribute('data-theme', theme);
+  if (persist) {
+    try {
+      localStorage.setItem(THEME_STORAGE_KEY, theme);
+    } catch (_) {}
+  }
+  return theme;
+}
+
 function titleForTab() {
-  return { overview: 'Gateway overview', keys: 'API keys', models: 'Model catalog', usage: 'Usage and cost', admin: 'Administration' }[state.tab] || 'Gateway';
+  return { overview: 'Gateway overview', keys: 'API keys', models: 'Model catalog', usage: 'Usage and cost', appearance: 'Appearance', admin: 'Administration' }[state.tab] || 'Gateway';
 }
 
 function subtitleForTab() {
@@ -1123,6 +1195,7 @@ function subtitleForTab() {
     keys: 'Mint and revoke user-owned keys for SDK access.',
     models: 'Enabled model routes and administrator-assigned pricing.',
     usage: 'Per-user tokens, request counts, and chargeback cost.',
+    appearance: 'Theme selection and local display preferences.',
     admin: 'Users, providers, budgets, and aggregate reporting.'
   }[state.tab] || '';
 }
