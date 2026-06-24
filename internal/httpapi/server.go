@@ -1620,25 +1620,31 @@ func (s *Server) anthropicMessages(w http.ResponseWriter, r *http.Request, user 
 	policy := reliabilityPolicy(plan.Requested.Model)
 	requestID := requestID()
 	if stream, _ := raw["stream"].(bool); stream {
-		if !hasAnthropicCandidate(candidates) {
-			anthropicError(w, http.StatusNotImplemented, "streaming Anthropic-to-OpenAI translation is not supported yet; use non-streaming or /v1/chat/completions")
-			return
-		}
 		eventMeta := requestEventFromHTTP(r, true)
 		selected, status, reason, ok := s.selectAnthropicStreamCandidate(r.Context(), candidates, user, key, policy)
 		if !ok {
 			anthropicError(w, status, reason)
 			return
 		}
-		attemptRaw := cloneJSONMap(raw)
-		attemptRaw["model"] = selected.Model.ModelID
-		body, err := json.Marshal(attemptRaw)
-		if err != nil {
-			anthropicError(w, http.StatusInternalServerError, err.Error())
+		start := time.Now()
+		var statusCode int
+		var responseBody []byte
+		var errText string
+		if selected.Provider.Type == "anthropic" {
+			attemptRaw := cloneJSONMap(raw)
+			attemptRaw["model"] = selected.Model.ModelID
+			body, err := json.Marshal(attemptRaw)
+			if err != nil {
+				anthropicError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			statusCode, responseBody, errText = s.proxyAnthropicStream(w, r, selected, body, guardrails)
+		} else if selected.Provider.Type == "openai" {
+			statusCode, responseBody, errText = s.proxyAnthropicViaOpenAIStream(w, r, selected, raw, guardrails)
+		} else {
+			anthropicError(w, http.StatusNotImplemented, "streaming Anthropic-to-Bedrock translation is not supported yet; use non-streaming or /v1/chat/completions")
 			return
 		}
-		start := time.Now()
-		statusCode, responseBody, errText := s.proxyAnthropicStream(w, r, selected, body, guardrails)
 		latency := time.Since(start).Milliseconds()
 		s.recordProviderOutcome(r.Context(), selected.Provider.ID, statusCode, errText)
 		s.recordUsage(r.Context(), requestID, user, key, selected, "anthropic", parseAnthropicUsage(responseBody), latency, statusCode, errText, eventMeta)
@@ -1837,7 +1843,7 @@ func (s *Server) selectOpenAIStreamCandidate(ctx context.Context, candidates []s
 
 func (s *Server) selectAnthropicStreamCandidate(ctx context.Context, candidates []store.RoutedModel, user store.User, key store.APIKey, policy routeReliabilityPolicy) (store.RoutedModel, int, string, bool) {
 	for idx, route := range candidates {
-		if route.Provider.Type != "anthropic" {
+		if route.Provider.Type != "anthropic" && route.Provider.Type != "openai" && route.Provider.Type != "bedrock" {
 			continue
 		}
 		if policy.HealthRoutingEnabled {
@@ -1859,15 +1865,6 @@ func (s *Server) selectAnthropicStreamCandidate(ctx context.Context, candidates 
 		return route, 0, "", true
 	}
 	return store.RoutedModel{}, http.StatusServiceUnavailable, "no available streaming Anthropic-compatible provider candidate", false
-}
-
-func hasAnthropicCandidate(candidates []store.RoutedModel) bool {
-	for _, route := range candidates {
-		if route.Provider.Type == "anthropic" {
-			return true
-		}
-	}
-	return false
 }
 
 func (s *Server) checkRouteAdmission(ctx context.Context, user store.User, key store.APIKey, route store.RoutedModel) (bool, int, string, string) {
@@ -2010,7 +2007,33 @@ func anthropicRequestToOpenAI(raw map[string]any) (map[string]any, error) {
 		"model":  raw["model"],
 		"stream": false,
 	}
-	messages := []any{}
+	messages, err := anthropicMessagesToOpenAI(raw)
+	if err != nil {
+		return nil, err
+	}
+	out["messages"] = messages
+	if v, ok := raw["max_tokens"]; ok {
+		out["max_tokens"] = v
+	}
+	for _, key := range []string{"temperature", "top_p", "presence_penalty", "frequency_penalty"} {
+		if v, ok := raw[key]; ok {
+			out[key] = v
+		}
+	}
+	if stop, ok := raw["stop_sequences"]; ok {
+		out["stop"] = stop
+	}
+	if tools, ok := anthropicToolsToOpenAI(raw["tools"]); ok {
+		out["tools"] = tools
+	}
+	if choice, ok := anthropicToolChoiceToOpenAI(raw["tool_choice"]); ok {
+		out["tool_choice"] = choice
+	}
+	return out, nil
+}
+
+func anthropicMessagesToOpenAI(raw map[string]any) ([]any, error) {
+	messages := make([]any, 0)
 	if system, ok := raw["system"]; ok {
 		if content, ok := anthropicContentToOpenAI(system); ok {
 			messages = append(messages, map[string]any{"role": "system", "content": content})
@@ -2026,25 +2049,256 @@ func anthropicRequestToOpenAI(raw map[string]any) (map[string]any, error) {
 			return nil, errors.New("messages entries must be objects")
 		}
 		role, _ := msg["role"].(string)
-		if role != "assistant" && role != "system" {
-			role = "user"
+		if role == "assistant" {
+			converted, err := anthropicAssistantMessageToOpenAI(msg)
+			if err != nil {
+				return nil, err
+			}
+			messages = append(messages, converted)
+			continue
 		}
-		content, _ := anthropicContentToOpenAI(msg["content"])
-		messages = append(messages, map[string]any{"role": role, "content": content})
+		converted, err := anthropicUserMessageToOpenAI(msg)
+		if err != nil {
+			return nil, err
+		}
+		messages = append(messages, converted...)
 	}
-	out["messages"] = messages
-	if v, ok := raw["max_tokens"]; ok {
-		out["max_tokens"] = v
+	return messages, nil
+}
+
+func anthropicUserMessageToOpenAI(msg map[string]any) ([]any, error) {
+	content := msg["content"]
+	if text, ok := content.(string); ok {
+		return []any{map[string]any{"role": "user", "content": text}}, nil
 	}
-	for _, key := range []string{"temperature", "top_p", "presence_penalty", "frequency_penalty"} {
-		if v, ok := raw[key]; ok {
-			out[key] = v
+	blocks, ok := content.([]any)
+	if !ok {
+		return []any{map[string]any{"role": "user", "content": ""}}, nil
+	}
+	out := make([]any, 0, 1)
+	var parts []any
+	hasRichPart := false
+	flushUserContent := func() {
+		if len(parts) == 0 {
+			return
+		}
+		var value any = parts
+		if !hasRichPart {
+			textParts := make([]string, 0, len(parts))
+			for _, part := range parts {
+				if block, ok := part.(map[string]any); ok {
+					if text, _ := block["text"].(string); text != "" {
+						textParts = append(textParts, text)
+					}
+				}
+			}
+			value = strings.Join(textParts, "\n")
+		}
+		out = append(out, map[string]any{"role": "user", "content": value})
+		parts = nil
+		hasRichPart = false
+	}
+	for _, item := range blocks {
+		block, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		switch block["type"] {
+		case "text":
+			text, _ := block["text"].(string)
+			if text != "" {
+				parts = append(parts, map[string]any{"type": "text", "text": text})
+			}
+		case "image":
+			source, _ := block["source"].(map[string]any)
+			if source["type"] != "base64" {
+				continue
+			}
+			mediaType, _ := source["media_type"].(string)
+			data, _ := source["data"].(string)
+			if mediaType == "" || data == "" {
+				continue
+			}
+			hasRichPart = true
+			parts = append(parts, map[string]any{
+				"type": "image_url",
+				"image_url": map[string]any{
+					"url": "data:" + mediaType + ";base64," + data,
+				},
+			})
+		case "tool_result":
+			flushUserContent()
+			toolUseID, _ := block["tool_use_id"].(string)
+			resultText := anthropicToolResultContentToText(block["content"])
+			if toolUseID == "" {
+				out = append(out, map[string]any{"role": "user", "content": resultText})
+				continue
+			}
+			out = append(out, map[string]any{"role": "tool", "tool_call_id": toolUseID, "content": resultText})
 		}
 	}
-	if stop, ok := raw["stop_sequences"]; ok {
-		out["stop"] = stop
+	flushUserContent()
+	if len(out) == 0 {
+		out = append(out, map[string]any{"role": "user", "content": ""})
 	}
 	return out, nil
+}
+
+func anthropicAssistantMessageToOpenAI(msg map[string]any) (map[string]any, error) {
+	content := msg["content"]
+	if text, ok := content.(string); ok {
+		return map[string]any{"role": "assistant", "content": text}, nil
+	}
+	blocks, ok := content.([]any)
+	if !ok {
+		return map[string]any{"role": "assistant", "content": ""}, nil
+	}
+	textParts := make([]string, 0)
+	toolCalls := make([]any, 0)
+	for _, item := range blocks {
+		block, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		switch block["type"] {
+		case "text":
+			text, _ := block["text"].(string)
+			if text != "" {
+				textParts = append(textParts, text)
+			}
+		case "tool_use":
+			name, _ := block["name"].(string)
+			if name == "" {
+				continue
+			}
+			id, _ := block["id"].(string)
+			args, err := anthropicToolUseArguments(block["input"])
+			if err != nil {
+				return nil, err
+			}
+			toolCalls = append(toolCalls, map[string]any{
+				"id":   fallbackString(id, "toolu_"+requestID()),
+				"type": "function",
+				"function": map[string]any{
+					"name":      name,
+					"arguments": args,
+				},
+			})
+		}
+	}
+	out := map[string]any{
+		"role":    "assistant",
+		"content": strings.Join(textParts, "\n"),
+	}
+	if len(toolCalls) > 0 {
+		out["tool_calls"] = toolCalls
+	}
+	return out, nil
+}
+
+func anthropicToolResultContentToText(content any) string {
+	switch v := content.(type) {
+	case nil:
+		return ""
+	case string:
+		return v
+	case []any:
+		parts := make([]string, 0, len(v))
+		for _, item := range v {
+			block, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			if text, _ := block["text"].(string); text != "" {
+				parts = append(parts, text)
+			}
+		}
+		return strings.Join(parts, "\n")
+	default:
+		body, _ := json.Marshal(v)
+		return string(body)
+	}
+}
+
+func anthropicToolUseArguments(input any) (string, error) {
+	if input == nil {
+		return "{}", nil
+	}
+	if text, ok := input.(string); ok {
+		if strings.TrimSpace(text) == "" {
+			return "{}", nil
+		}
+		return text, nil
+	}
+	body, err := json.Marshal(input)
+	if err != nil {
+		return "", err
+	}
+	return string(body), nil
+}
+
+func anthropicToolsToOpenAI(value any) ([]any, bool) {
+	rawTools, ok := value.([]any)
+	if !ok || len(rawTools) == 0 {
+		return nil, false
+	}
+	tools := make([]any, 0, len(rawTools))
+	for _, item := range rawTools {
+		tool, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		name, _ := tool["name"].(string)
+		if name == "" {
+			continue
+		}
+		description, _ := tool["description"].(string)
+		parameters := tool["input_schema"]
+		if parameters == nil {
+			parameters = map[string]any{"type": "object"}
+		}
+		tools = append(tools, map[string]any{
+			"type": "function",
+			"function": map[string]any{
+				"name":        name,
+				"description": description,
+				"parameters":  parameters,
+			},
+		})
+	}
+	return tools, len(tools) > 0
+}
+
+func anthropicToolChoiceToOpenAI(value any) (any, bool) {
+	switch v := value.(type) {
+	case string:
+		switch v {
+		case "auto", "none", "required":
+			return v, true
+		default:
+			return nil, false
+		}
+	case map[string]any:
+		typ, _ := v["type"].(string)
+		switch typ {
+		case "auto":
+			return "auto", true
+		case "none":
+			return "none", true
+		case "any":
+			return "required", true
+		case "tool":
+			name, _ := v["name"].(string)
+			if name == "" {
+				return nil, false
+			}
+			return map[string]any{"type": "function", "function": map[string]any{"name": name}}, true
+		default:
+			return nil, false
+		}
+	default:
+		return nil, false
+	}
 }
 
 func anthropicContentToOpenAI(value any) (any, bool) {
@@ -2529,8 +2783,10 @@ func estimateOpenAIStreamOutputTokens(line []byte) int {
 	var chunk struct {
 		Choices []struct {
 			Delta struct {
-				Content   any `json:"content"`
-				ToolCalls []struct {
+				Content          any    `json:"content"`
+				Reasoning        string `json:"reasoning"`
+				ReasoningContent string `json:"reasoning_content"`
+				ToolCalls        []struct {
 					Function struct {
 						Arguments string `json:"arguments"`
 					} `json:"function"`
@@ -2544,6 +2800,8 @@ func estimateOpenAIStreamOutputTokens(line []byte) int {
 	total := 0
 	for _, choice := range chunk.Choices {
 		total += estimateOpenAIContentTokens(choice.Delta.Content)
+		total += estimateTextTokens(choice.Delta.Reasoning)
+		total += estimateTextTokens(choice.Delta.ReasoningContent)
 		for _, call := range choice.Delta.ToolCalls {
 			total += estimateTextTokens(call.Function.Arguments)
 		}
@@ -2569,7 +2827,7 @@ func mergeEstimatedUsage(usage tokenUsage, estimatedInputTokens, estimatedOutput
 	if usage.Output == 0 && estimatedOutputTokens > 0 {
 		usage.Output = estimatedOutputTokens
 	}
-	if usage.Total == 0 && (usage.Input > 0 || usage.Output > 0) {
+	if usage.Total == 0 || usage.Total < usage.Input+usage.Output {
 		usage.Total = usage.Input + usage.Output
 	}
 	return usage
@@ -2967,6 +3225,384 @@ func proxyAnthropicStream(w http.ResponseWriter, body io.Reader, guardrails stor
 		}
 		return usage, written, err
 	}
+}
+
+func (s *Server) proxyAnthropicViaOpenAIStream(w http.ResponseWriter, r *http.Request, route store.RoutedModel, raw map[string]any, guardrails store.GuardrailPolicy) (int, []byte, string) {
+	openAIRaw, err := anthropicRequestToOpenAI(raw)
+	if err != nil {
+		anthropicError(w, http.StatusBadRequest, err.Error())
+		return http.StatusBadRequest, nil, err.Error()
+	}
+	openAIRaw["stream"] = true
+	openAIRaw["model"] = route.Model.ModelID
+	body, err := json.Marshal(openAIRaw)
+	if err != nil {
+		anthropicError(w, http.StatusInternalServerError, err.Error())
+		return http.StatusInternalServerError, nil, err.Error()
+	}
+	endpoint := strings.TrimRight(route.Provider.BaseURL, "/") + "/chat/completions"
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		anthropicError(w, http.StatusInternalServerError, err.Error())
+		return http.StatusInternalServerError, nil, err.Error()
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "Phlox-GW/0.1")
+	if apiKey := providerAPIKey(route.Provider); apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		anthropicError(w, http.StatusBadGateway, err.Error())
+		return http.StatusBadGateway, nil, err.Error()
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		responseBody, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			anthropicError(w, resp.StatusCode, readErr.Error())
+			return resp.StatusCode, nil, readErr.Error()
+		}
+		message := providerErrorText(responseBody, string(responseBody))
+		anthropicError(w, resp.StatusCode, message)
+		return resp.StatusCode, responseBody, message
+	}
+	for k, values := range resp.Header {
+		if shouldProxyHeader(k) && !strings.EqualFold(k, "Content-Type") {
+			for _, v := range values {
+				w.Header().Add(k, v)
+			}
+		}
+	}
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(resp.StatusCode)
+
+	usage, n, err := proxyOpenAIStreamAsAnthropic(w, resp.Body, route, estimateOpenAIInputTokens(openAIRaw), guardrails)
+	responseBody := anthropicUsageBody(usage, n)
+	if err != nil {
+		return resp.StatusCode, responseBody, err.Error()
+	}
+	return resp.StatusCode, responseBody, ""
+}
+
+type anthropicOpenAIStreamToolBlock struct {
+	openAIIndex int
+	blockIndex  int
+	id          string
+	name        string
+	pendingJSON string
+	started     bool
+}
+
+type anthropicOpenAIStreamState struct {
+	w              http.ResponseWriter
+	flusher        http.Flusher
+	route          store.RoutedModel
+	id             string
+	inputTokens    int
+	guardrails     store.GuardrailPolicy
+	written        int64
+	nextBlockIndex int
+	textBlockIndex int
+	textStarted    bool
+	toolBlocks     map[int]*anthropicOpenAIStreamToolBlock
+	toolOrder      []int
+}
+
+func proxyOpenAIStreamAsAnthropic(w http.ResponseWriter, body io.Reader, route store.RoutedModel, fallbackInputTokens int, guardrails store.GuardrailPolicy) (tokenUsage, int64, error) {
+	state := &anthropicOpenAIStreamState{
+		w:              w,
+		flusher:        httpFlusher(w),
+		route:          route,
+		id:             "msg_" + requestID(),
+		inputTokens:    fallbackInputTokens,
+		guardrails:     guardrails,
+		textBlockIndex: -1,
+		toolBlocks:     map[int]*anthropicOpenAIStreamToolBlock{},
+	}
+	if err := state.writeMessageStart(); err != nil {
+		return tokenUsage{}, state.written, err
+	}
+	var usage tokenUsage
+	estimatedOutputTokens := 0
+	stopReason := "end_turn"
+	reader := bufio.NewReader(body)
+	for {
+		line, err := reader.ReadBytes('\n')
+		if len(line) > 0 {
+			payload, ok := openAISSEPayload(line)
+			if ok {
+				if payload == "[DONE]" {
+					usage = mergeEstimatedUsage(usage, fallbackInputTokens, estimatedOutputTokens)
+					if err := state.finish(stopReason, usage.Output); err != nil {
+						return usage, state.written, err
+					}
+					return usage, state.written, nil
+				}
+				if parsed := parseOpenAIUsage([]byte(payload)); parsed.Total > 0 || parsed.Input > 0 || parsed.Output > 0 {
+					usage = parsed
+				}
+				if usage.Output == 0 {
+					estimatedOutputTokens += estimateOpenAIStreamOutputTokens(line)
+				}
+				var chunk map[string]any
+				if json.Unmarshal([]byte(payload), &chunk) == nil {
+					if err := state.writeOpenAIChunk(chunk, &stopReason); err != nil {
+						return usage, state.written, err
+					}
+				}
+			}
+		}
+		if err == nil {
+			continue
+		}
+		if errors.Is(err, io.EOF) {
+			usage = mergeEstimatedUsage(usage, fallbackInputTokens, estimatedOutputTokens)
+			if err := state.finish(stopReason, usage.Output); err != nil {
+				return usage, state.written, err
+			}
+			return usage, state.written, nil
+		}
+		return usage, state.written, err
+	}
+}
+
+func httpFlusher(w http.ResponseWriter) http.Flusher {
+	flusher, _ := w.(http.Flusher)
+	return flusher
+}
+
+func openAISSEPayload(line []byte) (string, bool) {
+	text := strings.TrimSpace(string(line))
+	if !strings.HasPrefix(text, "data:") {
+		return "", false
+	}
+	payload := strings.TrimSpace(strings.TrimPrefix(text, "data:"))
+	return payload, payload != ""
+}
+
+func (s *anthropicOpenAIStreamState) writeMessageStart() error {
+	return s.writeEvent("message_start", map[string]any{
+		"type": "message_start",
+		"message": map[string]any{
+			"id":            s.id,
+			"type":          "message",
+			"role":          "assistant",
+			"model":         s.route.Model.Route,
+			"content":       []any{},
+			"stop_reason":   nil,
+			"stop_sequence": nil,
+			"usage":         map[string]int{"input_tokens": s.inputTokens, "output_tokens": 0},
+		},
+	})
+}
+
+func (s *anthropicOpenAIStreamState) writeOpenAIChunk(chunk map[string]any, stopReason *string) error {
+	choices, _ := chunk["choices"].([]any)
+	for _, item := range choices {
+		choice, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		delta, _ := choice["delta"].(map[string]any)
+		for _, text := range openAIStreamDeltaTextFragments(delta) {
+			if err := s.writeTextDelta(text); err != nil {
+				return err
+			}
+		}
+		if err := s.writeToolCallDeltas(delta); err != nil {
+			return err
+		}
+		if finish, _ := choice["finish_reason"].(string); finish != "" {
+			*stopReason = anthropicStopReason(finish)
+		}
+	}
+	return nil
+}
+
+func openAIStreamDeltaTextFragments(delta map[string]any) []string {
+	fragments := make([]string, 0, 1)
+	for _, key := range []string{"content", "reasoning", "reasoning_content"} {
+		switch v := delta[key].(type) {
+		case string:
+			if v != "" {
+				fragments = append(fragments, v)
+			}
+		case []any:
+			for _, item := range v {
+				block, ok := item.(map[string]any)
+				if !ok {
+					continue
+				}
+				if text, _ := block["text"].(string); text != "" {
+					fragments = append(fragments, text)
+				}
+			}
+		}
+	}
+	return fragments
+}
+
+func (s *anthropicOpenAIStreamState) writeTextDelta(text string) error {
+	if text == "" {
+		return nil
+	}
+	if !s.textStarted {
+		s.textBlockIndex = s.nextBlockIndex
+		s.nextBlockIndex++
+		s.textStarted = true
+		if err := s.writeEvent("content_block_start", map[string]any{
+			"type":          "content_block_start",
+			"index":         s.textBlockIndex,
+			"content_block": map[string]any{"type": "text", "text": ""},
+		}); err != nil {
+			return err
+		}
+	}
+	return s.writeEvent("content_block_delta", map[string]any{
+		"type":  "content_block_delta",
+		"index": s.textBlockIndex,
+		"delta": map[string]any{"type": "text_delta", "text": text},
+	})
+}
+
+func (s *anthropicOpenAIStreamState) writeToolCallDeltas(delta map[string]any) error {
+	rawCalls, _ := delta["tool_calls"].([]any)
+	for _, item := range rawCalls {
+		call, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		openAIIndex := intValue(call["index"])
+		block := s.toolBlocks[openAIIndex]
+		if block == nil {
+			block = &anthropicOpenAIStreamToolBlock{openAIIndex: openAIIndex, blockIndex: -1}
+			s.toolBlocks[openAIIndex] = block
+			s.toolOrder = append(s.toolOrder, openAIIndex)
+		}
+		if id, _ := call["id"].(string); id != "" {
+			block.id = id
+		}
+		function, _ := call["function"].(map[string]any)
+		if name, _ := function["name"].(string); name != "" {
+			block.name = name
+		}
+		if !block.started && (block.id != "" || block.name != "") {
+			if err := s.startToolBlock(block); err != nil {
+				return err
+			}
+		}
+		if args, _ := function["arguments"].(string); args != "" {
+			if block.started {
+				if err := s.writeToolInputDelta(block, args); err != nil {
+					return err
+				}
+			} else {
+				block.pendingJSON += args
+			}
+		}
+	}
+	return nil
+}
+
+func (s *anthropicOpenAIStreamState) startToolBlock(block *anthropicOpenAIStreamToolBlock) error {
+	if block.started {
+		return nil
+	}
+	if s.textStarted {
+		if err := s.writeEvent("content_block_stop", map[string]any{"type": "content_block_stop", "index": s.textBlockIndex}); err != nil {
+			return err
+		}
+		s.textStarted = false
+		s.textBlockIndex = -1
+	}
+	block.blockIndex = s.nextBlockIndex
+	s.nextBlockIndex++
+	block.started = true
+	if block.id == "" {
+		block.id = fmt.Sprintf("toolu_%s_%d", s.id, block.openAIIndex)
+	}
+	if block.name == "" {
+		block.name = "tool"
+	}
+	if err := s.writeEvent("content_block_start", map[string]any{
+		"type":  "content_block_start",
+		"index": block.blockIndex,
+		"content_block": map[string]any{
+			"type":  "tool_use",
+			"id":    block.id,
+			"name":  block.name,
+			"input": map[string]any{},
+		},
+	}); err != nil {
+		return err
+	}
+	if block.pendingJSON != "" {
+		pending := block.pendingJSON
+		block.pendingJSON = ""
+		return s.writeToolInputDelta(block, pending)
+	}
+	return nil
+}
+
+func (s *anthropicOpenAIStreamState) writeToolInputDelta(block *anthropicOpenAIStreamToolBlock, partialJSON string) error {
+	return s.writeEvent("content_block_delta", map[string]any{
+		"type":  "content_block_delta",
+		"index": block.blockIndex,
+		"delta": map[string]any{"type": "input_json_delta", "partial_json": partialJSON},
+	})
+}
+
+func (s *anthropicOpenAIStreamState) finish(stopReason string, outputTokens int) error {
+	if s.textStarted {
+		if err := s.writeEvent("content_block_stop", map[string]any{"type": "content_block_stop", "index": s.textBlockIndex}); err != nil {
+			return err
+		}
+	}
+	for _, openAIIndex := range s.toolOrder {
+		block := s.toolBlocks[openAIIndex]
+		if block == nil {
+			continue
+		}
+		if !block.started {
+			if err := s.startToolBlock(block); err != nil {
+				return err
+			}
+		}
+		if err := s.writeEvent("content_block_stop", map[string]any{"type": "content_block_stop", "index": block.blockIndex}); err != nil {
+			return err
+		}
+	}
+	if stopReason == "" {
+		stopReason = "end_turn"
+	}
+	if err := s.writeEvent("message_delta", map[string]any{
+		"type": "message_delta",
+		"delta": map[string]any{
+			"stop_reason":   stopReason,
+			"stop_sequence": nil,
+		},
+		"usage": map[string]int{"output_tokens": outputTokens},
+	}); err != nil {
+		return err
+	}
+	return s.writeEvent("message_stop", map[string]any{"type": "message_stop"})
+}
+
+func (s *anthropicOpenAIStreamState) writeEvent(event string, payload map[string]any) error {
+	payload = applyGuardrailToStreamPayload(s.guardrails, payload)
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	n, err := fmt.Fprintf(s.w, "event: %s\ndata: %s\n\n", event, body)
+	s.written += int64(n)
+	if s.flusher != nil {
+		s.flusher.Flush()
+	}
+	return err
 }
 
 func (s *Server) proxyBedrockOpenAI(w http.ResponseWriter, r *http.Request, route store.RoutedModel, raw map[string]any) (int, []byte, string) {

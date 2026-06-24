@@ -1324,6 +1324,152 @@ func TestAnthropicMessagesAcceptsXAPIKeyAndTranslatesOpenAICompatibleRoute(t *te
 	}
 }
 
+func TestAnthropicMessagesStreamsOpenAICompatibleRoute(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer st.Close()
+	user := store.User{
+		ID:           "user_anthropic_openai_stream",
+		Username:     "anthropic-openai-stream-user",
+		Department:   "AI",
+		Role:         "user",
+		PasswordHash: "unused",
+		AuthProvider: "local",
+		IsActive:     true,
+	}
+	if err := st.CreateUser(ctx, user); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	plain, prefix, keyHash, err := auth.NewAPIKey()
+	if err != nil {
+		t.Fatalf("NewAPIKey: %v", err)
+	}
+	if err := st.CreateAPIKey(ctx, store.APIKey{ID: "key_anthropic_openai_stream", UserID: user.ID, Name: "Anthropic OpenAI stream key", Prefix: prefix, KeyHash: keyHash}); err != nil {
+		t.Fatalf("CreateAPIKey: %v", err)
+	}
+	provider := store.Provider{ID: "local-ollama-stream", Name: "Local Ollama Stream", Type: "openai", BaseURL: "http://ollama-stream.test/v1", Enabled: true}
+	if err := st.CreateProvider(ctx, provider); err != nil {
+		t.Fatalf("CreateProvider: %v", err)
+	}
+	model := store.Model{
+		ID:                   "model_anthropic_openai_stream",
+		ProviderID:           provider.ID,
+		ModelID:              "glm-5.2:cloud",
+		Route:                "glm-5.2:cloud",
+		DisplayName:          "GLM 5.2 Stream",
+		InputCostPerMillion:  1,
+		OutputCostPerMillion: 2,
+		SupportsStreaming:    true,
+		Enabled:              true,
+	}
+	if err := st.CreateModel(ctx, model); err != nil {
+		t.Fatalf("CreateModel: %v", err)
+	}
+	upstreamHits := 0
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		upstreamHits++
+		if r.URL.Host != "ollama-stream.test" || r.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("unexpected upstream target: %s", r.URL.String())
+		}
+		var req map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("upstream decode: %v", err)
+		}
+		if req["model"] != "glm-5.2:cloud" || req["stream"] != true {
+			t.Fatalf("unexpected upstream request: %#v", req)
+		}
+		tools, _ := req["tools"].([]any)
+		if len(tools) != 1 {
+			t.Fatalf("expected one translated tool, got %#v", req["tools"])
+		}
+		tool, _ := tools[0].(map[string]any)
+		function, _ := tool["function"].(map[string]any)
+		if tool["type"] != "function" || function["name"] != "Read" {
+			t.Fatalf("unexpected translated tool: %#v", tool)
+		}
+		streamBody := strings.Join([]string{
+			`data: {"id":"chatcmpl_stream","model":"glm-5.2:cloud","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}` + "\n\n",
+			`data: {"id":"chatcmpl_stream","model":"glm-5.2:cloud","choices":[{"index":0,"delta":{"content":"hello "},"finish_reason":null}]}` + "\n\n",
+			`data: {"id":"chatcmpl_stream","model":"glm-5.2:cloud","choices":[{"index":0,"delta":{"reasoning":"thinking"},"finish_reason":null}]}` + "\n\n",
+			`data: {"id":"chatcmpl_stream","model":"glm-5.2:cloud","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"Read","arguments":""}}]},"finish_reason":null}]}` + "\n\n",
+			`data: {"id":"chatcmpl_stream","model":"glm-5.2:cloud","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"file_path\":\"README.md\"}"}}]},"finish_reason":null}]}` + "\n\n",
+			`data: {"id":"chatcmpl_stream","model":"glm-5.2:cloud","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":6,"total_tokens":16}}` + "\n\n",
+			"data: [DONE]\n\n",
+		}, "")
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(strings.NewReader(streamBody)),
+			Request:    r,
+		}, nil
+	})
+	handler, err := New(Options{
+		Config: config.Config{SessionSecret: "test-secret"},
+		Store:  st,
+		Frontend: fstest.MapFS{
+			"frontend/dist/index.html": &fstest.MapFile{Data: []byte("<html></html>")},
+		},
+		HTTPClient: &http.Client{Transport: transport},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	resp := jsonRequestWithHeaders(t, handler, http.MethodPost, "/anthropic/v1/messages", map[string]string{
+		"x-api-key":         plain,
+		"anthropic-version": "2023-06-01",
+	}, map[string]any{
+		"model":      model.Route,
+		"stream":     true,
+		"max_tokens": 32,
+		"messages":   []map[string]string{{"role": "user", "content": "ping"}},
+		"tools": []map[string]any{{
+			"name":        "Read",
+			"description": "Read a file",
+			"input_schema": map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"file_path": map[string]any{"type": "string"}},
+			},
+		}},
+		"tool_choice": map[string]any{"type": "auto"},
+	})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", resp.Code, resp.Body.String())
+	}
+	if upstreamHits != 1 {
+		t.Fatalf("upstream hits = %d", upstreamHits)
+	}
+	if got := resp.Header().Get("Content-Type"); !strings.HasPrefix(got, "text/event-stream") {
+		t.Fatalf("content type = %q", got)
+	}
+	body := resp.Body.String()
+	for _, want := range []string{
+		"event: message_start",
+		`"text":"hello "`,
+		`"text":"thinking"`,
+		`"type":"text_delta"`,
+		`"type":"tool_use"`,
+		`"name":"Read"`,
+		`"type":"input_json_delta"`,
+		`"partial_json":"{\"file_path\":\"README.md\"}"`,
+		`"stop_reason":"tool_use"`,
+		"event: message_stop",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("stream body missing %q: %s", want, body)
+		}
+	}
+	usage, err := st.UsageForUser(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("UsageForUser: %v", err)
+	}
+	if usage.Requests != 1 || usage.InputTokens != 10 || usage.OutputTokens != 6 || usage.TotalTokens != 16 || usage.CostUSD != 0.000022 {
+		t.Fatalf("unexpected stored usage: %#v", usage)
+	}
+}
+
 func TestOpenAIChatCompletionsFallsBackAfterPrimaryProviderFailure(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))

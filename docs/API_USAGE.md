@@ -28,13 +28,30 @@ Authorization: Bearer pgw-sk-...
 Plaintext API keys are shown only once when minted or rotated. The database stores a hash
 and the key prefix for identification.
 
+## Claude Code
+
+Claude Code can target Phlox-GW through the Anthropic-compatible endpoint:
+
+```bash
+env \
+  ANTHROPIC_BASE_URL="http://127.0.0.1:8080/anthropic" \
+  ANTHROPIC_API_KEY="pgw-sk-your-key" \
+  ANTHROPIC_MODEL="glm-5.2:cloud" \
+  claude
+```
+
+Claude Code uses streaming and tools during normal operation. For OpenAI-compatible
+routes, Phlox-GW translates Anthropic Messages requests and stream events to and from
+OpenAI chat completions. If Claude Code warns that both claude.ai and `ANTHROPIC_API_KEY`
+are configured, run `claude /logout` when you want it to use only the gateway API key.
+
 ## Endpoints
 
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET` | `/v1/models` | List enabled models visible through the OpenAI-compatible surface. |
 | `POST` | `/v1/chat/completions` | OpenAI-compatible chat completions for OpenAI-compatible providers and Bedrock routes. |
-| `POST` | `/anthropic/v1/messages` | Anthropic-compatible messages for Anthropic-compatible providers, with non-streaming translation to OpenAI-compatible and Bedrock routes. |
+| `POST` | `/anthropic/v1/messages` | Anthropic-compatible messages for Anthropic-compatible providers, with request/response translation to OpenAI-compatible routes and non-streaming translation to Bedrock routes. |
 | `GET` | `/api/health` | Unauthenticated process health check. |
 
 ## Model Names
@@ -163,17 +180,20 @@ curl -sS http://127.0.0.1:8080/anthropic/v1/messages \
 
 Phlox-GW preserves Anthropic protocol headers such as `anthropic-version` and
 `anthropic-beta` when the selected route is backed by an Anthropic-compatible provider.
-For non-streaming requests, the model field may also be a Phlox-GW route ID backed by an
-OpenAI-compatible provider, such as Ollama, vLLM, LM Studio, OpenRouter, or LiteLLM, or by
-Bedrock. In that case Phlox-GW translates the Anthropic Messages request to OpenAI chat
-shape for the upstream call and returns an Anthropic-shaped response to the client.
+The model field may also be a Phlox-GW route ID backed by an OpenAI-compatible provider,
+such as Ollama, vLLM, LM Studio, OpenRouter, or LiteLLM. In that case Phlox-GW translates
+Anthropic Messages requests, tools, tool results, and stream events to OpenAI chat shape
+for the upstream call, then returns Anthropic-shaped responses to the client.
+Non-streaming Anthropic requests can also target Bedrock routes.
 
 Streaming Anthropic-compatible responses are proxied when `stream` is `true` and the
-selected route is backed by an Anthropic-compatible provider. Anthropic streaming
-translation to OpenAI-compatible or Bedrock routes is not implemented yet; use
+selected route is backed by an Anthropic-compatible provider. When the selected route is
+backed by an OpenAI-compatible provider, Phlox-GW translates streamed OpenAI chat chunks
+to Anthropic `message_start`, `content_block_delta`, `tool_use`, and `message_stop`
+events. Anthropic streaming translation to Bedrock routes is not implemented yet; use
 non-streaming `/anthropic/v1/messages` or `/v1/chat/completions` for those routes. Usage
-is captured from compatible `message_start` and `message_delta` stream events when
-present.
+is captured from compatible stream usage events when present, with token estimates used
+when upstream providers omit streaming usage.
 
 ## Guardrails
 
