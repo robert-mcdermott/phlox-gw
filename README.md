@@ -51,6 +51,8 @@ This is the first implementation scaffold. It includes:
   routes.
 - Admin operations charts for 30-day cost, tokens, requests, errors, average latency,
   provider drilldowns, and model drilldowns.
+- Admin request metadata search and CSV export for support/audit workflows without
+  storing prompt text, response text, image bytes, tool contents, or secrets by default.
 - Budget burn-down reporting with current-month spend, remaining budget, daily run rate,
   and projected month-end spend.
 - `/v1/models`, `/v1/chat/completions`, and `/anthropic/v1/messages` gateway surfaces.
@@ -61,6 +63,10 @@ This is the first implementation scaffold. It includes:
   supports those features.
 - Streaming OpenAI-compatible calls are proxied through while recording usage when the
   upstream stream includes a final usage chunk.
+- OpenAI-compatible text calls that omit usage metadata get an in-memory token estimate
+  for chargeback; prompt and response content are still not stored.
+- Streaming Anthropic-compatible calls are proxied through while recording usage from
+  `message_start` and `message_delta` stream events when the upstream emits them.
 - Embedded dashboard assets under `frontend/dist`.
 
 Guardrails, semantic caching, and full Prometheus/OpenTelemetry

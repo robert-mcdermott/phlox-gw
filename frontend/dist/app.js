@@ -28,6 +28,8 @@ const state = {
   adminKeys: [],
   adminModels: [],
   auditLogs: [],
+  requestLog: { items: [], total: 0, limit: 100, offset: 0 },
+  requestFilters: { q: '', days: '7', status: 'any', protocol: '', provider_id: '', model: '', department: '', streaming: '' },
   usageSeries: [],
   usageDrilldowns: { providers: [], models: [] },
   budgetBurnDown: [],
@@ -42,6 +44,7 @@ applyTheme(state.theme, false);
 
 const ADMIN_SECTIONS = [
   { id: 'operations', label: 'Operations', icon: 'chart', description: '30-day usage, latency, cost, and error movement.' },
+  { id: 'requests', label: 'Requests', icon: 'file', description: 'Search gateway request metadata without prompt or response bodies.' },
   { id: 'providers', label: 'Providers', icon: 'server', description: 'Configure upstream providers and health state.' },
   { id: 'models', label: 'Models', icon: 'cpu', description: 'Expose model routes, prices, context metadata, and health tests.' },
   { id: 'users', label: 'Users', icon: 'users', description: 'Manage local users, departments, roles, and passwords.' },
@@ -70,6 +73,29 @@ function api(path, options = {}) {
   });
 }
 
+function requestLogPath(includePaging = true) {
+  const params = requestLogParams(includePaging);
+  return `/api/admin/request-log${params.toString() ? `?${params}` : ''}`;
+}
+
+function requestLogParams(includePaging = true) {
+  const f = state.requestFilters || {};
+  const params = new URLSearchParams();
+  if (f.q) params.set('q', f.q);
+  if (f.days) params.set('days', f.days);
+  if (f.status && f.status !== 'any') params.set('status', f.status);
+  if (f.protocol) params.set('protocol', f.protocol);
+  if (f.provider_id) params.set('provider_id', f.provider_id);
+  if (f.model) params.set('model', f.model);
+  if (f.department) params.set('department', f.department);
+  if (f.streaming) params.set('streaming', f.streaming);
+  if (includePaging) {
+    params.set('limit', String(state.requestLog?.limit || 100));
+    params.set('offset', String(state.requestLog?.offset || 0));
+  }
+  return params;
+}
+
 async function refresh() {
   state.error = '';
   try {
@@ -83,7 +109,7 @@ async function refresh() {
       state.keys = keys || [];
       state.usage = usage;
       if (state.user.role === 'admin') {
-        const [providers, users, budgets, rateLimits, adminUsage, adminModels, adminKeys, auditLogs, usageSeries, usageDrilldowns, budgetBurnDown] = await Promise.all([
+        const [providers, users, budgets, rateLimits, adminUsage, adminModels, adminKeys, auditLogs, requestLog, usageSeries, usageDrilldowns, budgetBurnDown] = await Promise.all([
           api('/api/admin/providers'),
           api('/api/admin/users'),
           api('/api/admin/budgets'),
@@ -92,6 +118,7 @@ async function refresh() {
           api('/api/admin/models'),
           api('/api/admin/api-keys'),
           api('/api/admin/audit-log?limit=100'),
+          api(requestLogPath()),
           api('/api/admin/usage/timeseries?days=30'),
           api('/api/admin/usage/drilldowns?days=30'),
           api('/api/admin/budgets/burndown')
@@ -104,6 +131,7 @@ async function refresh() {
         state.adminModels = adminModels || [];
         state.adminKeys = adminKeys || [];
         state.auditLogs = auditLogs || [];
+        state.requestLog = requestLog || { items: [], total: 0, limit: 100, offset: 0 };
         state.usageSeries = usageSeries || [];
         state.usageDrilldowns = usageDrilldowns || { providers: [], models: [] };
         state.budgetBurnDown = budgetBurnDown || [];
@@ -365,6 +393,12 @@ function adminView() {
 }
 
 function adminContentView(usage) {
+  if (state.adminTab === 'requests') {
+    return `
+      ${adminPanel('Request metadata search', 'file', 'Operational request and response metadata only. Prompt text, response text, image bytes, tool contents, and secrets are not stored.', requestLogSearchView())}
+      ${adminPanel('Request log', 'file', '', requestLogRows())}
+    `;
+  }
   if (state.adminTab === 'providers') {
     return `
       ${adminPanel('Add provider', 'server', 'OpenAI-compatible covers Ollama, vLLM, LM Studio, OpenRouter, and LiteLLM. Bedrock uses AWS region and the AWS credential chain.', `
@@ -487,6 +521,7 @@ function adminContentView(usage) {
 
 function adminSectionCount(id) {
   const counts = {
+    requests: state.requestLog?.total || 0,
     providers: state.providers.length,
     models: state.adminModels.length,
     users: state.users.length,
@@ -789,6 +824,74 @@ function rateLimitRows() {
               <td><input data-rate-limit-field="tpm_limit" type="number" min="0" step="1" value="${attr(rl.tpm_limit)}" /></td>
               <td><input data-rate-limit-field="is_active" type="checkbox" ${rl.is_active ? 'checked' : ''} /></td>
               <td><div class="actions"><button class="btn" data-save-rate-limit="${esc(rl.id)}">Save</button><button class="btn danger" data-delete-rate-limit="${esc(rl.id)}">Delete</button></div></td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function requestLogSearchView() {
+  const f = state.requestFilters || {};
+  return `
+    <div class="form-grid request-filter-grid">
+      <label class="form-field"><span>Search</span><input id="request-q" value="${attr(f.q || '')}" placeholder="request id, user, key, provider, model, error" /></label>
+      <label class="form-field"><span>Days</span><input id="request-days" type="number" min="1" max="365" step="1" value="${attr(f.days || '7')}" /></label>
+      <label class="form-field"><span>Status</span><select id="request-status">${option('any', 'Any', f.status || 'any')}${option('success', 'Success', f.status)}${option('error', 'Error', f.status)}${option('4xx', '4xx', f.status)}${option('5xx', '5xx', f.status)}</select></label>
+      <label class="form-field"><span>Protocol</span><select id="request-protocol">${option('', 'Any', f.protocol)}${option('openai', 'OpenAI', f.protocol)}${option('anthropic', 'Anthropic', f.protocol)}${option('bedrock', 'Bedrock', f.protocol)}</select></label>
+      <label class="form-field"><span>Streaming</span><select id="request-streaming">${option('', 'Any', f.streaming)}${option('true', 'Streaming', f.streaming)}${option('false', 'Non-streaming', f.streaming)}</select></label>
+      <label class="form-field"><span>Provider</span><select id="request-provider">${option('', 'Any', f.provider_id)}${state.providers.map(p => option(p.id, p.id, f.provider_id)).join('')}</select></label>
+      <label class="form-field"><span>Model route</span><select id="request-model">${option('', 'Any', f.model)}${state.adminModels.map(m => option(m.route, m.route, f.model)).join('')}</select></label>
+      <label class="form-field"><span>Department</span><input id="request-department" value="${attr(f.department || '')}" list="request-departments" placeholder="Department" /></label>
+      <datalist id="request-departments">${[...new Set(state.users.map(u => u.department).filter(Boolean))].map(d => `<option value="${attr(d)}"></option>`).join('')}</datalist>
+      <button class="btn primary" id="request-apply">${icon('check', 'btn-icon')}Apply</button>
+      <button class="btn" id="request-reset">Reset</button>
+      <button class="btn" id="request-export">Export CSV</button>
+    </div>
+  `;
+}
+
+function requestLogRows() {
+  const result = state.requestLog || { items: [], total: 0, limit: 100, offset: 0 };
+  const rows = result.items || [];
+  const start = rows.length ? Number(result.offset || 0) + 1 : 0;
+  const end = Number(result.offset || 0) + rows.length;
+  const total = Number(result.total || 0);
+  const pager = `
+    <div class="pager">
+      <span>${compact(total)} matching requests · showing ${compact(start)}-${compact(end)}</span>
+      <div class="actions">
+        <button class="btn" id="request-prev" ${Number(result.offset || 0) <= 0 ? 'disabled' : ''}>Previous</button>
+        <button class="btn" id="request-next" ${end >= total ? 'disabled' : ''}>Next</button>
+      </div>
+    </div>
+  `;
+  if (!rows.length) return `${pager}<p>No request metadata matches the current filters.</p>`;
+  return `
+    ${pager}
+    <div class="table-scroll">
+      <table>
+        <thead><tr><th>Time</th><th>Request</th><th>User</th><th>Department</th><th>Key</th><th>Provider</th><th>Model</th><th>Protocol</th><th>Endpoint</th><th>Status</th><th>Stream</th><th>Tokens</th><th>Cost</th><th>Latency</th><th>Error</th><th>Client IP</th></tr></thead>
+        <tbody>
+          ${rows.map(item => `
+            <tr>
+              <td>${fmt(item.created_at)}</td>
+              <td class="mono">${esc(item.request_id)}</td>
+              <td class="mono">${esc(item.username || item.user_id || '')}</td>
+              <td>${esc(item.department || '')}</td>
+              <td><span class="mono">${esc(item.api_key_prefix || item.api_key_id || '')}</span> ${esc(item.api_key_name || '')}</td>
+              <td><span class="mono">${esc(item.provider_id || '')}</span> <span class="muted">${esc(item.provider_type || '')}</span></td>
+              <td><span class="mono">${esc(item.model_route || '')}</span><br><span class="muted">${esc(item.upstream_model_id || '')}</span></td>
+              <td class="mono">${esc(item.protocol || '')}</td>
+              <td class="mono">${esc(item.method || '')} ${esc(item.endpoint || '')}</td>
+              <td>${statusCodePill(item.status_code, item.error_text)}</td>
+              <td>${pill(!!item.streaming)}</td>
+              <td>${compact(item.total_tokens || 0)} <span class="muted">${compact(item.input_tokens || 0)}/${compact(item.output_tokens || 0)}</span></td>
+              <td>${money(item.cost_usd || 0)}</td>
+              <td>${compact(item.latency_ms || 0)} ms</td>
+              <td class="wrap">${esc(item.error_text || '')}</td>
+              <td class="mono">${esc(item.client_ip || '')}</td>
             </tr>
           `).join('')}
         </tbody>
@@ -1102,6 +1205,65 @@ function afterRender() {
       await refresh();
     };
   });
+  const requestApply = document.getElementById('request-apply');
+  if (requestApply) {
+    requestApply.onclick = async () => {
+      state.requestFilters = {
+        q: val('request-q'),
+        days: val('request-days') || '7',
+        status: val('request-status') || 'any',
+        protocol: val('request-protocol'),
+        provider_id: val('request-provider'),
+        model: val('request-model'),
+        department: val('request-department'),
+        streaming: val('request-streaming')
+      };
+      state.requestLog = { ...(state.requestLog || {}), offset: 0, limit: 100 };
+      await refresh();
+    };
+  }
+  const requestReset = document.getElementById('request-reset');
+  if (requestReset) {
+    requestReset.onclick = async () => {
+      state.requestFilters = { q: '', days: '7', status: 'any', protocol: '', provider_id: '', model: '', department: '', streaming: '' };
+      state.requestLog = { items: [], total: 0, limit: 100, offset: 0 };
+      await refresh();
+    };
+  }
+  const requestPrev = document.getElementById('request-prev');
+  if (requestPrev) {
+    requestPrev.onclick = async () => {
+      const current = state.requestLog || { offset: 0, limit: 100 };
+      state.requestLog = { ...current, offset: Math.max(0, Number(current.offset || 0) - Number(current.limit || 100)) };
+      await refresh();
+    };
+  }
+  const requestNext = document.getElementById('request-next');
+  if (requestNext) {
+    requestNext.onclick = async () => {
+      const current = state.requestLog || { offset: 0, limit: 100 };
+      state.requestLog = { ...current, offset: Number(current.offset || 0) + Number(current.limit || 100) };
+      await refresh();
+    };
+  }
+  const requestExport = document.getElementById('request-export');
+  if (requestExport) {
+    requestExport.onclick = async () => {
+      const params = requestLogParams(false);
+      const url = `/api/admin/request-log/export.csv${params.toString() ? `?${params}` : ''}`;
+      const res = await fetch(url, { headers: { Authorization: `Bearer ${state.token}` } });
+      if (!res.ok) throw new Error(`Request log export failed: ${res.status}`);
+      const blob = await res.blob();
+      const objectUrl = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = objectUrl;
+      link.download = `phlox-gw-request-log-${new Date().toISOString().slice(0, 10)}.csv`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(objectUrl);
+    };
+  }
   const csvExport = document.getElementById('csv-export');
   if (csvExport) {
     csvExport.onclick = async () => {
@@ -1168,6 +1330,13 @@ function statusPill(status) {
   const normalized = String(status || 'unknown').toLowerCase();
   const cls = normalized === 'healthy' ? 'on' : normalized === 'unknown' ? '' : 'off';
   return `<span class="pill ${cls}">${esc(normalized)}</span>`;
+}
+
+function statusCodePill(status, errorText) {
+  const code = Number(status || 0);
+  const hasError = code >= 400 || Boolean(errorText);
+  const cls = hasError ? 'off' : code >= 200 && code < 400 ? 'on' : '';
+  return `<span class="pill ${cls}">${code || 'n/a'}</span>`;
 }
 
 function keyStatusPill(k) {

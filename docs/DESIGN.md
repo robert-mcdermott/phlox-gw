@@ -106,7 +106,8 @@ Provider adapters are deliberately thin:
 
 - `openai`: forwards to `{base_url}/chat/completions`. This covers OpenAI, Ollama,
   OpenRouter, LiteLLM, vLLM, LM Studio, and similar endpoints.
-- `anthropic`: forwards to `{base_url}/v1/messages` and preserves Anthropic headers.
+- `anthropic`: forwards to `{base_url}/v1/messages`, preserves Anthropic headers, and
+  streams SSE responses through while capturing usage from compatible stream events.
 - `bedrock`: uses the AWS SDK default credential chain and the provider `aws_region` to
   call Bedrock Converse and ConverseStream. Bedrock models are exposed through the
   OpenAI-compatible `/v1/chat/completions` surface for text, streaming text, data URL
@@ -157,9 +158,21 @@ errors, token volume, cost, and average latency. The embedded dashboard renders 
 cost, traffic, latency, and provider error movement without needing an external metrics
 stack for the first deployment mode.
 
+Provider-reported token usage is preferred whenever it is available. Some
+OpenAI-compatible local providers do not emit usage metadata, especially for streaming
+responses; in that case Phlox-GW estimates text tokens in memory during proxying so cost
+accounting does not fall to zero. The source prompt and response text are discarded after
+the estimate and are not written to the database by default.
+
 Budget burn-down reporting derives current-month spend from the same ledger and compares
 it with active user and department budget limits. It exposes spend, remaining budget,
 average daily run rate, days remaining, and projected month-end spend.
+
+The request metadata log is a separate operational index for support and audit searches.
+It records request id, actor, API key metadata, provider, model route, upstream model id,
+protocol, endpoint, streaming flag, status, latency, token counts, cost, client IP, user
+agent, and bounded error text. It deliberately does not store prompt text, response text,
+image bytes, tool contents, API keys, or provider secrets by default.
 
 ## Frontend
 

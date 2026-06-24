@@ -50,6 +50,8 @@ not complicate the first gateway release.
 - Implement local auth, admin bootstrap, user-owned API key minting, and model catalog.
 - Implement Entra ID/OIDC browser login with department claim mapping.
 - Implement OpenAI-compatible and Anthropic-compatible pass-through routes.
+- Implement Anthropic-compatible streaming pass-through with streamed usage capture where
+  compatible endpoints expose it.
 - Implement Bedrock Converse routing through the OpenAI-compatible chat endpoint.
 - Implement Bedrock ConverseStream routing, data URL image input mapping, and tool-call
   mapping through the OpenAI-compatible chat endpoint.
@@ -67,17 +69,16 @@ not complicate the first gateway release.
   backend routes.
 - Show 30-day operational monitoring charts from the usage ledger.
 - Show budget burn-down projections and provider/model drilldowns from the usage ledger.
+- Add request and response metadata search/export without storing prompt content by
+  default.
 
 ### Phase 2: Production Controls
 
-- Add request and response metadata search without storing prompt content by default.
-- Add Anthropic streaming support and streamed usage capture where compatible endpoints
-  expose it.
+- Add guardrails and policy plugins.
 
 ### Phase 3: Enterprise Operations
 
 - Add Prometheus metrics and OpenTelemetry tracing.
-- Add guardrails and policy plugins.
 - Add semantic cache as an optional cost/latency optimization.
 - Add cluster-safe database option and migration tooling.
 - Add secrets backends and signed configuration bundles.

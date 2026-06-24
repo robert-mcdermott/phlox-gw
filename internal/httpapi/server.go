@@ -25,6 +25,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -127,6 +128,14 @@ type upstreamResult struct {
 	LatencyMS int64
 }
 
+type requestEventMeta struct {
+	Method    string
+	Endpoint  string
+	Streaming bool
+	ClientIP  string
+	UserAgent string
+}
+
 func New(opts Options) (http.Handler, error) {
 	if opts.Store == nil {
 		return nil, errors.New("store is required")
@@ -196,6 +205,8 @@ func New(opts Options) (http.Handler, error) {
 	mux.HandleFunc("POST /api/admin/api-keys/{id}/rotate", s.requireAdmin(s.rotateAPIKeyAdmin))
 	mux.HandleFunc("DELETE /api/admin/api-keys/{id}", s.requireAdmin(s.revokeAPIKeyAdmin))
 	mux.HandleFunc("GET /api/admin/audit-log", s.requireAdmin(s.auditLog))
+	mux.HandleFunc("GET /api/admin/request-log", s.requireAdmin(s.requestLogSearch))
+	mux.HandleFunc("GET /api/admin/request-log/export.csv", s.requireAdmin(s.requestLogCSV))
 	mux.HandleFunc("GET /api/admin/usage/summary", s.requireAdmin(s.adminUsage))
 	mux.HandleFunc("GET /api/admin/usage/timeseries", s.requireAdmin(s.adminUsageTimeSeries))
 	mux.HandleFunc("GET /api/admin/usage/drilldowns", s.requireAdmin(s.adminUsageDrilldowns))
@@ -1019,6 +1030,137 @@ func (s *Server) auditLog(w http.ResponseWriter, r *http.Request, _ store.User) 
 	respondJSON(w, http.StatusOK, items)
 }
 
+func (s *Server) requestLogSearch(w http.ResponseWriter, r *http.Request, _ store.User) {
+	query, ok := parseRequestLogQuery(w, r, 100)
+	if !ok {
+		return
+	}
+	result, err := s.store.SearchRequestLogs(r.Context(), query)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	respondJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) requestLogCSV(w http.ResponseWriter, r *http.Request, _ store.User) {
+	query, ok := parseRequestLogQuery(w, r, 100000)
+	if !ok {
+		return
+	}
+	rows, err := s.store.RequestLogExport(r.Context(), query)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	filename := "phlox-gw-request-log-" + time.Now().UTC().Format("20060102") + ".csv"
+	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
+	cw := csv.NewWriter(w)
+	_ = cw.Write([]string{"created_at", "request_id", "username", "department", "api_key_id", "api_key_prefix", "api_key_name", "provider_id", "provider_type", "model_route", "upstream_model_id", "protocol", "method", "endpoint", "streaming", "input_tokens", "output_tokens", "total_tokens", "cost_usd", "latency_ms", "status_code", "error", "client_ip", "user_agent"})
+	for _, row := range rows {
+		_ = cw.Write([]string{
+			row.CreatedAt.Format(time.RFC3339Nano),
+			row.RequestID,
+			row.Username,
+			row.Department,
+			row.APIKeyID,
+			row.APIKeyPrefix,
+			row.APIKeyName,
+			row.ProviderID,
+			row.ProviderType,
+			row.ModelRoute,
+			row.UpstreamModelID,
+			row.Protocol,
+			row.Method,
+			row.Endpoint,
+			strconv.FormatBool(row.Streaming),
+			strconv.Itoa(row.InputTokens),
+			strconv.Itoa(row.OutputTokens),
+			strconv.Itoa(row.TotalTokens),
+			strconv.FormatFloat(row.CostUSD, 'f', 6, 64),
+			strconv.FormatInt(row.LatencyMS, 10),
+			strconv.Itoa(row.StatusCode),
+			row.ErrorText,
+			row.ClientIP,
+			row.UserAgent,
+		})
+	}
+	cw.Flush()
+	if err := cw.Error(); err != nil {
+		s.logger.Warn("request log csv write failed", "error", err)
+	}
+}
+
+func parseRequestLogQuery(w http.ResponseWriter, r *http.Request, defaultLimit int) (store.RequestLogQuery, bool) {
+	values := r.URL.Query()
+	query := store.RequestLogQuery{
+		Search:       strings.TrimSpace(values.Get("q")),
+		Username:     strings.TrimSpace(values.Get("username")),
+		Department:   strings.TrimSpace(values.Get("department")),
+		APIKeyID:     strings.TrimSpace(values.Get("api_key_id")),
+		ProviderID:   strings.TrimSpace(values.Get("provider_id")),
+		ProviderType: strings.TrimSpace(values.Get("provider_type")),
+		ModelRoute:   strings.TrimSpace(values.Get("model")),
+		Protocol:     strings.TrimSpace(values.Get("protocol")),
+		Endpoint:     strings.TrimSpace(values.Get("endpoint")),
+		Status:       strings.TrimSpace(values.Get("status")),
+		Limit:        defaultLimit,
+	}
+	if raw := strings.TrimSpace(values.Get("limit")); raw != "" {
+		limit, err := strconv.Atoi(raw)
+		if err != nil || limit <= 0 {
+			respondError(w, http.StatusBadRequest, "limit must be a positive integer")
+			return store.RequestLogQuery{}, false
+		}
+		query.Limit = limit
+	}
+	if raw := strings.TrimSpace(values.Get("offset")); raw != "" {
+		offset, err := strconv.Atoi(raw)
+		if err != nil || offset < 0 {
+			respondError(w, http.StatusBadRequest, "offset must be a non-negative integer")
+			return store.RequestLogQuery{}, false
+		}
+		query.Offset = offset
+	}
+	if raw := strings.TrimSpace(values.Get("streaming")); raw != "" {
+		parsed, err := strconv.ParseBool(raw)
+		if err != nil {
+			respondError(w, http.StatusBadRequest, "streaming must be true or false")
+			return store.RequestLogQuery{}, false
+		}
+		query.Streaming = &parsed
+	}
+	if raw := strings.TrimSpace(values.Get("from")); raw != "" {
+		parsed, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			respondError(w, http.StatusBadRequest, "from must be RFC3339")
+			return store.RequestLogQuery{}, false
+		}
+		query.From = &parsed
+	}
+	if raw := strings.TrimSpace(values.Get("to")); raw != "" {
+		parsed, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			respondError(w, http.StatusBadRequest, "to must be RFC3339")
+			return store.RequestLogQuery{}, false
+		}
+		query.To = &parsed
+	}
+	if query.From == nil {
+		if raw := strings.TrimSpace(values.Get("days")); raw != "" {
+			days, err := strconv.Atoi(raw)
+			if err != nil || days <= 0 {
+				respondError(w, http.StatusBadRequest, "days must be a positive integer")
+				return store.RequestLogQuery{}, false
+			}
+			from := time.Now().UTC().AddDate(0, 0, -days)
+			query.From = &from
+		}
+	}
+	return query, true
+}
+
 func (s *Server) adminUsageCSV(w http.ResponseWriter, r *http.Request, _ store.User) {
 	rows, err := s.store.UsageExport(r.Context())
 	if err != nil {
@@ -1302,6 +1444,7 @@ func (s *Server) openAIChatCompletions(w http.ResponseWriter, r *http.Request, u
 	policy := reliabilityPolicy(plan.Requested.Model)
 	requestID := requestID()
 	if stream, _ := raw["stream"].(bool); stream {
+		eventMeta := requestEventFromHTTP(r, true)
 		selected, status, reason, typ, ok := s.selectOpenAIStreamCandidate(r.Context(), candidates, user, key, policy)
 		if !ok {
 			openAIError(w, status, reason, typ)
@@ -1322,10 +1465,10 @@ func (s *Server) openAIChatCompletions(w http.ResponseWriter, r *http.Request, u
 		latency := time.Since(start).Milliseconds()
 		usage := parseOpenAIUsage(responseBody)
 		s.recordProviderOutcome(r.Context(), selected.Provider.ID, statusCode, errText)
-		s.recordUsage(r.Context(), requestID, user, key, selected, selected.Provider.Type, usage, latency, statusCode, errText)
+		s.recordUsage(r.Context(), requestID, user, key, selected, selected.Provider.Type, usage, latency, statusCode, errText, eventMeta)
 		return
 	}
-	result := s.executeOpenAIPlan(r.Context(), candidates, raw, user, key, requestID, policy)
+	result := s.executeOpenAIPlan(r.Context(), candidates, raw, user, key, requestID, policy, requestEventFromHTTP(r, false))
 	writeOpenAIResult(w, result)
 }
 
@@ -1358,7 +1501,30 @@ func (s *Server) anthropicMessages(w http.ResponseWriter, r *http.Request, user 
 		anthropicError(w, status, reason)
 		return
 	}
-	result := s.executeAnthropicPlan(r.Context(), candidates, raw, r.Header, user, key, requestID(), reliabilityPolicy(plan.Requested.Model))
+	policy := reliabilityPolicy(plan.Requested.Model)
+	requestID := requestID()
+	if stream, _ := raw["stream"].(bool); stream {
+		eventMeta := requestEventFromHTTP(r, true)
+		selected, status, reason, ok := s.selectAnthropicStreamCandidate(r.Context(), candidates, user, key, policy)
+		if !ok {
+			anthropicError(w, status, reason)
+			return
+		}
+		attemptRaw := cloneJSONMap(raw)
+		attemptRaw["model"] = selected.Model.ModelID
+		body, err := json.Marshal(attemptRaw)
+		if err != nil {
+			anthropicError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		start := time.Now()
+		statusCode, responseBody, errText := s.proxyAnthropicStream(w, r, selected, body)
+		latency := time.Since(start).Milliseconds()
+		s.recordProviderOutcome(r.Context(), selected.Provider.ID, statusCode, errText)
+		s.recordUsage(r.Context(), requestID, user, key, selected, "anthropic", parseAnthropicUsage(responseBody), latency, statusCode, errText, eventMeta)
+		return
+	}
+	result := s.executeAnthropicPlan(r.Context(), candidates, raw, r.Header, user, key, requestID, policy, requestEventFromHTTP(r, false))
 	writeAnthropicResult(w, result)
 }
 
@@ -1426,7 +1592,7 @@ func (s *Server) selectWeightedCandidate(ctx context.Context, primary store.Rout
 	return candidates[len(candidates)-1].route, true
 }
 
-func (s *Server) executeOpenAIPlan(ctx context.Context, candidates []store.RoutedModel, raw map[string]any, user store.User, key store.APIKey, requestID string, policy routeReliabilityPolicy) upstreamResult {
+func (s *Server) executeOpenAIPlan(ctx context.Context, candidates []store.RoutedModel, raw map[string]any, user store.User, key store.APIKey, requestID string, policy routeReliabilityPolicy, eventMeta requestEventMeta) upstreamResult {
 	var last upstreamResult
 	attemptSeq := 0
 	for idx, route := range candidates {
@@ -1453,7 +1619,11 @@ func (s *Server) executeOpenAIPlan(ctx context.Context, candidates []store.Route
 			attemptSeq++
 			result := s.callOpenAINonStreaming(ctx, route, raw, policy.RequestTimeout)
 			s.recordProviderOutcome(ctx, route.Provider.ID, result.Status, result.ErrorText)
-			s.recordUsage(ctx, attemptRequestID(requestID, attemptSeq), user, key, route, result.Protocol, parseOpenAIUsage(result.Body), result.LatencyMS, result.Status, result.ErrorText)
+			usage := parseOpenAIUsage(result.Body)
+			if result.Protocol == "openai" {
+				usage = openAIUsageWithFallback(raw, result.Body, result.Status)
+			}
+			s.recordUsage(ctx, attemptRequestID(requestID, attemptSeq), user, key, route, result.Protocol, usage, result.LatencyMS, result.Status, result.ErrorText, eventMeta)
 			last = result
 			if !providerStatusIsFailure(result.Status) {
 				return result
@@ -1470,7 +1640,7 @@ func (s *Server) executeOpenAIPlan(ctx context.Context, candidates []store.Route
 	return last
 }
 
-func (s *Server) executeAnthropicPlan(ctx context.Context, candidates []store.RoutedModel, raw map[string]any, inbound http.Header, user store.User, key store.APIKey, requestID string, policy routeReliabilityPolicy) upstreamResult {
+func (s *Server) executeAnthropicPlan(ctx context.Context, candidates []store.RoutedModel, raw map[string]any, inbound http.Header, user store.User, key store.APIKey, requestID string, policy routeReliabilityPolicy, eventMeta requestEventMeta) upstreamResult {
 	var last upstreamResult
 	attemptSeq := 0
 	for idx, route := range candidates {
@@ -1494,7 +1664,7 @@ func (s *Server) executeAnthropicPlan(ctx context.Context, candidates []store.Ro
 			attemptSeq++
 			result := s.callAnthropicNonStreaming(ctx, route, raw, inbound, policy.RequestTimeout)
 			s.recordProviderOutcome(ctx, route.Provider.ID, result.Status, result.ErrorText)
-			s.recordUsage(ctx, attemptRequestID(requestID, attemptSeq), user, key, route, "anthropic", parseAnthropicUsage(result.Body), result.LatencyMS, result.Status, result.ErrorText)
+			s.recordUsage(ctx, attemptRequestID(requestID, attemptSeq), user, key, route, "anthropic", parseAnthropicUsage(result.Body), result.LatencyMS, result.Status, result.ErrorText, eventMeta)
 			last = result
 			if !providerStatusIsFailure(result.Status) {
 				return result
@@ -1535,6 +1705,32 @@ func (s *Server) selectOpenAIStreamCandidate(ctx context.Context, candidates []s
 		return route, 0, "", "", true
 	}
 	return store.RoutedModel{}, http.StatusServiceUnavailable, "no available streaming OpenAI-compatible or Bedrock provider candidate", "provider_unavailable", false
+}
+
+func (s *Server) selectAnthropicStreamCandidate(ctx context.Context, candidates []store.RoutedModel, user store.User, key store.APIKey, policy routeReliabilityPolicy) (store.RoutedModel, int, string, bool) {
+	for idx, route := range candidates {
+		if route.Provider.Type != "anthropic" {
+			continue
+		}
+		if policy.HealthRoutingEnabled {
+			if open, reason := providerCircuitOpen(route.Provider, time.Now().UTC()); open {
+				if idx == 0 && len(candidates) == 1 {
+					return store.RoutedModel{}, http.StatusServiceUnavailable, reason, false
+				}
+				continue
+			}
+		}
+		if idx > 0 {
+			if blocked, status, reason, _ := s.checkRouteAdmission(ctx, user, key, route); blocked {
+				if idx == 0 {
+					return store.RoutedModel{}, status, reason, false
+				}
+				continue
+			}
+		}
+		return route, 0, "", true
+	}
+	return store.RoutedModel{}, http.StatusServiceUnavailable, "no available streaming Anthropic-compatible provider candidate", false
 }
 
 func (s *Server) checkRouteAdmission(ctx context.Context, user store.User, key store.APIKey, route store.RoutedModel) (bool, int, string, string) {
@@ -1865,7 +2061,11 @@ func (s *Server) proxyOpenAI(w http.ResponseWriter, r *http.Request, route store
 	w.WriteHeader(resp.StatusCode)
 
 	if stream, _ := raw["stream"].(bool); stream {
-		usage, n, err := proxyOpenAIStream(w, resp.Body)
+		fallbackInput := 0
+		if resp.StatusCode < 400 {
+			fallbackInput = estimateOpenAIInputTokens(raw)
+		}
+		usage, n, err := proxyOpenAIStream(w, resp.Body, fallbackInput)
 		if err != nil {
 			return resp.StatusCode, nil, err.Error()
 		}
@@ -1882,8 +2082,9 @@ func (s *Server) proxyOpenAI(w http.ResponseWriter, r *http.Request, route store
 	return resp.StatusCode, responseBody, ""
 }
 
-func proxyOpenAIStream(w http.ResponseWriter, body io.Reader) (tokenUsage, int64, error) {
+func proxyOpenAIStream(w http.ResponseWriter, body io.Reader, fallbackInputTokens int) (tokenUsage, int64, error) {
 	var usage tokenUsage
+	estimatedOutputTokens := 0
 	var written int64
 	reader := bufio.NewReader(body)
 	flusher, _ := w.(http.Flusher)
@@ -1901,11 +2102,15 @@ func proxyOpenAIStream(w http.ResponseWriter, body io.Reader) (tokenUsage, int64
 			if parsed := usageFromSSELine(line); parsed.Total > 0 || parsed.Input > 0 || parsed.Output > 0 {
 				usage = parsed
 			}
+			if usage.Output == 0 {
+				estimatedOutputTokens += estimateOpenAIStreamOutputTokens(line)
+			}
 		}
 		if err == nil {
 			continue
 		}
 		if errors.Is(err, io.EOF) {
+			usage = mergeEstimatedUsage(usage, fallbackInputTokens, estimatedOutputTokens)
 			return usage, written, nil
 		}
 		return usage, written, err
@@ -1924,6 +2129,218 @@ func usageFromSSELine(line []byte) tokenUsage {
 	return parseOpenAIUsage([]byte(payload))
 }
 
+func estimateOpenAIStreamOutputTokens(line []byte) int {
+	text := strings.TrimSpace(string(line))
+	if !strings.HasPrefix(text, "data:") {
+		return 0
+	}
+	payload := strings.TrimSpace(strings.TrimPrefix(text, "data:"))
+	if payload == "" || payload == "[DONE]" {
+		return 0
+	}
+	var chunk struct {
+		Choices []struct {
+			Delta struct {
+				Content   any `json:"content"`
+				ToolCalls []struct {
+					Function struct {
+						Arguments string `json:"arguments"`
+					} `json:"function"`
+				} `json:"tool_calls"`
+			} `json:"delta"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
+		return 0
+	}
+	total := 0
+	for _, choice := range chunk.Choices {
+		total += estimateOpenAIContentTokens(choice.Delta.Content)
+		for _, call := range choice.Delta.ToolCalls {
+			total += estimateTextTokens(call.Function.Arguments)
+		}
+	}
+	return total
+}
+
+func openAIUsageWithFallback(raw map[string]any, body []byte, status int) tokenUsage {
+	usage := parseOpenAIUsage(body)
+	if status >= 400 {
+		return usage
+	}
+	if usage.Input > 0 && usage.Output > 0 && usage.Total > 0 {
+		return usage
+	}
+	return mergeEstimatedUsage(usage, estimateOpenAIInputTokens(raw), estimateOpenAIResponseTokens(body))
+}
+
+func mergeEstimatedUsage(usage tokenUsage, estimatedInputTokens, estimatedOutputTokens int) tokenUsage {
+	if usage.Input == 0 && estimatedInputTokens > 0 {
+		usage.Input = estimatedInputTokens
+	}
+	if usage.Output == 0 && estimatedOutputTokens > 0 {
+		usage.Output = estimatedOutputTokens
+	}
+	if usage.Total == 0 && (usage.Input > 0 || usage.Output > 0) {
+		usage.Total = usage.Input + usage.Output
+	}
+	return usage
+}
+
+func estimateOpenAIInputTokens(raw map[string]any) int {
+	total := 0
+	if messages, ok := raw["messages"].([]any); ok {
+		for _, item := range messages {
+			msg, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			total += 4
+			total += estimateOpenAIContentTokens(msg["content"])
+			if calls, ok := msg["tool_calls"].([]any); ok {
+				for _, call := range calls {
+					if body, err := json.Marshal(call); err == nil {
+						total += estimateTextTokens(string(body))
+					}
+				}
+			}
+		}
+	}
+	if tools, ok := raw["tools"]; ok && tools != nil {
+		if body, err := json.Marshal(tools); err == nil {
+			total += estimateTextTokens(string(body))
+		}
+	}
+	return total
+}
+
+func estimateOpenAIResponseTokens(body []byte) int {
+	var resp struct {
+		Choices []struct {
+			Text    string `json:"text"`
+			Message struct {
+				Content   any `json:"content"`
+				ToolCalls []struct {
+					Function struct {
+						Arguments string `json:"arguments"`
+					} `json:"function"`
+				} `json:"tool_calls"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return 0
+	}
+	total := 0
+	for _, choice := range resp.Choices {
+		total += estimateTextTokens(choice.Text)
+		total += estimateOpenAIContentTokens(choice.Message.Content)
+		for _, call := range choice.Message.ToolCalls {
+			total += estimateTextTokens(call.Function.Arguments)
+		}
+	}
+	return total
+}
+
+func estimateOpenAIContentTokens(content any) int {
+	switch v := content.(type) {
+	case nil:
+		return 0
+	case string:
+		return estimateTextTokens(v)
+	case []any:
+		total := 0
+		for _, item := range v {
+			switch part := item.(type) {
+			case string:
+				total += estimateTextTokens(part)
+			case map[string]any:
+				if text, _ := part["text"].(string); text != "" {
+					total += estimateTextTokens(text)
+				}
+			}
+		}
+		return total
+	default:
+		return 0
+	}
+}
+
+func estimateTextTokens(text string) int {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return 0
+	}
+	chars := utf8.RuneCountInString(text)
+	byChars := int(math.Ceil(float64(chars) / 4.0))
+	byWords := int(math.Ceil(float64(len(strings.Fields(text))) * 1.33))
+	if byWords > byChars {
+		byChars = byWords
+	}
+	if byChars < 1 {
+		return 1
+	}
+	return byChars
+}
+
+func usageFromAnthropicSSELine(line []byte) tokenUsage {
+	text := strings.TrimSpace(string(line))
+	if !strings.HasPrefix(text, "data:") {
+		return tokenUsage{}
+	}
+	payload := strings.TrimSpace(strings.TrimPrefix(text, "data:"))
+	if payload == "" || payload == "[DONE]" {
+		return tokenUsage{}
+	}
+	var event struct {
+		Message struct {
+			Usage struct {
+				InputTokens  int `json:"input_tokens"`
+				OutputTokens int `json:"output_tokens"`
+			} `json:"usage"`
+		} `json:"message"`
+		Usage struct {
+			InputTokens  int `json:"input_tokens"`
+			OutputTokens int `json:"output_tokens"`
+			TotalTokens  int `json:"total_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal([]byte(payload), &event); err != nil {
+		return tokenUsage{}
+	}
+	usage := tokenUsage{
+		Input:  event.Message.Usage.InputTokens,
+		Output: event.Message.Usage.OutputTokens,
+	}
+	if event.Usage.InputTokens > 0 {
+		usage.Input = event.Usage.InputTokens
+	}
+	if event.Usage.OutputTokens > 0 {
+		usage.Output = event.Usage.OutputTokens
+	}
+	if event.Usage.TotalTokens > 0 {
+		usage.Total = event.Usage.TotalTokens
+	} else if usage.Input > 0 || usage.Output > 0 {
+		usage.Total = usage.Input + usage.Output
+	}
+	return usage
+}
+
+func mergeAnthropicUsage(current, next tokenUsage) tokenUsage {
+	if next.Input > 0 {
+		current.Input = next.Input
+	}
+	if next.Output > 0 {
+		current.Output = next.Output
+	}
+	if next.Total > 0 && next.Total >= current.Input+current.Output {
+		current.Total = next.Total
+	} else {
+		current.Total = current.Input + current.Output
+	}
+	return current
+}
+
 func openAIUsageBody(usage tokenUsage, streamedBytes int64) []byte {
 	body, _ := json.Marshal(map[string]any{
 		"streamed_bytes": streamedBytes,
@@ -1931,6 +2348,17 @@ func openAIUsageBody(usage tokenUsage, streamedBytes int64) []byte {
 			"prompt_tokens":     usage.Input,
 			"completion_tokens": usage.Output,
 			"total_tokens":      usage.Total,
+		},
+	})
+	return body
+}
+
+func anthropicUsageBody(usage tokenUsage, streamedBytes int64) []byte {
+	body, _ := json.Marshal(map[string]any{
+		"streamed_bytes": streamedBytes,
+		"usage": map[string]int{
+			"input_tokens":  usage.Input,
+			"output_tokens": usage.Output,
 		},
 	})
 	return body
@@ -2065,6 +2493,91 @@ func (s *Server) proxyAnthropic(w http.ResponseWriter, r *http.Request, route st
 		return resp.StatusCode, responseBody, string(responseBody)
 	}
 	return resp.StatusCode, responseBody, ""
+}
+
+func (s *Server) proxyAnthropicStream(w http.ResponseWriter, r *http.Request, route store.RoutedModel, body []byte) (int, []byte, string) {
+	endpoint := strings.TrimRight(route.Provider.BaseURL, "/") + "/v1/messages"
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		anthropicError(w, http.StatusInternalServerError, err.Error())
+		return http.StatusInternalServerError, nil, err.Error()
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "Phlox-GW/0.1")
+	version := r.Header.Get("anthropic-version")
+	if version == "" {
+		version = "2023-06-01"
+	}
+	req.Header.Set("anthropic-version", version)
+	if beta := r.Header.Get("anthropic-beta"); beta != "" {
+		req.Header.Set("anthropic-beta", beta)
+	}
+	if apiKey := providerAPIKey(route.Provider); apiKey != "" {
+		req.Header.Set("x-api-key", apiKey)
+	}
+
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		anthropicError(w, http.StatusBadGateway, err.Error())
+		return http.StatusBadGateway, nil, err.Error()
+	}
+	defer resp.Body.Close()
+	for k, values := range resp.Header {
+		if shouldProxyHeader(k) {
+			for _, v := range values {
+				w.Header().Add(k, v)
+			}
+		}
+	}
+	if w.Header().Get("Content-Type") == "" {
+		w.Header().Set("Content-Type", "text/event-stream")
+	}
+	if w.Header().Get("Cache-Control") == "" {
+		w.Header().Set("Cache-Control", "no-cache")
+	}
+	w.WriteHeader(resp.StatusCode)
+	if resp.StatusCode >= 400 {
+		responseBody, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return resp.StatusCode, nil, err.Error()
+		}
+		_, _ = w.Write(responseBody)
+		return resp.StatusCode, responseBody, string(responseBody)
+	}
+	usage, n, err := proxyAnthropicStream(w, resp.Body)
+	body = anthropicUsageBody(usage, n)
+	if err != nil {
+		return resp.StatusCode, body, err.Error()
+	}
+	return resp.StatusCode, body, ""
+}
+
+func proxyAnthropicStream(w http.ResponseWriter, body io.Reader) (tokenUsage, int64, error) {
+	var usage tokenUsage
+	var written int64
+	reader := bufio.NewReader(body)
+	flusher, _ := w.(http.Flusher)
+	for {
+		line, err := reader.ReadBytes('\n')
+		if len(line) > 0 {
+			n, writeErr := w.Write(line)
+			written += int64(n)
+			if writeErr != nil {
+				return usage, written, writeErr
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+			usage = mergeAnthropicUsage(usage, usageFromAnthropicSSELine(line))
+		}
+		if err == nil {
+			continue
+		}
+		if errors.Is(err, io.EOF) {
+			return usage, written, nil
+		}
+		return usage, written, err
+	}
 }
 
 func (s *Server) proxyBedrockOpenAI(w http.ResponseWriter, r *http.Request, route store.RoutedModel, raw map[string]any) (int, []byte, string) {
@@ -2228,12 +2741,17 @@ func (s *Server) bedrockClient(ctx context.Context, p store.Provider) (BedrockCo
 	return awsBedrockConverseClient{client: bedrockruntime.NewFromConfig(cfg)}, nil
 }
 
-func (s *Server) recordUsage(ctx context.Context, requestID string, user store.User, key store.APIKey, route store.RoutedModel, protocol string, usage tokenUsage, latencyMS int64, status int, errText string) {
+func (s *Server) recordUsage(ctx context.Context, requestID string, user store.User, key store.APIKey, route store.RoutedModel, protocol string, usage tokenUsage, latencyMS int64, status int, errText string, eventMeta requestEventMeta) {
+	if usage.Total == 0 && (usage.Input > 0 || usage.Output > 0) {
+		usage.Total = usage.Input + usage.Output
+	}
 	id, err := auth.RandomID("usage")
 	if err != nil {
 		s.logger.Warn("usage id failed", "error", err)
 		return
 	}
+	now := time.Now().UTC()
+	cost := store.Cost(usage.Input, usage.Output, route.Model)
 	rec := store.UsageRecord{
 		ID:           id,
 		RequestID:    requestID,
@@ -2247,14 +2765,50 @@ func (s *Server) recordUsage(ctx context.Context, requestID string, user store.U
 		InputTokens:  usage.Input,
 		OutputTokens: usage.Output,
 		TotalTokens:  usage.Total,
-		CostUSD:      store.Cost(usage.Input, usage.Output, route.Model),
+		CostUSD:      cost,
 		LatencyMS:    latencyMS,
 		StatusCode:   status,
 		ErrorText:    limitString(errText, 1000),
-		CreatedAt:    time.Now().UTC(),
+		CreatedAt:    now,
 	}
 	if err := s.store.InsertUsage(ctx, rec); err != nil {
 		s.logger.Warn("usage insert failed", "error", err)
+	}
+	logID, err := auth.RandomID("reqlog")
+	if err != nil {
+		s.logger.Warn("request log id failed", "error", err)
+		return
+	}
+	requestLog := store.RequestLogRecord{
+		ID:              logID,
+		RequestID:       requestID,
+		UserID:          user.ID,
+		Username:        user.Username,
+		Department:      user.Department,
+		APIKeyID:        key.ID,
+		APIKeyPrefix:    key.Prefix,
+		APIKeyName:      key.Name,
+		ProviderID:      route.Provider.ID,
+		ProviderType:    route.Provider.Type,
+		ModelRoute:      route.Model.Route,
+		UpstreamModelID: route.Model.ModelID,
+		Protocol:        protocol,
+		Method:          eventMeta.Method,
+		Endpoint:        eventMeta.Endpoint,
+		Streaming:       eventMeta.Streaming,
+		InputTokens:     usage.Input,
+		OutputTokens:    usage.Output,
+		TotalTokens:     usage.Total,
+		CostUSD:         cost,
+		LatencyMS:       latencyMS,
+		StatusCode:      status,
+		ErrorText:       limitString(errText, 1000),
+		ClientIP:        limitString(eventMeta.ClientIP, 200),
+		UserAgent:       limitString(eventMeta.UserAgent, 500),
+		CreatedAt:       now,
+	}
+	if err := s.store.InsertRequestLog(ctx, requestLog); err != nil {
+		s.logger.Warn("request log insert failed", "error", err)
 	}
 }
 
@@ -2359,6 +2913,16 @@ func requestIP(r *http.Request) string {
 		return host
 	}
 	return r.RemoteAddr
+}
+
+func requestEventFromHTTP(r *http.Request, streaming bool) requestEventMeta {
+	return requestEventMeta{
+		Method:    r.Method,
+		Endpoint:  r.URL.Path,
+		Streaming: streaming,
+		ClientIP:  requestIP(r),
+		UserAgent: limitString(r.UserAgent(), 500),
+	}
 }
 
 func (s *Server) checkAPIKeyPolicy(ctx context.Context, key store.APIKey, route store.RoutedModel) (bool, int, string, string) {

@@ -25,16 +25,16 @@
 - [x] Weighted routing and traffic-splitting policies.
 - [x] Budget burn-down, provider drilldowns, and model drilldowns.
 - [x] Bedrock ConverseStream support with OpenAI-compatible SSE translation, data URL image input mapping, and function tool-call mapping.
+- [x] Anthropic-compatible streaming pass-through with streamed usage capture from compatible endpoints.
+- [x] Request/response metadata search and CSV export without storing prompt content by default.
 
 ## Next
 
-- Add Anthropic streaming support and streamed usage capture where compatible endpoints expose it.
-- Add request and response metadata search without storing prompt content by default.
+- Add guardrail plugin layer and PII redaction policy controls.
 
 ## Later
 
 - Prometheus metrics and OpenTelemetry traces.
-- Guardrail plugin layer and PII redaction.
 - Semantic response cache.
 - Request metadata search and signed admin configuration export.
 - Cluster mode with Postgres.

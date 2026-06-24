@@ -693,6 +693,15 @@ button {
   white-space: nowrap;
 }
 
+.pager {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+  color: var(--muted);
+}
+
 .check {
   min-height: 40px;
   display: inline-flex;

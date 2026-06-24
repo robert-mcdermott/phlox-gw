@@ -34,6 +34,21 @@ func TestUsageFromSSELine(t *testing.T) {
 	}
 }
 
+func TestUsageFromAnthropicSSELine(t *testing.T) {
+	start := usageFromAnthropicSSELine([]byte(`data: {"type":"message_start","message":{"usage":{"input_tokens":8,"output_tokens":1}}}` + "\n"))
+	if start.Input != 8 || start.Output != 1 || start.Total != 9 {
+		t.Fatalf("message_start usage = %#v", start)
+	}
+	delta := usageFromAnthropicSSELine([]byte(`data: {"type":"message_delta","usage":{"output_tokens":5}}` + "\n"))
+	got := mergeAnthropicUsage(start, delta)
+	if got.Input != 8 || got.Output != 5 || got.Total != 13 {
+		t.Fatalf("merged usage = %#v", got)
+	}
+	if got := usageFromAnthropicSSELine([]byte("event: ping\n")); got.Total != 0 || got.Input != 0 || got.Output != 0 {
+		t.Fatalf("non-data line should not produce usage, got %#v", got)
+	}
+}
+
 func TestCheckAPIKeyPolicy(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
@@ -561,6 +576,20 @@ func TestOpenAIChatCompletionsRoutesToBedrockAndRecordsUsage(t *testing.T) {
 	if usage.Requests != 1 || usage.InputTokens != 10 || usage.OutputTokens != 5 || usage.TotalTokens != 15 || usage.CostUSD != 0.00002 {
 		t.Fatalf("unexpected stored usage: %#v", usage)
 	}
+	requests, err := st.SearchRequestLogs(ctx, store.RequestLogQuery{ProviderID: provider.ID, Limit: 10})
+	if err != nil {
+		t.Fatalf("SearchRequestLogs: %v", err)
+	}
+	if requests.Total != 1 || len(requests.Items) != 1 {
+		t.Fatalf("unexpected request logs: %#v", requests)
+	}
+	reqLog := requests.Items[0]
+	if reqLog.RequestID == "" || reqLog.Username != user.Username || reqLog.APIKeyPrefix != prefix || reqLog.ProviderType != "bedrock" || reqLog.ModelRoute != model.Route || reqLog.UpstreamModelID != model.ModelID || reqLog.Endpoint != "/v1/chat/completions" || reqLog.Streaming {
+		t.Fatalf("unexpected request metadata: %#v", reqLog)
+	}
+	if reqLog.TotalTokens != 15 || reqLog.CostUSD != 0.00002 || reqLog.StatusCode != http.StatusOK {
+		t.Fatalf("unexpected request usage metadata: %#v", reqLog)
+	}
 }
 
 func TestOpenAIChatCompletionsStreamsBedrockAndRecordsUsage(t *testing.T) {
@@ -663,6 +692,221 @@ func TestOpenAIChatCompletionsStreamsBedrockAndRecordsUsage(t *testing.T) {
 		t.Fatalf("UsageForUser: %v", err)
 	}
 	if usage.Requests != 1 || usage.InputTokens != 4 || usage.OutputTokens != 2 || usage.TotalTokens != 6 || usage.CostUSD != 0.000008 {
+		t.Fatalf("unexpected stored usage: %#v", usage)
+	}
+}
+
+func TestOpenAIChatCompletionsStreamsWithoutUsageEstimatesTokens(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer st.Close()
+	user := store.User{ID: "user_stream_estimate", Username: "stream-estimate", Department: "AI", Role: "user", AuthProvider: "local", IsActive: true}
+	if err := st.CreateUser(ctx, user); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	plain, prefix, keyHash, err := auth.NewAPIKey()
+	if err != nil {
+		t.Fatalf("NewAPIKey: %v", err)
+	}
+	if err := st.CreateAPIKey(ctx, store.APIKey{ID: "key_stream_estimate", UserID: user.ID, Name: "Estimate key", Prefix: prefix, KeyHash: keyHash}); err != nil {
+		t.Fatalf("CreateAPIKey: %v", err)
+	}
+	provider := store.Provider{ID: "ollama-estimate", Name: "Ollama Estimate", Type: "openai", BaseURL: "http://ollama-estimate.test/v1", Enabled: true}
+	if err := st.CreateProvider(ctx, provider); err != nil {
+		t.Fatalf("CreateProvider: %v", err)
+	}
+	model := store.Model{
+		ID:                   "model_stream_estimate",
+		ProviderID:           provider.ID,
+		ModelID:              "gemma4:31b-cloud",
+		Route:                "ollama-estimate/gemma4:31b-cloud",
+		DisplayName:          "Gemma Estimate",
+		InputCostPerMillion:  1,
+		OutputCostPerMillion: 2,
+		SupportsStreaming:    true,
+		Enabled:              true,
+	}
+	if err := st.CreateModel(ctx, model); err != nil {
+		t.Fatalf("CreateModel: %v", err)
+	}
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Host != "ollama-estimate.test" || r.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("unexpected upstream target: %s", r.URL.String())
+		}
+		var req map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode upstream request: %v", err)
+		}
+		if req["model"] != model.ModelID || req["stream"] != true {
+			t.Fatalf("unexpected upstream request: %#v", req)
+		}
+		streamBody := strings.Join([]string{
+			`data: {"id":"chunk_1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant"}}]}` + "\n\n",
+			`data: {"id":"chunk_1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"hello world"}}]}` + "\n\n",
+			"data: [DONE]\n\n",
+		}, "")
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(strings.NewReader(streamBody)),
+			Request:    r,
+		}, nil
+	})
+	handler, err := New(Options{
+		Config: config.Config{SessionSecret: "test-secret"},
+		Store:  st,
+		Frontend: fstest.MapFS{
+			"frontend/dist/index.html": &fstest.MapFile{Data: []byte("<html></html>")},
+		},
+		HTTPClient: &http.Client{Transport: transport},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	resp := jsonRequest(t, handler, http.MethodPost, "/v1/chat/completions", plain, map[string]any{
+		"model":    model.Route,
+		"stream":   true,
+		"messages": []map[string]string{{"role": "user", "content": "Hello there"}},
+	})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", resp.Code, resp.Body.String())
+	}
+	if !strings.Contains(resp.Body.String(), `"content":"hello world"`) {
+		t.Fatalf("stream body missing content: %s", resp.Body.String())
+	}
+	usage, err := st.UsageForUser(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("UsageForUser: %v", err)
+	}
+	if usage.Requests != 1 || usage.InputTokens <= 0 || usage.OutputTokens <= 0 || usage.TotalTokens <= 0 || usage.CostUSD <= 0 {
+		t.Fatalf("expected estimated usage and cost, got %#v", usage)
+	}
+	requests, err := st.SearchRequestLogs(ctx, store.RequestLogQuery{ProviderID: provider.ID, Limit: 10})
+	if err != nil {
+		t.Fatalf("SearchRequestLogs: %v", err)
+	}
+	if requests.Total != 1 || len(requests.Items) != 1 || !requests.Items[0].Streaming || requests.Items[0].TotalTokens <= 0 || requests.Items[0].CostUSD <= 0 {
+		t.Fatalf("unexpected request metadata: %#v", requests)
+	}
+}
+
+func TestAnthropicMessagesStreamsAndRecordsUsage(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer st.Close()
+	user := store.User{
+		ID:           "user_anthropic_stream",
+		Username:     "anthropic-stream-user",
+		Department:   "AI",
+		Role:         "user",
+		PasswordHash: "unused",
+		AuthProvider: "local",
+		IsActive:     true,
+	}
+	if err := st.CreateUser(ctx, user); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	plain, prefix, keyHash, err := auth.NewAPIKey()
+	if err != nil {
+		t.Fatalf("NewAPIKey: %v", err)
+	}
+	if err := st.CreateAPIKey(ctx, store.APIKey{ID: "key_anthropic_stream", UserID: user.ID, Name: "Anthropic stream key", Prefix: prefix, KeyHash: keyHash}); err != nil {
+		t.Fatalf("CreateAPIKey: %v", err)
+	}
+	provider := store.Provider{ID: "anthropic-stream", Name: "Anthropic Stream", Type: "anthropic", BaseURL: "http://anthropic-stream.test", Enabled: true}
+	if err := st.CreateProvider(ctx, provider); err != nil {
+		t.Fatalf("CreateProvider: %v", err)
+	}
+	model := store.Model{
+		ID:                   "model_anthropic_stream",
+		ProviderID:           provider.ID,
+		ModelID:              "claude-upstream",
+		Route:                "anthropic-stream/claude",
+		DisplayName:          "Anthropic Stream",
+		InputCostPerMillion:  1,
+		OutputCostPerMillion: 2,
+		SupportsStreaming:    true,
+		Enabled:              true,
+	}
+	if err := st.CreateModel(ctx, model); err != nil {
+		t.Fatalf("CreateModel: %v", err)
+	}
+	upstreamHits := 0
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		upstreamHits++
+		if r.URL.Host != "anthropic-stream.test" || r.URL.Path != "/v1/messages" {
+			t.Fatalf("unexpected upstream target: %s", r.URL.String())
+		}
+		if got := r.Header.Get("anthropic-version"); got != "2023-06-01" {
+			t.Fatalf("anthropic-version = %q", got)
+		}
+		var req map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("upstream decode: %v", err)
+		}
+		if req["model"] != "claude-upstream" || req["stream"] != true {
+			t.Fatalf("unexpected upstream body: %#v", req)
+		}
+		streamBody := strings.Join([]string{
+			"event: message_start\n",
+			`data: {"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":8,"output_tokens":1}}}` + "\n\n",
+			"event: content_block_delta\n",
+			`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello"}}` + "\n\n",
+			"event: message_delta\n",
+			`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5}}` + "\n\n",
+			"event: message_stop\n",
+			`data: {"type":"message_stop"}` + "\n\n",
+		}, "")
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(strings.NewReader(streamBody)),
+			Request:    r,
+		}, nil
+	})
+	handler, err := New(Options{
+		Config: config.Config{SessionSecret: "test-secret"},
+		Store:  st,
+		Frontend: fstest.MapFS{
+			"frontend/dist/index.html": &fstest.MapFile{Data: []byte("<html></html>")},
+		},
+		HTTPClient: &http.Client{Transport: transport},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	resp := jsonRequest(t, handler, http.MethodPost, "/anthropic/v1/messages", plain, map[string]any{
+		"model":      model.Route,
+		"stream":     true,
+		"max_tokens": 32,
+		"messages":   []map[string]string{{"role": "user", "content": "Hello"}},
+	})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", resp.Code, resp.Body.String())
+	}
+	if upstreamHits != 1 {
+		t.Fatalf("upstream hits = %d", upstreamHits)
+	}
+	if got := resp.Header().Get("Content-Type"); !strings.HasPrefix(got, "text/event-stream") {
+		t.Fatalf("content type = %q", got)
+	}
+	body := resp.Body.String()
+	for _, want := range []string{"event: message_start", `"text":"hello"`, "event: message_stop"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("stream body missing %q: %s", want, body)
+		}
+	}
+	usage, err := st.UsageForUser(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("UsageForUser: %v", err)
+	}
+	if usage.Requests != 1 || usage.InputTokens != 8 || usage.OutputTokens != 5 || usage.TotalTokens != 13 || usage.CostUSD != 0.000018 {
 		t.Fatalf("unexpected stored usage: %#v", usage)
 	}
 }
@@ -1191,6 +1435,76 @@ func TestAdminActionCreatesAuditLog(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("did not find user.create audit event in %#v", items)
+	}
+}
+
+func TestAdminRequestLogSearchAndCSV(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer st.Close()
+	if err := st.EnsureSeedData("admin-hash"); err != nil {
+		t.Fatalf("EnsureSeedData: %v", err)
+	}
+	admin, err := st.GetUserByUsername(ctx, "admin")
+	if err != nil {
+		t.Fatalf("GetUserByUsername: %v", err)
+	}
+	if err := st.InsertRequestLog(ctx, store.RequestLogRecord{
+		ID:              "reqlog_admin_api",
+		RequestID:       "req_search_1",
+		UserID:          admin.ID,
+		Username:        admin.Username,
+		Department:      admin.Department,
+		APIKeyID:        "key_search",
+		APIKeyPrefix:    "pgw-sk-test",
+		APIKeyName:      "Search key",
+		ProviderID:      "openai",
+		ProviderType:    "openai",
+		ModelRoute:      "openai/gpt-4o-mini",
+		UpstreamModelID: "gpt-4o-mini",
+		Protocol:        "openai",
+		Method:          "POST",
+		Endpoint:        "/v1/chat/completions",
+		StatusCode:      429,
+		ErrorText:       "rate limited",
+		ClientIP:        "203.0.113.9",
+		UserAgent:       "test-agent",
+		CreatedAt:       time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("InsertRequestLog: %v", err)
+	}
+	handler, err := New(Options{
+		Config: config.Config{SessionSecret: "test-secret"},
+		Store:  st,
+		Frontend: fstest.MapFS{
+			"frontend/dist/index.html": &fstest.MapFile{Data: []byte("<html></html>")},
+		},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	token := sessionToken(t, admin)
+	resp := jsonRequest(t, handler, http.MethodGet, "/api/admin/request-log?q=rate&status=error&limit=10", token, nil)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("request log status = %d body = %s", resp.Code, resp.Body.String())
+	}
+	var result store.RequestLogSearchResult
+	decodeRecorder(t, resp, &result)
+	if result.Total != 1 || len(result.Items) != 1 || result.Items[0].RequestID != "req_search_1" {
+		t.Fatalf("unexpected request log result: %#v", result)
+	}
+	csvResp := jsonRequest(t, handler, http.MethodGet, "/api/admin/request-log/export.csv?q=rate", token, nil)
+	if csvResp.Code != http.StatusOK {
+		t.Fatalf("request log csv status = %d body = %s", csvResp.Code, csvResp.Body.String())
+	}
+	if got := csvResp.Header().Get("Content-Type"); !strings.HasPrefix(got, "text/csv") {
+		t.Fatalf("csv content type = %q", got)
+	}
+	if body := csvResp.Body.String(); !strings.Contains(body, "req_search_1") || strings.Contains(body, "prompt") {
+		t.Fatalf("unexpected csv body: %s", body)
 	}
 }
 
