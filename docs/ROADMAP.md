@@ -27,14 +27,15 @@
 - [x] Bedrock ConverseStream support with OpenAI-compatible SSE translation, data URL image input mapping, and function tool-call mapping.
 - [x] Anthropic-compatible streaming pass-through with streamed usage capture from compatible endpoints.
 - [x] Request/response metadata search and CSV export without storing prompt content by default.
+- [x] Built-in guardrail policy layer with PII/API-key redaction and blocking controls.
+- [x] Custom regex guardrail patterns with admin preview testing.
 
 ## Next
 
-- Add guardrail plugin layer and PII redaction policy controls.
+- Prometheus metrics and OpenTelemetry traces.
 
 ## Later
 
-- Prometheus metrics and OpenTelemetry traces.
 - Semantic response cache.
 - Signed admin configuration export.
 - Cluster mode with Postgres.

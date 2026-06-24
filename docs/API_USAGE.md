@@ -168,6 +168,31 @@ Anthropic-compatible provider.
 Streaming Anthropic-compatible responses are proxied when `stream` is `true`. Usage is
 captured from compatible `message_start` and `message_delta` stream events when present.
 
+## Guardrails
+
+Administrators can enable the guardrail policy from `Admin -> Guardrails`. The built-in
+plugin detects email addresses, phone numbers, SSNs, credit-card numbers, and common API
+key/token patterns in JSON text fields. Administrators can also add any number of
+RE2-compatible custom regex patterns. Custom patterns can redact with a pattern-specific
+replacement token or block matching content.
+
+Input actions:
+
+- `off`: do not inspect request content.
+- `redact`: replace detected values before dispatching to the upstream provider.
+- `block`: reject the request before dispatch.
+
+Output actions:
+
+- `off`: do not inspect response content.
+- `redact`: replace detected values before returning the response to the client.
+- `block`: block non-streaming responses after provider return. Streaming requests are
+  rejected while this mode is active because partial streamed output cannot be recalled.
+
+Guardrail inspection happens in memory. Prompt text and response text are still not stored
+by default. The admin preview tool sends sample text only to the local preview endpoint and
+does not persist it.
+
 ## Common Status Codes
 
 | Status | Meaning |
@@ -178,6 +203,7 @@ captured from compatible `message_start` and `message_delta` stream events when 
 | `402` | A user, department, or API-key budget is exhausted for a priced model. |
 | `403` | The key or user is not allowed to use the requested route. |
 | `404` | Unknown enabled model route, depending on endpoint and request shape. |
+| `422` | Non-streaming provider output was blocked by a guardrail policy. |
 | `429` | Key, user, department, provider, or model rate limit exceeded. |
 | `502` | Upstream provider transport or gateway failure. |
 | `503` | Provider circuit open or no usable candidate route. |

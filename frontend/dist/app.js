@@ -30,6 +30,9 @@ const state = {
   auditLogs: [],
   requestLog: { items: [], total: 0, limit: 100, offset: 0 },
   requestFilters: { q: '', days: '7', status: 'any', protocol: '', provider_id: '', model: '', department: '', streaming: '' },
+  guardrailPolicy: null,
+  guardrailPreview: null,
+  guardrailPreviewText: 'Contact me at jane@example.com, call 206-555-2407, employee EMP-12345.',
   usageSeries: [],
   usageDrilldowns: { providers: [], models: [] },
   budgetBurnDown: [],
@@ -45,6 +48,7 @@ applyTheme(state.theme, false);
 const ADMIN_SECTIONS = [
   { id: 'operations', label: 'Operations', icon: 'chart', description: '30-day usage, latency, cost, and error movement.' },
   { id: 'requests', label: 'Requests', icon: 'file', description: 'Search gateway request metadata without prompt or response bodies.' },
+  { id: 'guardrails', label: 'Guardrails', icon: 'shield', description: 'Configure built-in PII detection, redaction, and blocking policies.' },
   { id: 'providers', label: 'Providers', icon: 'server', description: 'Configure upstream providers and health state.' },
   { id: 'models', label: 'Models', icon: 'cpu', description: 'Expose model routes, prices, context metadata, and health tests.' },
   { id: 'users', label: 'Users', icon: 'users', description: 'Manage local users, departments, roles, and passwords.' },
@@ -52,6 +56,49 @@ const ADMIN_SECTIONS = [
   { id: 'limits', label: 'Rate Limits', icon: 'gauge', description: 'Set RPM and TPM controls by user, department, provider, or model.' },
   { id: 'budgets', label: 'Budgets', icon: 'wallet', description: 'Cap monthly spend by user or department.' },
   { id: 'audit', label: 'Audit Log', icon: 'file', description: 'Review recent local auth, admin, and key lifecycle events.' }
+];
+
+const BUILTIN_GUARDRAIL_PATTERNS = [
+  {
+    key: 'email',
+    label: 'Email address',
+    token: '[EMAIL]',
+    checkboxId: 'guard-detect-email',
+    field: 'detect_email',
+    regex: String.raw`(?i)\b[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}\b`
+  },
+  {
+    key: 'phone',
+    label: 'Phone number',
+    token: '[PHONE]',
+    checkboxId: 'guard-detect-phone',
+    field: 'detect_phone',
+    regex: String.raw`\b(?:\+?1[\s.\-]?)?(?:\([2-9][0-9]{2}\)|[2-9][0-9]{2})[\s.\-]?[0-9]{3}[\s.\-]?[0-9]{4}\b`
+  },
+  {
+    key: 'ssn',
+    label: 'Social Security number',
+    token: '[SSN]',
+    checkboxId: 'guard-detect-ssn',
+    field: 'detect_ssn',
+    regex: String.raw`\b[0-9]{3}-[0-9]{2}-[0-9]{4}\b`
+  },
+  {
+    key: 'credit_card',
+    label: 'Credit card number',
+    token: '[CREDIT_CARD]',
+    checkboxId: 'guard-detect-credit-card',
+    field: 'detect_credit_card',
+    regex: String.raw`\b(?:[0-9][ -]*?){13,19}\b with Luhn validation`
+  },
+  {
+    key: 'api_key',
+    label: 'API key or token',
+    token: '[API_KEY]',
+    checkboxId: 'guard-detect-api-key',
+    field: 'detect_api_key',
+    regex: String.raw`(?i)\b(?:pgw-sk-[A-Za-z0-9_\-]{16,}|sk-[A-Za-z0-9_\-]{16,}|xox[baprs]-[A-Za-z0-9\-]{10,}|gh[pousr]_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_\-]{20,}|AKIA[0-9A-Z]{16})\b`
+  }
 ];
 
 const app = document.getElementById('app');
@@ -109,7 +156,7 @@ async function refresh() {
       state.keys = keys || [];
       state.usage = usage;
       if (state.user.role === 'admin') {
-        const [providers, users, budgets, rateLimits, adminUsage, adminModels, adminKeys, auditLogs, requestLog, usageSeries, usageDrilldowns, budgetBurnDown] = await Promise.all([
+        const [providers, users, budgets, rateLimits, adminUsage, adminModels, adminKeys, auditLogs, requestLog, guardrailPolicy, usageSeries, usageDrilldowns, budgetBurnDown] = await Promise.all([
           api('/api/admin/providers'),
           api('/api/admin/users'),
           api('/api/admin/budgets'),
@@ -119,6 +166,7 @@ async function refresh() {
           api('/api/admin/api-keys'),
           api('/api/admin/audit-log?limit=100'),
           api(requestLogPath()),
+          api('/api/admin/guardrails'),
           api('/api/admin/usage/timeseries?days=30'),
           api('/api/admin/usage/drilldowns?days=30'),
           api('/api/admin/budgets/burndown')
@@ -132,6 +180,7 @@ async function refresh() {
         state.adminKeys = adminKeys || [];
         state.auditLogs = auditLogs || [];
         state.requestLog = requestLog || { items: [], total: 0, limit: 100, offset: 0 };
+        state.guardrailPolicy = guardrailPolicy || defaultGuardrailPolicy();
         state.usageSeries = usageSeries || [];
         state.usageDrilldowns = usageDrilldowns || { providers: [], models: [] };
         state.budgetBurnDown = budgetBurnDown || [];
@@ -399,6 +448,11 @@ function adminContentView(usage) {
       ${adminPanel('Request log', 'file', '', requestLogRows())}
     `;
   }
+  if (state.adminTab === 'guardrails') {
+    return `
+      ${adminPanel('PII policy', 'shield', 'Built-in detector for email, phone, SSN, credit card, and API key patterns. Content is inspected in memory and not stored.', guardrailPolicyView())}
+    `;
+  }
   if (state.adminTab === 'providers') {
     return `
       ${adminPanel('Add provider', 'server', 'OpenAI-compatible covers Ollama, vLLM, LM Studio, OpenRouter, and LiteLLM. Bedrock uses AWS region and the AWS credential chain.', `
@@ -522,6 +576,7 @@ function adminContentView(usage) {
 function adminSectionCount(id) {
   const counts = {
     requests: state.requestLog?.total || 0,
+    guardrails: state.guardrailPolicy?.enabled ? 'on' : 'off',
     providers: state.providers.length,
     models: state.adminModels.length,
     users: state.users.length,
@@ -830,6 +885,127 @@ function rateLimitRows() {
       </table>
     </div>
   `;
+}
+
+function guardrailPolicyView() {
+  const p = { ...defaultGuardrailPolicy(), ...(state.guardrailPolicy || {}) };
+  const preview = state.guardrailPreview;
+  return `
+    <div class="guardrail-form">
+      <div class="guardrail-toolbar">
+        <label class="guardrail-toggle"><input id="guard-enabled" type="checkbox" ${p.enabled ? 'checked' : ''} /> <span>Enabled</span></label>
+        <button class="btn primary" id="save-guardrails">${icon('check', 'btn-icon')}Save policy</button>
+      </div>
+      <div class="guardrail-policy-grid">
+        <label class="form-field"><span>Input action</span><select id="guard-input-action">${guardrailActionOptions(p.input_action)}</select></label>
+        <label class="form-field"><span>Output action</span><select id="guard-output-action">${guardrailActionOptions(p.output_action)}</select><small class="field-help">Output block rejects streaming requests and blocks non-streaming responses after provider return.</small></label>
+        <label class="form-field guardrail-redaction"><span>Redaction text</span><input id="guard-redaction-text" value="${attr(p.redaction_text || '[REDACTED]')}" /></label>
+      </div>
+      ${guardrailBuiltInPatterns(p)}
+      ${guardrailCustomPatterns(p)}
+      ${guardrailPreviewView(preview)}
+    </div>
+    <div class="metric-strip guardrail-summary">
+      ${miniMetric('Policy', p.enabled ? 'enabled' : 'disabled')}
+      ${miniMetric('Input', p.input_action || 'redact')}
+      ${miniMetric('Output', p.output_action || 'redact')}
+      ${miniMetric('Custom patterns', (p.custom_patterns || []).filter(row => row.enabled && row.pattern).length)}
+      ${miniMetric('Streaming block', p.output_action === 'block' ? 'rejected' : 'allowed')}
+    </div>
+  `;
+}
+
+function guardrailBuiltInPatterns(p) {
+  return `
+    <div class="guardrail-pattern-section">
+      <div class="guardrail-section-heading">
+        <div>
+          <div class="guardrail-group-title">Built-in patterns</div>
+          <p>Email, phone, SSN, credit card, and API key detectors. Info icons show the active regex.</p>
+        </div>
+      </div>
+      <div class="guardrail-pattern-list">
+        ${BUILTIN_GUARDRAIL_PATTERNS.map(pattern => `
+          <div class="guardrail-pattern-row">
+            <label class="check guardrail-pattern-name">
+              <input id="${attr(pattern.checkboxId)}" type="checkbox" ${p[pattern.field] ? 'checked' : ''} />
+              <span>${esc(pattern.label)}</span>
+            </label>
+            <span class="pattern-info" tabindex="0" aria-label="${attr(`${pattern.label} regex`)}">
+              ${icon('info', 'info-icon')}
+              <span class="pattern-card"><strong>${esc(pattern.label)}</strong><code>${esc(pattern.regex)}</code></span>
+            </span>
+            <span class="pattern-token mono">${esc(pattern.token)}</span>
+            <span class="pill">global ${esc(p.input_action || 'redact')}/${esc(p.output_action || 'redact')}</span>
+          </div>
+        `).join('')}
+      </div>
+    </div>
+  `;
+}
+
+function guardrailCustomPatterns(p) {
+  const patterns = p.custom_patterns || [];
+  return `
+    <div class="guardrail-pattern-section">
+      <div class="guardrail-section-heading">
+        <div>
+          <div class="guardrail-group-title">Custom patterns</div>
+          <p>Add RE2-compatible regular expressions for organization-specific identifiers, secrets, or data classes.</p>
+        </div>
+        <button class="btn" id="add-custom-guardrail">${icon('plus', 'btn-icon')}Add pattern</button>
+      </div>
+      <div class="guardrail-custom-list">
+        ${patterns.length ? patterns.map((pattern, index) => guardrailCustomPatternRow(pattern, index)).join('') : '<p>No custom patterns yet.</p>'}
+      </div>
+    </div>
+  `;
+}
+
+function guardrailCustomPatternRow(pattern, index) {
+  return `
+    <div class="guardrail-custom-row" data-guardrail-custom-row="${index}">
+      <input data-guardrail-custom-field="id" type="hidden" value="${attr(pattern.id || `custom-${index + 1}`)}" />
+      <label class="check guardrail-custom-enabled"><input data-guardrail-custom-field="enabled" type="checkbox" ${pattern.enabled !== false ? 'checked' : ''} /> Enabled</label>
+      <label class="form-field guardrail-custom-name"><span>Name</span><input data-guardrail-custom-field="name" value="${attr(pattern.name || '')}" placeholder="Employee ID" /></label>
+      <label class="form-field guardrail-custom-pattern"><span>Regex</span><input data-guardrail-custom-field="pattern" value="${attr(pattern.pattern || '')}" placeholder="EMP-[0-9]+" /></label>
+      <label class="form-field guardrail-custom-action"><span>Action</span><select data-guardrail-custom-field="action">${option('redact', 'Redact', pattern.action || 'redact')}${option('block', 'Block', pattern.action || 'redact')}</select></label>
+      <label class="form-field guardrail-custom-redaction"><span>Replacement</span><input data-guardrail-custom-field="redaction_text" value="${attr(pattern.redaction_text || '')}" placeholder="[REDACTED]" /></label>
+      <button class="btn danger guardrail-custom-remove" data-remove-custom-guardrail="${index}">Remove</button>
+    </div>
+  `;
+}
+
+function guardrailPreviewView(preview) {
+  const output = preview ? (preview.blocked ? 'Blocked by policy. Matching patterns: ' + (preview.findings || []).join(', ') : preview.output) : '';
+  return `
+    <div class="guardrail-preview">
+      <div class="guardrail-section-heading">
+        <div>
+          <div class="guardrail-group-title">Test patterns</div>
+          <p>Preview redaction or blocking against sample text. Samples are sent only to the local admin API and are not stored.</p>
+        </div>
+        <div class="actions">
+          <select id="guardrail-preview-phase">${option('input', 'Input policy', preview?.phase || 'input')}${option('output', 'Output policy', preview?.phase || 'input')}</select>
+          <button class="btn" id="test-guardrails">${icon('check', 'btn-icon')}Preview</button>
+        </div>
+      </div>
+      <textarea id="guardrail-preview-text" rows="3" placeholder="Paste sample text to test...">${esc(state.guardrailPreviewText || '')}</textarea>
+      <div class="guardrail-preview-result ${preview?.blocked ? 'blocked' : ''}">
+        ${preview ? `
+          <div class="guardrail-preview-meta">
+            <span class="pill ${preview.blocked ? 'off' : preview.redacted ? 'on' : ''}">${preview.blocked ? 'blocked' : preview.redacted ? 'redacted' : 'no match'}</span>
+            <span>${esc((preview.findings || []).join(', ') || 'No findings')}</span>
+          </div>
+          <pre>${esc(output)}</pre>
+        ` : '<span class="muted">Run preview to see what the provider or client would receive.</span>'}
+      </div>
+    </div>
+  `;
+}
+
+function guardrailActionOptions(selected) {
+  return [option('off', 'Off', selected), option('redact', 'Redact', selected), option('block', 'Block', selected)].join('');
 }
 
 function requestLogSearchView() {
@@ -1205,6 +1381,58 @@ function afterRender() {
       await refresh();
     };
   });
+  const saveGuardrails = document.getElementById('save-guardrails');
+  if (saveGuardrails) {
+    saveGuardrails.onclick = async () => {
+      const body = collectGuardrailPolicyBody();
+      state.guardrailPolicy = await api('/api/admin/guardrails', { method: 'PUT', body: JSON.stringify(body) });
+      state.guardrailPreview = null;
+      state.notice = 'Guardrail policy saved.';
+      await refresh();
+    };
+  }
+  const addCustomGuardrail = document.getElementById('add-custom-guardrail');
+  if (addCustomGuardrail) {
+    addCustomGuardrail.onclick = () => {
+      const body = collectGuardrailPolicyBody();
+      const nextIndex = (body.custom_patterns || []).length + 1;
+      body.custom_patterns = [...(body.custom_patterns || []), {
+        id: `custom-${Date.now()}`,
+        name: `Custom pattern ${nextIndex}`,
+        pattern: '',
+        action: 'redact',
+        redaction_text: '',
+        enabled: true
+      }];
+      state.guardrailPolicy = { ...(state.guardrailPolicy || defaultGuardrailPolicy()), ...body };
+      state.guardrailPreview = null;
+      render();
+    };
+  }
+  document.querySelectorAll('[data-remove-custom-guardrail]').forEach((btn) => {
+    btn.onclick = () => {
+      const body = collectGuardrailPolicyBody();
+      const index = Number(btn.dataset.removeCustomGuardrail);
+      body.custom_patterns = (body.custom_patterns || []).filter((_, i) => i !== index);
+      state.guardrailPolicy = { ...(state.guardrailPolicy || defaultGuardrailPolicy()), ...body };
+      state.guardrailPreview = null;
+      render();
+    };
+  });
+  const testGuardrails = document.getElementById('test-guardrails');
+  if (testGuardrails) {
+    testGuardrails.onclick = async () => {
+      const body = collectGuardrailPolicyBody();
+      const text = rawVal('guardrail-preview-text');
+      state.guardrailPreviewText = text;
+      state.guardrailPolicy = { ...(state.guardrailPolicy || defaultGuardrailPolicy()), ...body };
+      state.guardrailPreview = await api('/api/admin/guardrails/test', {
+        method: 'POST',
+        body: JSON.stringify({ policy: body, text, phase: val('guardrail-preview-phase') || 'input' })
+      });
+      render();
+    };
+  }
   const requestApply = document.getElementById('request-apply');
   if (requestApply) {
     requestApply.onclick = async () => {
@@ -1302,6 +1530,7 @@ function icon(name, className = 'icon') {
     file: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6"/><path d="M8 13h8M8 17h8"/>',
     plus: '<path d="M12 5v14M5 12h14"/>',
     palette: '<circle cx="13.5" cy="6.5" r=".5"/><circle cx="17.5" cy="10.5" r=".5"/><circle cx="8.5" cy="7.5" r=".5"/><circle cx="6.5" cy="12.5" r=".5"/><path d="M12 2a10 10 0 0 0 0 20h1.5a2.5 2.5 0 0 0 0-5H12a1.5 1.5 0 0 1 0-3h2a8 8 0 0 0 0-16h-2Z"/>',
+    info: '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>',
     check: '<path d="M20 6 9 17l-5-5"/>'
   };
   return `<svg class="${className}" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${paths[name] || paths.grid}</svg>`;
@@ -1372,6 +1601,10 @@ function val(id) {
   return document.getElementById(id)?.value?.trim() || '';
 }
 
+function rawVal(id) {
+  return document.getElementById(id)?.value || '';
+}
+
 function checked(id) {
   return Boolean(document.getElementById(id)?.checked);
 }
@@ -1392,6 +1625,36 @@ function collectFields(row, prefix) {
     out[key] = el.type === 'checkbox' ? el.checked : el.value.trim();
   });
   return out;
+}
+
+function collectGuardrailPolicyBody() {
+  return {
+    enabled: checked('guard-enabled'),
+    input_action: val('guard-input-action') || 'redact',
+    output_action: val('guard-output-action') || 'redact',
+    detect_email: checked('guard-detect-email'),
+    detect_phone: checked('guard-detect-phone'),
+    detect_ssn: checked('guard-detect-ssn'),
+    detect_credit_card: checked('guard-detect-credit-card'),
+    detect_api_key: checked('guard-detect-api-key'),
+    custom_patterns: collectGuardrailCustomPatterns(),
+    redaction_text: val('guard-redaction-text') || '[REDACTED]',
+    streaming_block_mode: 'reject'
+  };
+}
+
+function collectGuardrailCustomPatterns() {
+  return [...document.querySelectorAll('[data-guardrail-custom-row]')].map((row, index) => {
+    const get = (field) => row.querySelector(`[data-guardrail-custom-field="${field}"]`);
+    return {
+      id: get('id')?.value?.trim() || `custom-${index + 1}`,
+      name: get('name')?.value?.trim() || `Custom pattern ${index + 1}`,
+      pattern: get('pattern')?.value?.trim() || '',
+      action: get('action')?.value || 'redact',
+      redaction_text: get('redaction_text')?.value?.trim() || '',
+      enabled: Boolean(get('enabled')?.checked)
+    };
+  }).filter(pattern => pattern.pattern);
 }
 
 function option(value, label, selected) {
@@ -1420,6 +1683,23 @@ function rateLimitValueOptions() {
   state.providers.forEach(p => values.add(p.id));
   state.adminModels.forEach(m => values.add(m.route));
   return [...values].map(v => `<option value="${attr(v)}"></option>`).join('');
+}
+
+function defaultGuardrailPolicy() {
+  return {
+    id: 'default',
+    enabled: false,
+    input_action: 'redact',
+    output_action: 'redact',
+    detect_email: true,
+    detect_phone: true,
+    detect_ssn: true,
+    detect_credit_card: true,
+    detect_api_key: true,
+    custom_patterns: [],
+    redaction_text: '[REDACTED]',
+    streaming_block_mode: 'reject'
+  };
 }
 
 function budgetLabel(b) {

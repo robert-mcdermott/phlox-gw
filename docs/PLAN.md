@@ -32,10 +32,9 @@ not complicate the first gateway release.
 
 ## Enterprise Features To Add
 
-- Request policy engine: model allowlists, data classification labels, prompt/response
-  guardrails, and optional PII redaction.
+- Request policy engine: data classification labels, external policy plugins, and richer
+  guardrail composition.
 - Prometheus metrics and OpenTelemetry traces.
-- Request log search with latency, token, status, and provider error dimensions.
 - Secret management through environment references first, then external vaults.
 - SCIM or Graph sync for departments/groups after Entra ID SSO.
 - Multi-node mode with Postgres or another shared database after SQLite reaches its limit.
@@ -71,14 +70,15 @@ not complicate the first gateway release.
 - Show budget burn-down projections and provider/model drilldowns from the usage ledger.
 - Add request and response metadata search/export without storing prompt content by
   default.
+- Add built-in PII/API-key guardrail redaction and blocking controls.
 
 ### Phase 2: Production Controls
 
-- Add guardrails and policy plugins.
+- Extend guardrails with external policy plugins and richer policy composition.
+- Add Prometheus metrics and OpenTelemetry tracing.
 
 ### Phase 3: Enterprise Operations
 
-- Add Prometheus metrics and OpenTelemetry tracing.
 - Add semantic cache as an optional cost/latency optimization.
 - Add cluster-safe database option and migration tooling.
 - Add secrets backends and signed configuration bundles.

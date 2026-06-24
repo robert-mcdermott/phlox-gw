@@ -33,6 +33,8 @@ Phlox-GW provides:
 - Budget burn-down views and CSV exports.
 - Request metadata search and CSV export without storing prompt text, response text, image
   bytes, tool contents, API keys, or provider secrets by default.
+- Built-in guardrail policy controls for PII/API-key detection, request redaction or
+  blocking, and response redaction or non-stream blocking.
 - A browser dashboard embedded into the same Go binary as the gateway API.
 - A SQLite database that can live next to the application binary or in a configured data
   directory.
@@ -49,7 +51,7 @@ Phlox-GW single Go binary
   |
   |-- Browser auth and API key auth
   |-- Provider and model route catalog
-  |-- Budget, API-key policy, and rate-limit gates
+  |-- Budget, API-key policy, rate-limit, and guardrail gates
   |-- Provider adapters for OpenAI-compatible, Anthropic-compatible, and Bedrock
   |-- Usage ledger, request metadata log, audit log, and admin APIs
   |-- Embedded dashboard assets from frontend/dist
@@ -147,8 +149,9 @@ go build -o phlox-gw ./cmd/phlox-gw
 5. Set input and output prices in USD per 1 million tokens.
 6. Go to `Admin -> Budgets` and configure user or department monthly limits.
 7. Go to `Admin -> Rate Limits` for user, department, provider, or model RPM/TPM limits.
-8. Go to `API Keys` as a user, or `Admin -> API Keys` as an admin, and mint a key.
-9. Test the key with `/v1/models` or `/v1/chat/completions`.
+8. Go to `Admin -> Guardrails` if you want PII redaction or blocking.
+9. Go to `API Keys` as a user, or `Admin -> API Keys` as an admin, and mint a key.
+10. Test the key with `/v1/models` or `/v1/chat/completions`.
 
 ## Providers
 
@@ -300,6 +303,14 @@ usage metadata, especially for streaming responses. In that case Phlox-GW estima
 tokens in memory so cost accounting does not fall to zero. Prompt and response content are
 discarded after the estimate and are not written to SQLite by default.
 
+The guardrail policy can detect email addresses, phone numbers, SSNs, credit-card numbers,
+common API key/token patterns, and administrator-defined custom regex patterns. Input
+policies can redact or block before provider dispatch. Output policies can redact responses
+before the client receives them or block non-stream responses after provider return. Hard
+output blocking rejects streaming requests because a stream cannot be unsent once bytes
+have left the gateway. The Guardrails admin panel includes a local preview tool for testing
+draft pattern changes before saving.
+
 ## Documentation
 
 - [Operator Guide](docs/OPERATIONS.md): build, configuration, SSO, providers, deployment,
@@ -328,7 +339,7 @@ docs/                Design, operator, API, routing, plan, and roadmap docs
 
 ## Current Roadmap Focus
 
-The gateway foundation is in place. The next major implementation area is a guardrail
-plugin layer with PII redaction policy controls, followed by Prometheus metrics,
-OpenTelemetry tracing, semantic cache support, external secrets management, and cluster
+The gateway foundation and first guardrail policy layer are in place. The next major
+implementation area is Prometheus metrics and OpenTelemetry tracing, followed by semantic
+cache support, external secrets management, signed configuration export, and cluster
 database options.

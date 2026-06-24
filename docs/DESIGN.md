@@ -58,6 +58,8 @@ Core tables:
 - `budgets`: active user or department monthly budget definitions.
 - `rate_limits`: active RPM/TPM policy definitions for users, departments, providers,
   and models.
+- `guardrail_policies`: singleton built-in policy for PII/API-key detection, redaction,
+  and blocking.
 - `audit_log`: append-only local login, admin, and API key lifecycle events with
   sanitized details, client IP, and user agent.
 
@@ -92,13 +94,15 @@ enabled by default and can be disabled for environments that require pre-created
 5. Model-level fallback routes are retained as failover candidates.
 6. The provider health gate blocks dispatch when a provider circuit is still open.
 7. The API key policy gate checks model allowlists, key monthly budget, RPM, and TPM.
-8. The budget gate checks applicable user and department budgets for priced models.
-9. The rate-limit gate checks user, department, provider, and model RPM/TPM policies.
-10. The provider adapter rewrites only the routing fields needed by the upstream provider.
-11. Non-streaming requests are dispatched with per-candidate retry and timeout policies.
-12. Provider success/failure state is updated from each upstream response.
-13. Latency, status, tokens, and cost are appended to the usage ledger.
-14. The provider response is returned in the original API shape.
+8. The guardrail input policy can redact or block detected PII before dispatch.
+9. The budget gate checks applicable user and department budgets for priced models.
+10. The rate-limit gate checks user, department, provider, and model RPM/TPM policies.
+11. The provider adapter rewrites only the routing fields needed by the upstream provider.
+12. Non-streaming requests are dispatched with per-candidate retry and timeout policies.
+13. Provider success/failure state is updated from each upstream response.
+14. The guardrail output policy can redact responses or block non-streaming responses.
+15. Latency, status, tokens, and cost are appended to the usage ledger.
+16. The provider response is returned in the original API shape.
 
 ## Provider Strategy
 
@@ -174,6 +178,24 @@ protocol, endpoint, streaming flag, status, latency, token counts, cost, client 
 agent, and bounded error text. It deliberately does not store prompt text, response text,
 image bytes, tool contents, API keys, or provider secrets by default.
 
+## Guardrails
+
+The first guardrail layer is a built-in PII plugin plus administrator-defined custom
+regex patterns behind a small server-side interface. The built-in plugin detects email
+addresses, US-style phone numbers, SSNs, Luhn-valid credit-card numbers, and common API
+key/token patterns. Custom patterns are stored in the policy row as JSON and compiled with
+Go's RE2 engine before save or preview.
+
+Policies are admin-managed and stored in SQLite. Input policy actions are `off`, `redact`,
+and `block`; output policy actions are also `off`, `redact`, and `block`. Input blocking
+happens before provider dispatch. Output blocking is enforced for non-streaming responses
+after provider return; streaming requests are rejected while hard output blocking is
+enabled because partially streamed bytes cannot be recalled.
+
+All inspection happens in memory. Redacted text can be sent upstream or returned to the
+client, but original prompt and response content are not persisted by default. Preview
+samples are also evaluated in memory and not stored.
+
 ## Frontend
 
 The dashboard uses the Phlox operational visual language:
@@ -207,10 +229,12 @@ Current implementation:
   failures.
 - Request metadata search and CSV export without prompt or response content storage by
   default.
+- Built-in PII/API-key guardrail policy with request redaction/blocking and response
+  redaction/non-stream blocking.
 - No prompt content stored in the ledger.
 
 Planned:
 
 - Provider secret encryption or external vault integration.
-- Guardrails and redaction policies.
+- External guardrail plugin loading and richer policy composition.
 - TLS termination guidance and secure cookie mode.

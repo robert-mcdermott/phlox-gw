@@ -207,6 +207,9 @@ func New(opts Options) (http.Handler, error) {
 	mux.HandleFunc("GET /api/admin/audit-log", s.requireAdmin(s.auditLog))
 	mux.HandleFunc("GET /api/admin/request-log", s.requireAdmin(s.requestLogSearch))
 	mux.HandleFunc("GET /api/admin/request-log/export.csv", s.requireAdmin(s.requestLogCSV))
+	mux.HandleFunc("GET /api/admin/guardrails", s.requireAdmin(s.guardrailPolicy))
+	mux.HandleFunc("PUT /api/admin/guardrails", s.requireAdmin(s.updateGuardrailPolicy))
+	mux.HandleFunc("POST /api/admin/guardrails/test", s.requireAdmin(s.previewGuardrailPolicy))
 	mux.HandleFunc("GET /api/admin/usage/summary", s.requireAdmin(s.adminUsage))
 	mux.HandleFunc("GET /api/admin/usage/timeseries", s.requireAdmin(s.adminUsageTimeSeries))
 	mux.HandleFunc("GET /api/admin/usage/drilldowns", s.requireAdmin(s.adminUsageDrilldowns))
@@ -1030,6 +1033,91 @@ func (s *Server) auditLog(w http.ResponseWriter, r *http.Request, _ store.User) 
 	respondJSON(w, http.StatusOK, items)
 }
 
+func (s *Server) guardrailPolicy(w http.ResponseWriter, r *http.Request, _ store.User) {
+	policy, err := s.store.GetGuardrailPolicy(r.Context())
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	respondJSON(w, http.StatusOK, policy)
+}
+
+func (s *Server) updateGuardrailPolicy(w http.ResponseWriter, r *http.Request, admin store.User) {
+	var req store.GuardrailPolicy
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	if !validGuardrailAction(req.InputAction) || !validGuardrailAction(req.OutputAction) {
+		respondError(w, http.StatusBadRequest, "guardrail actions must be off, redact, or block")
+		return
+	}
+	if strings.TrimSpace(req.RedactionText) == "" {
+		req.RedactionText = "[REDACTED]"
+	}
+	req.StreamingBlockMode = "reject"
+	if err := validateGuardrailCustomPatterns(req.CustomPatterns); err != nil {
+		respondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	policy, err := s.store.UpdateGuardrailPolicy(r.Context(), req)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.audit(r, admin, "guardrail.update", "guardrail_policy", policy.ID, "default", guardrailAuditDetails(policy))
+	respondJSON(w, http.StatusOK, policy)
+}
+
+type guardrailPreviewRequest struct {
+	Policy store.GuardrailPolicy `json:"policy"`
+	Text   string                `json:"text"`
+	Phase  string                `json:"phase"`
+}
+
+type guardrailPreviewResponse struct {
+	Phase    string   `json:"phase"`
+	Action   string   `json:"action"`
+	Findings []string `json:"findings"`
+	Redacted bool     `json:"redacted"`
+	Blocked  bool     `json:"blocked"`
+	Output   string   `json:"output"`
+}
+
+func (s *Server) previewGuardrailPolicy(w http.ResponseWriter, r *http.Request, _ store.User) {
+	var req guardrailPreviewRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	if !validGuardrailAction(req.Policy.InputAction) || !validGuardrailAction(req.Policy.OutputAction) {
+		respondError(w, http.StatusBadRequest, "guardrail actions must be off, redact, or block")
+		return
+	}
+	if strings.TrimSpace(req.Policy.RedactionText) == "" {
+		req.Policy.RedactionText = "[REDACTED]"
+	}
+	req.Policy.StreamingBlockMode = "reject"
+	if err := validateGuardrailCustomPatterns(req.Policy.CustomPatterns); err != nil {
+		respondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	phase := strings.ToLower(strings.TrimSpace(req.Phase))
+	if phase != "output" {
+		phase = "input"
+	}
+	action := guardrailAction(req.Policy, phase)
+	result := applyGuardrailToText(req.Text, req.Policy, action, false)
+	respondJSON(w, http.StatusOK, guardrailPreviewResponse{
+		Phase:    phase,
+		Action:   action,
+		Findings: result.Findings,
+		Redacted: result.Redacted,
+		Blocked:  result.Blocked,
+		Output:   result.Text,
+	})
+}
+
 func (s *Server) requestLogSearch(w http.ResponseWriter, r *http.Request, _ store.User) {
 	query, ok := parseRequestLogQuery(w, r, 100)
 	if !ok {
@@ -1417,6 +1505,20 @@ func (s *Server) openAIChatCompletions(w http.ResponseWriter, r *http.Request, u
 	if !ok {
 		return
 	}
+	guardrails, err := s.store.GetGuardrailPolicy(r.Context())
+	if err != nil {
+		openAIError(w, http.StatusInternalServerError, err.Error(), "server_error")
+		return
+	}
+	raw, guardrailEval := applyGuardrailToMap(guardrails, "input", raw)
+	if guardrailEval.Blocked {
+		openAIError(w, http.StatusBadRequest, guardrailReason("input", guardrailEval.Findings), "content_policy_violation")
+		return
+	}
+	if stream, _ := raw["stream"].(bool); stream && guardrailRejectsStreamingOutput(guardrails) {
+		openAIError(w, http.StatusBadRequest, "streaming requests are blocked while output guardrail action is block", "content_policy_violation")
+		return
+	}
 	modelName, _ := raw["model"].(string)
 	plan, err := s.resolveRoutePlan(r.Context(), modelName)
 	if err != nil {
@@ -1455,12 +1557,12 @@ func (s *Server) openAIChatCompletions(w http.ResponseWriter, r *http.Request, u
 		var responseBody []byte
 		var errText string
 		if selected.Provider.Type == "bedrock" {
-			statusCode, responseBody, errText = s.proxyBedrockOpenAIStream(w, r, selected, raw)
+			statusCode, responseBody, errText = s.proxyBedrockOpenAIStream(w, r, selected, raw, guardrails)
 		} else {
 			attemptRaw := cloneJSONMap(raw)
 			attemptRaw["model"] = selected.Model.ModelID
 			body, _ := json.Marshal(attemptRaw)
-			statusCode, responseBody, errText = s.proxyOpenAI(w, r, selected, body, attemptRaw)
+			statusCode, responseBody, errText = s.proxyOpenAI(w, r, selected, body, attemptRaw, guardrails)
 		}
 		latency := time.Since(start).Milliseconds()
 		usage := parseOpenAIUsage(responseBody)
@@ -1468,13 +1570,27 @@ func (s *Server) openAIChatCompletions(w http.ResponseWriter, r *http.Request, u
 		s.recordUsage(r.Context(), requestID, user, key, selected, selected.Provider.Type, usage, latency, statusCode, errText, eventMeta)
 		return
 	}
-	result := s.executeOpenAIPlan(r.Context(), candidates, raw, user, key, requestID, policy, requestEventFromHTTP(r, false))
+	result := s.executeOpenAIPlan(r.Context(), candidates, raw, user, key, requestID, policy, requestEventFromHTTP(r, false), guardrails)
 	writeOpenAIResult(w, result)
 }
 
 func (s *Server) anthropicMessages(w http.ResponseWriter, r *http.Request, user store.User, key store.APIKey) {
 	_, raw, ok := readObjectBody(w, r, false)
 	if !ok {
+		return
+	}
+	guardrails, err := s.store.GetGuardrailPolicy(r.Context())
+	if err != nil {
+		anthropicError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	raw, guardrailEval := applyGuardrailToMap(guardrails, "input", raw)
+	if guardrailEval.Blocked {
+		anthropicError(w, http.StatusBadRequest, guardrailReason("input", guardrailEval.Findings))
+		return
+	}
+	if stream, _ := raw["stream"].(bool); stream && guardrailRejectsStreamingOutput(guardrails) {
+		anthropicError(w, http.StatusBadRequest, "streaming requests are blocked while output guardrail action is block")
 		return
 	}
 	modelName, _ := raw["model"].(string)
@@ -1518,13 +1634,13 @@ func (s *Server) anthropicMessages(w http.ResponseWriter, r *http.Request, user 
 			return
 		}
 		start := time.Now()
-		statusCode, responseBody, errText := s.proxyAnthropicStream(w, r, selected, body)
+		statusCode, responseBody, errText := s.proxyAnthropicStream(w, r, selected, body, guardrails)
 		latency := time.Since(start).Milliseconds()
 		s.recordProviderOutcome(r.Context(), selected.Provider.ID, statusCode, errText)
 		s.recordUsage(r.Context(), requestID, user, key, selected, "anthropic", parseAnthropicUsage(responseBody), latency, statusCode, errText, eventMeta)
 		return
 	}
-	result := s.executeAnthropicPlan(r.Context(), candidates, raw, r.Header, user, key, requestID, policy, requestEventFromHTTP(r, false))
+	result := s.executeAnthropicPlan(r.Context(), candidates, raw, r.Header, user, key, requestID, policy, requestEventFromHTTP(r, false), guardrails)
 	writeAnthropicResult(w, result)
 }
 
@@ -1592,7 +1708,7 @@ func (s *Server) selectWeightedCandidate(ctx context.Context, primary store.Rout
 	return candidates[len(candidates)-1].route, true
 }
 
-func (s *Server) executeOpenAIPlan(ctx context.Context, candidates []store.RoutedModel, raw map[string]any, user store.User, key store.APIKey, requestID string, policy routeReliabilityPolicy, eventMeta requestEventMeta) upstreamResult {
+func (s *Server) executeOpenAIPlan(ctx context.Context, candidates []store.RoutedModel, raw map[string]any, user store.User, key store.APIKey, requestID string, policy routeReliabilityPolicy, eventMeta requestEventMeta, guardrails store.GuardrailPolicy) upstreamResult {
 	var last upstreamResult
 	attemptSeq := 0
 	for idx, route := range candidates {
@@ -1623,6 +1739,7 @@ func (s *Server) executeOpenAIPlan(ctx context.Context, candidates []store.Route
 			if result.Protocol == "openai" {
 				usage = openAIUsageWithFallback(raw, result.Body, result.Status)
 			}
+			result = applyOutputGuardrailsToResult(guardrails, result)
 			s.recordUsage(ctx, attemptRequestID(requestID, attemptSeq), user, key, route, result.Protocol, usage, result.LatencyMS, result.Status, result.ErrorText, eventMeta)
 			last = result
 			if !providerStatusIsFailure(result.Status) {
@@ -1640,7 +1757,7 @@ func (s *Server) executeOpenAIPlan(ctx context.Context, candidates []store.Route
 	return last
 }
 
-func (s *Server) executeAnthropicPlan(ctx context.Context, candidates []store.RoutedModel, raw map[string]any, inbound http.Header, user store.User, key store.APIKey, requestID string, policy routeReliabilityPolicy, eventMeta requestEventMeta) upstreamResult {
+func (s *Server) executeAnthropicPlan(ctx context.Context, candidates []store.RoutedModel, raw map[string]any, inbound http.Header, user store.User, key store.APIKey, requestID string, policy routeReliabilityPolicy, eventMeta requestEventMeta, guardrails store.GuardrailPolicy) upstreamResult {
 	var last upstreamResult
 	attemptSeq := 0
 	for idx, route := range candidates {
@@ -1664,7 +1781,9 @@ func (s *Server) executeAnthropicPlan(ctx context.Context, candidates []store.Ro
 			attemptSeq++
 			result := s.callAnthropicNonStreaming(ctx, route, raw, inbound, policy.RequestTimeout)
 			s.recordProviderOutcome(ctx, route.Provider.ID, result.Status, result.ErrorText)
-			s.recordUsage(ctx, attemptRequestID(requestID, attemptSeq), user, key, route, "anthropic", parseAnthropicUsage(result.Body), result.LatencyMS, result.Status, result.ErrorText, eventMeta)
+			usage := parseAnthropicUsage(result.Body)
+			result = applyOutputGuardrailsToResult(guardrails, result)
+			s.recordUsage(ctx, attemptRequestID(requestID, attemptSeq), user, key, route, "anthropic", usage, result.LatencyMS, result.Status, result.ErrorText, eventMeta)
 			last = result
 			if !providerStatusIsFailure(result.Status) {
 				return result
@@ -2031,7 +2150,7 @@ func fallbackString(v, fallback string) string {
 	return v
 }
 
-func (s *Server) proxyOpenAI(w http.ResponseWriter, r *http.Request, route store.RoutedModel, body []byte, raw map[string]any) (int, []byte, string) {
+func (s *Server) proxyOpenAI(w http.ResponseWriter, r *http.Request, route store.RoutedModel, body []byte, raw map[string]any, guardrails store.GuardrailPolicy) (int, []byte, string) {
 	endpoint := strings.TrimRight(route.Provider.BaseURL, "/") + "/chat/completions"
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
@@ -2065,7 +2184,7 @@ func (s *Server) proxyOpenAI(w http.ResponseWriter, r *http.Request, route store
 		if resp.StatusCode < 400 {
 			fallbackInput = estimateOpenAIInputTokens(raw)
 		}
-		usage, n, err := proxyOpenAIStream(w, resp.Body, fallbackInput)
+		usage, n, err := proxyOpenAIStream(w, resp.Body, fallbackInput, guardrails)
 		if err != nil {
 			return resp.StatusCode, nil, err.Error()
 		}
@@ -2082,7 +2201,7 @@ func (s *Server) proxyOpenAI(w http.ResponseWriter, r *http.Request, route store
 	return resp.StatusCode, responseBody, ""
 }
 
-func proxyOpenAIStream(w http.ResponseWriter, body io.Reader, fallbackInputTokens int) (tokenUsage, int64, error) {
+func proxyOpenAIStream(w http.ResponseWriter, body io.Reader, fallbackInputTokens int, guardrails store.GuardrailPolicy) (tokenUsage, int64, error) {
 	var usage tokenUsage
 	estimatedOutputTokens := 0
 	var written int64
@@ -2091,7 +2210,8 @@ func proxyOpenAIStream(w http.ResponseWriter, body io.Reader, fallbackInputToken
 	for {
 		line, err := reader.ReadBytes('\n')
 		if len(line) > 0 {
-			n, writeErr := w.Write(line)
+			lineToWrite := applyGuardrailToSSELine(guardrails, line)
+			n, writeErr := w.Write(lineToWrite)
 			written += int64(n)
 			if writeErr != nil {
 				return usage, written, writeErr
@@ -2495,7 +2615,7 @@ func (s *Server) proxyAnthropic(w http.ResponseWriter, r *http.Request, route st
 	return resp.StatusCode, responseBody, ""
 }
 
-func (s *Server) proxyAnthropicStream(w http.ResponseWriter, r *http.Request, route store.RoutedModel, body []byte) (int, []byte, string) {
+func (s *Server) proxyAnthropicStream(w http.ResponseWriter, r *http.Request, route store.RoutedModel, body []byte, guardrails store.GuardrailPolicy) (int, []byte, string) {
 	endpoint := strings.TrimRight(route.Provider.BaseURL, "/") + "/v1/messages"
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
@@ -2544,7 +2664,7 @@ func (s *Server) proxyAnthropicStream(w http.ResponseWriter, r *http.Request, ro
 		_, _ = w.Write(responseBody)
 		return resp.StatusCode, responseBody, string(responseBody)
 	}
-	usage, n, err := proxyAnthropicStream(w, resp.Body)
+	usage, n, err := proxyAnthropicStream(w, resp.Body, guardrails)
 	body = anthropicUsageBody(usage, n)
 	if err != nil {
 		return resp.StatusCode, body, err.Error()
@@ -2552,7 +2672,7 @@ func (s *Server) proxyAnthropicStream(w http.ResponseWriter, r *http.Request, ro
 	return resp.StatusCode, body, ""
 }
 
-func proxyAnthropicStream(w http.ResponseWriter, body io.Reader) (tokenUsage, int64, error) {
+func proxyAnthropicStream(w http.ResponseWriter, body io.Reader, guardrails store.GuardrailPolicy) (tokenUsage, int64, error) {
 	var usage tokenUsage
 	var written int64
 	reader := bufio.NewReader(body)
@@ -2560,7 +2680,8 @@ func proxyAnthropicStream(w http.ResponseWriter, body io.Reader) (tokenUsage, in
 	for {
 		line, err := reader.ReadBytes('\n')
 		if len(line) > 0 {
-			n, writeErr := w.Write(line)
+			lineToWrite := applyGuardrailToSSELine(guardrails, line)
+			n, writeErr := w.Write(lineToWrite)
 			written += int64(n)
 			if writeErr != nil {
 				return usage, written, writeErr
@@ -2611,7 +2732,7 @@ func (s *Server) proxyBedrockOpenAI(w http.ResponseWriter, r *http.Request, rout
 	return http.StatusOK, body, ""
 }
 
-func (s *Server) proxyBedrockOpenAIStream(w http.ResponseWriter, r *http.Request, route store.RoutedModel, raw map[string]any) (int, []byte, string) {
+func (s *Server) proxyBedrockOpenAIStream(w http.ResponseWriter, r *http.Request, route store.RoutedModel, raw map[string]any, guardrails store.GuardrailPolicy) (int, []byte, string) {
 	input, err := bedrockConverseStreamInput(route.Model.ModelID, raw)
 	if err != nil {
 		openAIError(w, http.StatusBadRequest, err.Error(), "invalid_request_error")
@@ -2646,6 +2767,7 @@ func (s *Server) proxyBedrockOpenAIStream(w http.ResponseWriter, r *http.Request
 	var written int64
 
 	writeChunk := func(chunk map[string]any) error {
+		chunk = applyGuardrailToStreamPayload(guardrails, chunk)
 		n, err := writeOpenAIStreamData(w, flusher, chunk)
 		written += int64(n)
 		return err
@@ -3709,6 +3831,25 @@ func rateLimitAuditDetails(rl store.RateLimit) map[string]any {
 		"tpm_limit":   rl.TPMLimit,
 		"is_active":   rl.IsActive,
 	}
+}
+
+func guardrailAuditDetails(p store.GuardrailPolicy) map[string]any {
+	return map[string]any{
+		"enabled":              p.Enabled,
+		"input_action":         p.InputAction,
+		"output_action":        p.OutputAction,
+		"detect_email":         p.DetectEmail,
+		"detect_phone":         p.DetectPhone,
+		"detect_ssn":           p.DetectSSN,
+		"detect_credit_card":   p.DetectCreditCard,
+		"detect_api_key":       p.DetectAPIKey,
+		"custom_patterns":      len(p.CustomPatterns),
+		"streaming_block_mode": p.StreamingBlockMode,
+	}
+}
+
+func validGuardrailAction(action string) bool {
+	return action == "off" || action == "redact" || action == "block"
 }
 
 func budgetDisplay(b store.Budget) string {

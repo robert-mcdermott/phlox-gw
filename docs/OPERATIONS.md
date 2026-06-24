@@ -263,6 +263,45 @@ Budget checks happen before dispatch, but final cost is known after the provider
 The request that crosses a monthly budget can finish and the next priced request is
 blocked.
 
+## Guardrail Policy
+
+Configure guardrail policy in `Admin -> Guardrails`.
+
+The first built-in detector supports:
+
+- Email addresses.
+- US-style phone numbers.
+- Social Security numbers.
+- Credit-card numbers, validated with Luhn checks.
+- Common API key and token patterns.
+
+Administrators can add custom regex patterns for organization-specific identifiers,
+internal hostnames, project codes, secrets, or other local data classes. Custom regexes use
+Go's RE2 syntax. Invalid regexes are rejected on save and in the preview tool. Each custom
+pattern can be disabled, redacted with its own replacement text, or set to block.
+
+Input policy actions:
+
+- `off`: request content is not inspected.
+- `redact`: matching values are replaced before provider dispatch.
+- `block`: matching requests are rejected before provider dispatch.
+
+Output policy actions:
+
+- `off`: response content is not inspected.
+- `redact`: matching values are replaced before the client receives the response.
+- `block`: non-stream responses are replaced with a policy error after provider return.
+
+When output action is `block`, streaming requests are rejected before dispatch. This keeps
+hard blocking semantics clear because streamed bytes cannot be recalled after they are
+written to the client.
+
+Use the built-in preview panel to test unsaved policy changes against sample text. Preview
+samples are inspected in memory and are not written to SQLite.
+
+Guardrail inspection is in memory. Phlox-GW does not store prompt text, response text, or
+tool contents by default.
+
 ## Linux systemd Example
 
 Create a dedicated user and data directory:

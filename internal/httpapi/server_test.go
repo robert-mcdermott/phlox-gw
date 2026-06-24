@@ -793,6 +793,294 @@ func TestOpenAIChatCompletionsStreamsWithoutUsageEstimatesTokens(t *testing.T) {
 	}
 }
 
+func TestOpenAIChatCompletionsGuardrailsRedactInputAndOutput(t *testing.T) {
+	policy := store.DefaultGuardrailPolicy()
+	policy.Enabled = true
+	policy.InputAction = "redact"
+	policy.OutputAction = "redact"
+	policy.DetectPhone = false
+	policy.DetectSSN = false
+	policy.DetectCreditCard = false
+	policy.DetectAPIKey = false
+	fixture := newOpenAIGuardrailFixture(t, policy, func(r *http.Request) (*http.Response, error) {
+		var req map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode upstream request: %v", err)
+		}
+		body, _ := json.Marshal(req)
+		if strings.Contains(string(body), "jane@example.com") || !strings.Contains(string(body), "[REDACTED]") {
+			t.Fatalf("expected redacted upstream request, got %s", body)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body: io.NopCloser(strings.NewReader(`{
+				"id":"chatcmpl_guardrail",
+				"object":"chat.completion",
+				"choices":[{"index":0,"message":{"role":"assistant","content":"Email jane@example.com for details."},"finish_reason":"stop"}],
+				"usage":{"prompt_tokens":8,"completion_tokens":9,"total_tokens":17}
+			}`)),
+			Request: r,
+		}, nil
+	})
+	resp := jsonRequest(t, fixture.Handler, http.MethodPost, "/v1/chat/completions", fixture.APIKey, map[string]any{
+		"model": fixture.Route,
+		"messages": []map[string]string{{
+			"role":    "user",
+			"content": "My email is jane@example.com",
+		}},
+	})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", resp.Code, resp.Body.String())
+	}
+	if strings.Contains(resp.Body.String(), "jane@example.com") || !strings.Contains(resp.Body.String(), "[REDACTED]") {
+		t.Fatalf("expected redacted response, got %s", resp.Body.String())
+	}
+}
+
+func TestOpenAIChatCompletionsGuardrailsCustomPatternRedactsInput(t *testing.T) {
+	policy := store.DefaultGuardrailPolicy()
+	policy.Enabled = true
+	policy.InputAction = "redact"
+	policy.OutputAction = "off"
+	policy.DetectEmail = false
+	policy.DetectPhone = false
+	policy.DetectSSN = false
+	policy.DetectCreditCard = false
+	policy.DetectAPIKey = false
+	policy.CustomPatterns = []store.GuardrailCustomPattern{{
+		ID:            "employee-id",
+		Name:          "Employee ID",
+		Pattern:       `EMP-[0-9]+`,
+		Action:        "redact",
+		RedactionText: "[EMPLOYEE_ID]",
+		Enabled:       true,
+	}}
+	fixture := newOpenAIGuardrailFixture(t, policy, func(r *http.Request) (*http.Response, error) {
+		var req map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode upstream request: %v", err)
+		}
+		body, _ := json.Marshal(req)
+		if strings.Contains(string(body), "EMP-12345") || !strings.Contains(string(body), "[EMPLOYEE_ID]") {
+			t.Fatalf("expected custom redacted upstream request, got %s", body)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body: io.NopCloser(strings.NewReader(`{
+				"id":"chatcmpl_guardrail_custom",
+				"object":"chat.completion",
+				"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],
+				"usage":{"prompt_tokens":8,"completion_tokens":1,"total_tokens":9}
+			}`)),
+			Request: r,
+		}, nil
+	})
+	resp := jsonRequest(t, fixture.Handler, http.MethodPost, "/v1/chat/completions", fixture.APIKey, map[string]any{
+		"model": fixture.Route,
+		"messages": []map[string]string{{
+			"role":    "user",
+			"content": "Employee EMP-12345 needs access",
+		}},
+	})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", resp.Code, resp.Body.String())
+	}
+}
+
+func TestOpenAIChatCompletionsGuardrailsBlockInput(t *testing.T) {
+	policy := store.DefaultGuardrailPolicy()
+	policy.Enabled = true
+	policy.InputAction = "block"
+	policy.OutputAction = "off"
+	upstreamHits := 0
+	fixture := newOpenAIGuardrailFixture(t, policy, func(r *http.Request) (*http.Response, error) {
+		upstreamHits++
+		return nil, errors.New("upstream should not be called")
+	})
+	resp := jsonRequest(t, fixture.Handler, http.MethodPost, "/v1/chat/completions", fixture.APIKey, map[string]any{
+		"model": fixture.Route,
+		"messages": []map[string]string{{
+			"role":    "user",
+			"content": "SSN 123-45-6789",
+		}},
+	})
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d body = %s", resp.Code, resp.Body.String())
+	}
+	if upstreamHits != 0 {
+		t.Fatalf("upstream called %d times", upstreamHits)
+	}
+	if !strings.Contains(resp.Body.String(), "content_policy_violation") || !strings.Contains(resp.Body.String(), "ssn") {
+		t.Fatalf("unexpected guardrail body: %s", resp.Body.String())
+	}
+}
+
+func TestOpenAIChatCompletionsGuardrailsCustomPatternBlocksInput(t *testing.T) {
+	policy := store.DefaultGuardrailPolicy()
+	policy.Enabled = true
+	policy.InputAction = "redact"
+	policy.OutputAction = "off"
+	policy.DetectEmail = false
+	policy.DetectPhone = false
+	policy.DetectSSN = false
+	policy.DetectCreditCard = false
+	policy.DetectAPIKey = false
+	policy.CustomPatterns = []store.GuardrailCustomPattern{{
+		ID:      "internal-host",
+		Name:    "Internal host",
+		Pattern: `db-[0-9]+\.internal`,
+		Action:  "block",
+		Enabled: true,
+	}}
+	upstreamHits := 0
+	fixture := newOpenAIGuardrailFixture(t, policy, func(r *http.Request) (*http.Response, error) {
+		upstreamHits++
+		return nil, errors.New("upstream should not be called")
+	})
+	resp := jsonRequest(t, fixture.Handler, http.MethodPost, "/v1/chat/completions", fixture.APIKey, map[string]any{
+		"model": fixture.Route,
+		"messages": []map[string]string{{
+			"role":    "user",
+			"content": "Connect to db-17.internal",
+		}},
+	})
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d body = %s", resp.Code, resp.Body.String())
+	}
+	if upstreamHits != 0 {
+		t.Fatalf("upstream called %d times", upstreamHits)
+	}
+	if !strings.Contains(resp.Body.String(), "content_policy_violation") || !strings.Contains(resp.Body.String(), "custom:Internal host") {
+		t.Fatalf("unexpected guardrail body: %s", resp.Body.String())
+	}
+}
+
+func TestOpenAIChatCompletionsGuardrailsBlockNonStreamOutput(t *testing.T) {
+	policy := store.DefaultGuardrailPolicy()
+	policy.Enabled = true
+	policy.InputAction = "off"
+	policy.OutputAction = "block"
+	fixture := newOpenAIGuardrailFixture(t, policy, func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body: io.NopCloser(strings.NewReader(`{
+				"id":"chatcmpl_guardrail_block",
+				"object":"chat.completion",
+				"choices":[{"index":0,"message":{"role":"assistant","content":"Call 415-555-1212."},"finish_reason":"stop"}],
+				"usage":{"prompt_tokens":4,"completion_tokens":6,"total_tokens":10}
+			}`)),
+			Request: r,
+		}, nil
+	})
+	resp := jsonRequest(t, fixture.Handler, http.MethodPost, "/v1/chat/completions", fixture.APIKey, map[string]any{
+		"model":    fixture.Route,
+		"messages": []map[string]string{{"role": "user", "content": "hello"}},
+	})
+	if resp.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d body = %s", resp.Code, resp.Body.String())
+	}
+	if strings.Contains(resp.Body.String(), "415-555-1212") || !strings.Contains(resp.Body.String(), "content_policy_violation") {
+		t.Fatalf("unexpected guardrail response: %s", resp.Body.String())
+	}
+	usage, err := fixture.Store.UsageForUser(context.Background(), fixture.UserID)
+	if err != nil {
+		t.Fatalf("UsageForUser: %v", err)
+	}
+	if usage.Requests != 1 || usage.TotalTokens != 10 || usage.CostUSD <= 0 {
+		t.Fatalf("expected usage recorded for blocked output, got %#v", usage)
+	}
+}
+
+func TestGuardrailPreviewCustomPatternAndInvalidRegex(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	admin := store.User{ID: "admin_guardrail_preview", Username: "admin", Role: "admin", PasswordHash: "unused", AuthProvider: "local", IsActive: true}
+	if err := st.CreateUser(ctx, admin); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	handler, err := New(Options{
+		Config: config.Config{SessionSecret: "test-secret"},
+		Store:  st,
+		Frontend: fstest.MapFS{
+			"frontend/dist/index.html": &fstest.MapFile{Data: []byte("<html></html>")},
+		},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	policy := store.DefaultGuardrailPolicy()
+	policy.Enabled = true
+	policy.InputAction = "redact"
+	policy.DetectEmail = false
+	policy.DetectPhone = false
+	policy.DetectSSN = false
+	policy.DetectCreditCard = false
+	policy.DetectAPIKey = false
+	policy.CustomPatterns = []store.GuardrailCustomPattern{{
+		ID:            "employee-id",
+		Name:          "Employee ID",
+		Pattern:       `EMP-[0-9]+`,
+		Action:        "redact",
+		RedactionText: "[EMPLOYEE_ID]",
+		Enabled:       true,
+	}}
+	resp := jsonRequest(t, handler, http.MethodPost, "/api/admin/guardrails/test", sessionToken(t, admin), map[string]any{
+		"phase":  "input",
+		"text":   "Employee EMP-12345",
+		"policy": policy,
+	})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", resp.Code, resp.Body.String())
+	}
+	var preview guardrailPreviewResponse
+	decodeRecorder(t, resp, &preview)
+	if !preview.Redacted || preview.Blocked || preview.Output != "Employee [EMPLOYEE_ID]" || len(preview.Findings) != 1 || preview.Findings[0] != "custom:Employee ID" {
+		t.Fatalf("unexpected preview: %#v", preview)
+	}
+	policy.CustomPatterns[0].Pattern = `[`
+	invalid := jsonRequest(t, handler, http.MethodPost, "/api/admin/guardrails/test", sessionToken(t, admin), map[string]any{
+		"phase":  "input",
+		"text":   "Employee EMP-12345",
+		"policy": policy,
+	})
+	if invalid.Code != http.StatusBadRequest || !strings.Contains(invalid.Body.String(), "invalid regex") {
+		t.Fatalf("expected invalid regex error, status = %d body = %s", invalid.Code, invalid.Body.String())
+	}
+}
+
+func TestOpenAIChatCompletionsGuardrailsRejectStreamingOutputBlock(t *testing.T) {
+	policy := store.DefaultGuardrailPolicy()
+	policy.Enabled = true
+	policy.InputAction = "off"
+	policy.OutputAction = "block"
+	upstreamHits := 0
+	fixture := newOpenAIGuardrailFixture(t, policy, func(r *http.Request) (*http.Response, error) {
+		upstreamHits++
+		return nil, errors.New("upstream should not be called")
+	})
+	resp := jsonRequest(t, fixture.Handler, http.MethodPost, "/v1/chat/completions", fixture.APIKey, map[string]any{
+		"model":    fixture.Route,
+		"stream":   true,
+		"messages": []map[string]string{{"role": "user", "content": "hello"}},
+	})
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d body = %s", resp.Code, resp.Body.String())
+	}
+	if upstreamHits != 0 {
+		t.Fatalf("upstream called %d times", upstreamHits)
+	}
+	if !strings.Contains(resp.Body.String(), "streaming requests are blocked") {
+		t.Fatalf("unexpected guardrail body: %s", resp.Body.String())
+	}
+}
+
 func TestAnthropicMessagesStreamsAndRecordsUsage(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
@@ -1506,6 +1794,68 @@ func TestAdminRequestLogSearchAndCSV(t *testing.T) {
 	if body := csvResp.Body.String(); !strings.Contains(body, "req_search_1") || strings.Contains(body, "prompt") {
 		t.Fatalf("unexpected csv body: %s", body)
 	}
+}
+
+type openAIGuardrailFixture struct {
+	Handler http.Handler
+	APIKey  string
+	Route   string
+	Store   *store.Store
+	UserID  string
+}
+
+func newOpenAIGuardrailFixture(t *testing.T, policy store.GuardrailPolicy, roundTrip roundTripFunc) openAIGuardrailFixture {
+	t.Helper()
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	user := store.User{ID: "user_guardrail", Username: "guardrail-user", Department: "Security", Role: "user", AuthProvider: "local", IsActive: true}
+	if err := st.CreateUser(ctx, user); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	plain, prefix, keyHash, err := auth.NewAPIKey()
+	if err != nil {
+		t.Fatalf("NewAPIKey: %v", err)
+	}
+	if err := st.CreateAPIKey(ctx, store.APIKey{ID: "key_guardrail", UserID: user.ID, Name: "Guardrail key", Prefix: prefix, KeyHash: keyHash}); err != nil {
+		t.Fatalf("CreateAPIKey: %v", err)
+	}
+	provider := store.Provider{ID: "guardrail-openai", Name: "Guardrail OpenAI", Type: "openai", BaseURL: "http://guardrail-openai.test/v1", Enabled: true}
+	if err := st.CreateProvider(ctx, provider); err != nil {
+		t.Fatalf("CreateProvider: %v", err)
+	}
+	model := store.Model{
+		ID:                   "model_guardrail",
+		ProviderID:           provider.ID,
+		ModelID:              "upstream-guardrail",
+		Route:                "guardrail/chat",
+		DisplayName:          "Guardrail Chat",
+		InputCostPerMillion:  1,
+		OutputCostPerMillion: 2,
+		SupportsStreaming:    true,
+		Enabled:              true,
+	}
+	if err := st.CreateModel(ctx, model); err != nil {
+		t.Fatalf("CreateModel: %v", err)
+	}
+	if _, err := st.UpdateGuardrailPolicy(ctx, policy); err != nil {
+		t.Fatalf("UpdateGuardrailPolicy: %v", err)
+	}
+	handler, err := New(Options{
+		Config: config.Config{SessionSecret: "test-secret"},
+		Store:  st,
+		Frontend: fstest.MapFS{
+			"frontend/dist/index.html": &fstest.MapFile{Data: []byte("<html></html>")},
+		},
+		HTTPClient: &http.Client{Transport: roundTrip},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return openAIGuardrailFixture{Handler: handler, APIKey: plain, Route: model.Route, Store: st, UserID: user.ID}
 }
 
 func jsonRequest(t *testing.T, handler http.Handler, method, path, token string, body any) *httptest.ResponseRecorder {
