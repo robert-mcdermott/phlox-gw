@@ -17,6 +17,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"math"
+	"math/big"
 	"net"
 	"net/http"
 	"os"
@@ -80,6 +81,16 @@ type routeReliabilityPolicy struct {
 	RetryAttempts        int
 	RequestTimeout       time.Duration
 	HealthRoutingEnabled bool
+}
+
+type routePlan struct {
+	Requested  store.RoutedModel
+	Candidates []store.RoutedModel
+}
+
+type weightedRoutePolicy struct {
+	Route  string
+	Weight int
 }
 
 type upstreamResult struct {
@@ -1209,11 +1220,12 @@ func (s *Server) openAIChatCompletions(w http.ResponseWriter, r *http.Request, u
 		return
 	}
 	modelName, _ := raw["model"].(string)
-	candidates, err := s.store.ResolveModelCandidates(r.Context(), modelName)
+	plan, err := s.resolveRoutePlan(r.Context(), modelName)
 	if err != nil {
 		openAIError(w, http.StatusBadRequest, "unknown or disabled model", "invalid_request_error")
 		return
 	}
+	candidates := plan.Candidates
 	route := candidates[0]
 	if route.Provider.Type != "openai" && route.Provider.Type != "bedrock" {
 		openAIError(w, http.StatusNotImplemented, "model is not on an OpenAI-compatible or Bedrock provider", "unsupported_provider")
@@ -1231,7 +1243,7 @@ func (s *Server) openAIChatCompletions(w http.ResponseWriter, r *http.Request, u
 		openAIError(w, status, reason, typ)
 		return
 	}
-	policy := reliabilityPolicy(route.Model)
+	policy := reliabilityPolicy(plan.Requested.Model)
 	requestID := requestID()
 	if stream, _ := raw["stream"].(bool); stream {
 		selected, status, reason, typ, ok := s.selectOpenAIStreamCandidate(r.Context(), candidates, user, key, policy)
@@ -1267,11 +1279,12 @@ func (s *Server) anthropicMessages(w http.ResponseWriter, r *http.Request, user 
 		return
 	}
 	modelName, _ := raw["model"].(string)
-	candidates, err := s.store.ResolveModelCandidates(r.Context(), modelName)
+	plan, err := s.resolveRoutePlan(r.Context(), modelName)
 	if err != nil {
 		anthropicError(w, http.StatusBadRequest, "unknown or disabled model")
 		return
 	}
+	candidates := plan.Candidates
 	route := candidates[0]
 	if route.Provider.Type != "anthropic" {
 		anthropicError(w, http.StatusNotImplemented, "model is not on an Anthropic-compatible provider")
@@ -1289,8 +1302,72 @@ func (s *Server) anthropicMessages(w http.ResponseWriter, r *http.Request, user 
 		anthropicError(w, status, reason)
 		return
 	}
-	result := s.executeAnthropicPlan(r.Context(), candidates, raw, r.Header, user, key, requestID(), reliabilityPolicy(route.Model))
+	result := s.executeAnthropicPlan(r.Context(), candidates, raw, r.Header, user, key, requestID(), reliabilityPolicy(plan.Requested.Model))
 	writeAnthropicResult(w, result)
+}
+
+func (s *Server) resolveRoutePlan(ctx context.Context, requested string) (routePlan, error) {
+	primary, err := s.store.ResolveModel(ctx, requested)
+	if err != nil {
+		return routePlan{}, err
+	}
+	selected := primary
+	if weighted, ok := s.selectWeightedCandidate(ctx, primary); ok {
+		selected = weighted
+	}
+	candidates := []store.RoutedModel{selected}
+	seen := map[string]bool{
+		selected.Model.ID:    true,
+		selected.Model.Route: true,
+	}
+	for _, fallback := range splitRouteList(primary.Model.FallbackRoutes) {
+		if seen[fallback] {
+			continue
+		}
+		route, err := s.store.ResolveModel(ctx, fallback)
+		if err != nil {
+			continue
+		}
+		if seen[route.Model.ID] || seen[route.Model.Route] {
+			continue
+		}
+		seen[route.Model.ID] = true
+		seen[route.Model.Route] = true
+		candidates = append(candidates, route)
+	}
+	return routePlan{Requested: primary, Candidates: candidates}, nil
+}
+
+func (s *Server) selectWeightedCandidate(ctx context.Context, primary store.RoutedModel) (store.RoutedModel, bool) {
+	entries, err := parseWeightedRoutes(primary.Model.WeightedRoutes)
+	if err != nil || len(entries) == 0 {
+		return store.RoutedModel{}, false
+	}
+	type weightedCandidate struct {
+		route  store.RoutedModel
+		weight int
+	}
+	var candidates []weightedCandidate
+	total := 0
+	for _, entry := range entries {
+		route, err := s.store.ResolveModel(ctx, entry.Route)
+		if err != nil {
+			continue
+		}
+		candidates = append(candidates, weightedCandidate{route: route, weight: entry.Weight})
+		total += entry.Weight
+	}
+	if total <= 0 || len(candidates) == 0 {
+		return store.RoutedModel{}, false
+	}
+	pick := randomWeightedPick(total)
+	for _, candidate := range candidates {
+		if pick < candidate.weight {
+			return candidate.route, true
+		}
+		pick -= candidate.weight
+	}
+	return candidates[len(candidates)-1].route, true
 }
 
 func (s *Server) executeOpenAIPlan(ctx context.Context, candidates []store.RoutedModel, raw map[string]any, user store.User, key store.APIKey, requestID string, policy routeReliabilityPolicy) upstreamResult {
@@ -1634,6 +1711,64 @@ func cloneJSONMap(raw map[string]any) map[string]any {
 		out[k] = v
 	}
 	return out
+}
+
+func splitRouteList(v string) []string {
+	parts := strings.FieldsFunc(v, func(r rune) bool {
+		return r == ',' || r == '\n' || r == '\r' || r == '\t'
+	})
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
+func parseWeightedRoutes(raw string) ([]weightedRoutePolicy, error) {
+	parts := splitRouteList(raw)
+	out := make([]weightedRoutePolicy, 0, len(parts))
+	for _, part := range parts {
+		route, weightText, ok := splitWeightedRoute(part)
+		if !ok {
+			return nil, fmt.Errorf("weighted route entries must use route weight or route=weight")
+		}
+		weight, err := strconv.Atoi(weightText)
+		if err != nil || weight <= 0 {
+			return nil, fmt.Errorf("weighted route weights must be positive integers")
+		}
+		out = append(out, weightedRoutePolicy{Route: route, Weight: weight})
+	}
+	return out, nil
+}
+
+func splitWeightedRoute(entry string) (string, string, bool) {
+	if before, after, found := strings.Cut(entry, "="); found {
+		route := strings.TrimSpace(before)
+		weight := strings.TrimSpace(after)
+		return route, weight, route != "" && weight != ""
+	}
+	fields := strings.Fields(entry)
+	if len(fields) == 1 {
+		return fields[0], "1", true
+	}
+	if len(fields) == 2 {
+		return fields[0], fields[1], true
+	}
+	return "", "", false
+}
+
+func randomWeightedPick(total int) int {
+	if total <= 1 {
+		return 0
+	}
+	n, err := rand.Int(rand.Reader, big.NewInt(int64(total)))
+	if err != nil {
+		return int(time.Now().UnixNano() % int64(total))
+	}
+	return int(n.Int64())
 }
 
 func providerStatusAllowsRetry(statusCode int) bool {
@@ -2585,6 +2720,7 @@ func (s *Server) modelFromRequest(w http.ResponseWriter, r *http.Request, pathID
 		SupportsStreaming    bool    `json:"supports_streaming"`
 		Enabled              bool    `json:"enabled"`
 		FallbackRoutes       string  `json:"fallback_routes"`
+		WeightedRoutes       string  `json:"weighted_routes"`
 		RetryAttempts        int     `json:"retry_attempts"`
 		RequestTimeoutMS     int     `json:"request_timeout_ms"`
 		HealthRoutingEnabled *bool   `json:"health_routing_enabled"`
@@ -2622,6 +2758,10 @@ func (s *Server) modelFromRequest(w http.ResponseWriter, r *http.Request, pathID
 		respondError(w, http.StatusBadRequest, "request_timeout_ms cannot be negative")
 		return store.Model{}, false
 	}
+	if _, err := parseWeightedRoutes(req.WeightedRoutes); err != nil {
+		respondError(w, http.StatusBadRequest, err.Error())
+		return store.Model{}, false
+	}
 	route := strings.TrimSpace(req.Route)
 	if route == "" {
 		route = providerID + "/" + modelID
@@ -2646,6 +2786,7 @@ func (s *Server) modelFromRequest(w http.ResponseWriter, r *http.Request, pathID
 		SupportsStreaming:    req.SupportsStreaming,
 		Enabled:              req.Enabled,
 		FallbackRoutes:       req.FallbackRoutes,
+		WeightedRoutes:       req.WeightedRoutes,
 		RetryAttempts:        req.RetryAttempts,
 		RequestTimeoutMS:     req.RequestTimeoutMS,
 		HealthRoutingEnabled: healthRoutingEnabled,
@@ -2726,6 +2867,7 @@ func modelAuditDetails(m store.Model) map[string]any {
 		"supports_streaming":      m.SupportsStreaming,
 		"enabled":                 m.Enabled,
 		"fallback_routes":         m.FallbackRoutes,
+		"weighted_routes":         m.WeightedRoutes,
 		"retry_attempts":          m.RetryAttempts,
 		"request_timeout_ms":      m.RequestTimeoutMS,
 		"health_routing_enabled":  m.HealthRoutingEnabled,

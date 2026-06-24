@@ -47,6 +47,8 @@ This is the first implementation scaffold. It includes:
   repeated provider failures.
 - Model-level reliability controls for fallback routes, retry attempts, request timeouts,
   and health-aware routing.
+- Model-level weighted route policies for traffic splitting across compatible backend
+  routes.
 - Admin operations charts for 30-day cost, tokens, requests, errors, and average latency.
 - `/v1/models`, `/v1/chat/completions`, and `/anthropic/v1/messages` gateway surfaces.
 - Bedrock models can be exposed through `/v1/chat/completions` for non-streaming text chat,
@@ -55,7 +57,7 @@ This is the first implementation scaffold. It includes:
   upstream stream includes a final usage chunk.
 - Embedded dashboard assets under `frontend/dist`.
 
-Weighted load balancing, guardrails, semantic caching, and full Prometheus/OpenTelemetry
+Guardrails, semantic caching, and full Prometheus/OpenTelemetry
 integrations are documented in the roadmap and will be added behind the existing provider,
 policy, and usage seams.
 
@@ -120,4 +122,5 @@ docs/                Plan, design, and roadmap
 
 - [Plan](docs/PLAN.md)
 - [Design](docs/DESIGN.md)
+- [Model Routing](docs/ROUTING.md)
 - [Roadmap](docs/ROADMAP.md)

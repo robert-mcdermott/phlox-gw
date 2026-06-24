@@ -32,7 +32,6 @@ not complicate the first gateway release.
 
 ## Enterprise Features To Add
 
-- Provider failover policies, retries, and weighted load balancing.
 - Request policy engine: model allowlists, data classification labels, prompt/response
   guardrails, and optional PII redaction.
 - Prometheus metrics and OpenTelemetry traces.
@@ -62,11 +61,12 @@ not complicate the first gateway release.
 - Track provider health and block dispatch while a provider circuit is open.
 - Apply model-level provider reliability policies for retries, fallback routes, request
   timeouts, and health-aware routing.
+- Apply model-level weighted routing policies for traffic splitting across compatible
+  backend routes.
 - Show 30-day operational monitoring charts from the usage ledger.
 
 ### Phase 2: Production Controls
 
-- Add weighted routing and traffic-splitting policies.
 - Add request and response metadata search without storing prompt content by default.
 - Add budget burn-down, provider drilldowns, and model drilldowns.
 - Add Bedrock streaming, multimodal input mapping, and tool-call mapping.

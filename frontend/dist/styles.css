@@ -517,6 +517,12 @@ button {
   font-size: 12px;
 }
 
+.field-help {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
 .admin-subnav {
   border: 1px solid var(--border);
   border-radius: 8px;

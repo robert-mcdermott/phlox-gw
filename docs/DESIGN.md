@@ -88,15 +88,17 @@ enabled by default and can be disabled for environments that require pre-created
 2. The gateway hashes the key, resolves the owner, checks expiry/active status, and updates
    `last_used_at`.
 3. The requested model route is resolved against the enabled model catalog.
-4. The provider health gate blocks dispatch when the provider circuit is still open.
-5. The API key policy gate checks model allowlists, key monthly budget, RPM, and TPM.
-6. The budget gate checks applicable user and department budgets for priced models.
-7. The rate-limit gate checks user, department, provider, and model RPM/TPM policies.
-8. The provider adapter rewrites only the routing fields needed by the upstream provider.
-9. The request is dispatched with a bounded HTTP client.
-10. Provider success/failure state is updated from the upstream response.
-11. Latency, status, tokens, and cost are appended to the usage ledger.
-12. The provider response is returned in the original API shape.
+4. Model-level weighted routing chooses the initial backend route when a split policy is configured.
+5. Model-level fallback routes are retained as failover candidates.
+6. The provider health gate blocks dispatch when a provider circuit is still open.
+7. The API key policy gate checks model allowlists, key monthly budget, RPM, and TPM.
+8. The budget gate checks applicable user and department budgets for priced models.
+9. The rate-limit gate checks user, department, provider, and model RPM/TPM policies.
+10. The provider adapter rewrites only the routing fields needed by the upstream provider.
+11. Non-streaming requests are dispatched with per-candidate retry and timeout policies.
+12. Provider success/failure state is updated from each upstream response.
+13. Latency, status, tokens, and cost are appended to the usage ledger.
+14. The provider response is returned in the original API shape.
 
 ## Provider Strategy
 
@@ -112,6 +114,12 @@ Provider adapters are deliberately thin:
 
 The model route format is `provider_id/model_id`. Bare model IDs are accepted only when
 they resolve unambiguously.
+
+Model rows can define ordered fallback routes and weighted routes. Weighted routes are
+positive integer traffic-split entries such as `openai/gpt-4.1 80` and
+`local-vllm/gpt-oss 20`; when present, they choose the first backend candidate for a
+request. Fallback routes remain ordered failover candidates after the selected backend.
+See [Model Routing](ROUTING.md) for field definitions and examples.
 
 Provider health state is persisted on the provider row. Successful upstream responses reset
 the provider to `healthy`. Provider transport errors, 429, 401/403, and 5xx responses

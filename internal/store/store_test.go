@@ -140,8 +140,9 @@ func TestProviderAndModelCRUD(t *testing.T) {
 		t.Fatalf("CreateModel fallback: %v", err)
 	}
 	model.FallbackRoutes = fallback.Route
+	model.WeightedRoutes = fallback.Route + " 25"
 	if err := s.UpdateModel(ctx, model); err != nil {
-		t.Fatalf("UpdateModel fallback route: %v", err)
+		t.Fatalf("UpdateModel routing policies: %v", err)
 	}
 	candidates, err := s.ResolveModelCandidates(ctx, model.Route)
 	if err != nil {
@@ -149,6 +150,13 @@ func TestProviderAndModelCRUD(t *testing.T) {
 	}
 	if len(candidates) != 2 || candidates[0].Model.Route != model.Route || candidates[1].Model.Route != fallback.Route {
 		t.Fatalf("unexpected candidates: %#v", candidates)
+	}
+	routed, err = s.ResolveModel(ctx, model.Route)
+	if err != nil {
+		t.Fatalf("ResolveModel after routing policy update: %v", err)
+	}
+	if routed.Model.WeightedRoutes != model.WeightedRoutes {
+		t.Fatalf("model weighted routes were not persisted: %#v", routed.Model)
 	}
 }
 

@@ -92,6 +92,7 @@ type Model struct {
 	SupportsStreaming    bool      `json:"supports_streaming"`
 	Enabled              bool      `json:"enabled"`
 	FallbackRoutes       string    `json:"fallback_routes"`
+	WeightedRoutes       string    `json:"weighted_routes"`
 	RetryAttempts        int       `json:"retry_attempts"`
 	RequestTimeoutMS     int       `json:"request_timeout_ms"`
 	HealthRoutingEnabled bool      `json:"health_routing_enabled"`
@@ -286,6 +287,7 @@ func (s *Store) migrate(ctx context.Context) error {
 		{table: "providers", column: "last_error", spec: "TEXT NOT NULL DEFAULT ''"},
 		{table: "providers", column: "circuit_open_until", spec: "TEXT"},
 		{table: "models", column: "fallback_routes", spec: "TEXT NOT NULL DEFAULT ''"},
+		{table: "models", column: "weighted_routes", spec: "TEXT NOT NULL DEFAULT ''"},
 		{table: "models", column: "retry_attempts", spec: "INTEGER NOT NULL DEFAULT 0"},
 		{table: "models", column: "request_timeout_ms", spec: "INTEGER NOT NULL DEFAULT 0"},
 		{table: "models", column: "health_routing_enabled", spec: "INTEGER NOT NULL DEFAULT 1"},
@@ -848,10 +850,10 @@ func (s *Store) CreateModel(ctx context.Context, m Model) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO models
 		(id, provider_id, model_id, route, display_name, input_cost_per_million, output_cost_per_million, context_window,
-		 supports_streaming, enabled, fallback_routes, retry_attempts, request_timeout_ms, health_routing_enabled, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 supports_streaming, enabled, fallback_routes, weighted_routes, retry_attempts, request_timeout_ms, health_routing_enabled, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		m.ID, m.ProviderID, m.ModelID, m.Route, m.DisplayName, m.InputCostPerMillion, m.OutputCostPerMillion, m.ContextWindow,
-		boolInt(m.SupportsStreaming), boolInt(m.Enabled), normalizeList(m.FallbackRoutes), clampNonNegative(m.RetryAttempts), clampNonNegative(m.RequestTimeoutMS), boolInt(m.HealthRoutingEnabled), formatTime(now), formatTime(now))
+		boolInt(m.SupportsStreaming), boolInt(m.Enabled), normalizeList(m.FallbackRoutes), normalizeList(m.WeightedRoutes), clampNonNegative(m.RetryAttempts), clampNonNegative(m.RequestTimeoutMS), boolInt(m.HealthRoutingEnabled), formatTime(now), formatTime(now))
 	if isUniqueErr(err) {
 		return ErrConflict
 	}
@@ -863,11 +865,11 @@ func (s *Store) UpdateModel(ctx context.Context, m Model) error {
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE models
 		SET provider_id = ?, model_id = ?, route = ?, display_name = ?, input_cost_per_million = ?, output_cost_per_million = ?,
-		    context_window = ?, supports_streaming = ?, enabled = ?, fallback_routes = ?, retry_attempts = ?, request_timeout_ms = ?,
+		    context_window = ?, supports_streaming = ?, enabled = ?, fallback_routes = ?, weighted_routes = ?, retry_attempts = ?, request_timeout_ms = ?,
 		    health_routing_enabled = ?, updated_at = ?
 		WHERE id = ?`,
 		m.ProviderID, m.ModelID, m.Route, m.DisplayName, m.InputCostPerMillion, m.OutputCostPerMillion, m.ContextWindow,
-		boolInt(m.SupportsStreaming), boolInt(m.Enabled), normalizeList(m.FallbackRoutes), clampNonNegative(m.RetryAttempts), clampNonNegative(m.RequestTimeoutMS),
+		boolInt(m.SupportsStreaming), boolInt(m.Enabled), normalizeList(m.FallbackRoutes), normalizeList(m.WeightedRoutes), clampNonNegative(m.RetryAttempts), clampNonNegative(m.RequestTimeoutMS),
 		boolInt(m.HealthRoutingEnabled), formatTime(now), m.ID)
 	if err != nil {
 		if isUniqueErr(err) {
@@ -1501,9 +1503,9 @@ const providerColumns = `id, name, type, base_url, api_key, api_key_env, aws_reg
 
 const providerColumnsAliased = `p.id, p.name, p.type, p.base_url, p.api_key, p.api_key_env, p.aws_region, p.enabled, p.health_status, p.consecutive_failures, p.last_health_check_at, p.last_error, p.circuit_open_until, p.created_at, p.updated_at`
 
-const modelColumns = `id, provider_id, model_id, route, display_name, input_cost_per_million, output_cost_per_million, context_window, supports_streaming, enabled, fallback_routes, retry_attempts, request_timeout_ms, health_routing_enabled, created_at, updated_at`
+const modelColumns = `id, provider_id, model_id, route, display_name, input_cost_per_million, output_cost_per_million, context_window, supports_streaming, enabled, fallback_routes, weighted_routes, retry_attempts, request_timeout_ms, health_routing_enabled, created_at, updated_at`
 
-const modelColumnsAliased = `m.id, m.provider_id, m.model_id, m.route, m.display_name, m.input_cost_per_million, m.output_cost_per_million, m.context_window, m.supports_streaming, m.enabled, m.fallback_routes, m.retry_attempts, m.request_timeout_ms, m.health_routing_enabled, m.created_at, m.updated_at`
+const modelColumnsAliased = `m.id, m.provider_id, m.model_id, m.route, m.display_name, m.input_cost_per_million, m.output_cost_per_million, m.context_window, m.supports_streaming, m.enabled, m.fallback_routes, m.weighted_routes, m.retry_attempts, m.request_timeout_ms, m.health_routing_enabled, m.created_at, m.updated_at`
 
 func scanProvider(row scanner) (Provider, error) {
 	var p Provider
@@ -1539,7 +1541,7 @@ func scanModel(row scanner) (Model, error) {
 	var streaming, enabled, healthRouting int
 	var created, updated string
 	err := row.Scan(&m.ID, &m.ProviderID, &m.ModelID, &m.Route, &m.DisplayName, &m.InputCostPerMillion, &m.OutputCostPerMillion, &m.ContextWindow,
-		&streaming, &enabled, &m.FallbackRoutes, &m.RetryAttempts, &m.RequestTimeoutMS, &healthRouting, &created, &updated)
+		&streaming, &enabled, &m.FallbackRoutes, &m.WeightedRoutes, &m.RetryAttempts, &m.RequestTimeoutMS, &healthRouting, &created, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Model{}, ErrNotFound
 	}
@@ -1567,7 +1569,7 @@ func scanRoutedModel(row scanner) (RoutedModel, error) {
 	var pLastCheck, pCircuitOpen sql.NullString
 	var mCreated, mUpdated, pCreated, pUpdated string
 	err := row.Scan(&m.ID, &m.ProviderID, &m.ModelID, &m.Route, &m.DisplayName, &m.InputCostPerMillion, &m.OutputCostPerMillion, &m.ContextWindow,
-		&mStreaming, &mEnabled, &m.FallbackRoutes, &m.RetryAttempts, &m.RequestTimeoutMS, &mHealthRouting, &mCreated, &mUpdated,
+		&mStreaming, &mEnabled, &m.FallbackRoutes, &m.WeightedRoutes, &m.RetryAttempts, &m.RequestTimeoutMS, &mHealthRouting, &mCreated, &mUpdated,
 		&p.ID, &p.Name, &p.Type, &p.BaseURL, &p.APIKey, &p.APIKeyEnv, &p.AWSRegion, &pEnabled, &p.HealthStatus, &p.ConsecutiveFailures, &pLastCheck, &p.LastError, &pCircuitOpen, &pCreated, &pUpdated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return RoutedModel{}, ErrNotFound
@@ -1780,6 +1782,7 @@ var schema = []string{
 		supports_streaming INTEGER NOT NULL DEFAULT 1,
 		enabled INTEGER NOT NULL DEFAULT 1,
 		fallback_routes TEXT NOT NULL DEFAULT '',
+		weighted_routes TEXT NOT NULL DEFAULT '',
 		retry_attempts INTEGER NOT NULL DEFAULT 0,
 		request_timeout_ms INTEGER NOT NULL DEFAULT 0,
 		health_routing_enabled INTEGER NOT NULL DEFAULT 1,

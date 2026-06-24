@@ -379,18 +379,19 @@ function adminContentView(usage) {
   }
   if (state.adminTab === 'models') {
     return `
-      ${adminPanel('Add model', 'cpu', 'Route defaults to provider/model. Prices are USD per 1M tokens. Bedrock streaming is not enabled yet.', `
+      ${adminPanel('Add model', 'cpu', 'Route defaults to provider/model. Fallback and weighted routes reference route ids in the model table below. Prices are USD per 1M tokens.', `
         <div class="form-grid">
-          <select id="model-provider">${state.providers.map(p => `<option value="${esc(p.id)}">${esc(p.id)} · ${esc(p.name)}</option>`).join('')}</select>
-          <input id="model-model-id" placeholder="Upstream model id" />
-          <input id="model-route" placeholder="Route id (optional)" />
-          <input id="model-display-name" placeholder="Display name" />
-          <input id="model-input-cost" placeholder="Input $ / 1M" type="number" min="0" step="0.0001" value="0" />
-          <input id="model-output-cost" placeholder="Output $ / 1M" type="number" min="0" step="0.0001" value="0" />
-          <input id="model-context" placeholder="Context window" type="number" min="0" step="1" value="0" />
-          <textarea id="model-fallback-routes" placeholder="Fallback routes, one per line, in order"></textarea>
-          <input id="model-retry-attempts" placeholder="Retries per candidate" type="number" min="0" max="5" step="1" value="0" />
-          <input id="model-timeout-ms" placeholder="Timeout ms (0 = default)" type="number" min="0" step="1000" value="0" />
+          <label class="form-field"><span>Provider</span><select id="model-provider">${state.providers.map(p => `<option value="${esc(p.id)}">${esc(p.id)} · ${esc(p.name)}</option>`).join('')}</select></label>
+          <label class="form-field"><span>Upstream model id</span><input id="model-model-id" placeholder="e.g. llama3.1:8b or claude-3-5-sonnet" /></label>
+          <label class="form-field"><span>Route id</span><input id="model-route" placeholder="e.g. chat/default" /><small class="field-help">Public model name clients send. Blank becomes provider/model.</small></label>
+          <label class="form-field"><span>Display name</span><input id="model-display-name" placeholder="Human-friendly name" /></label>
+          <label class="form-field"><span>Input cost / 1M tokens</span><input id="model-input-cost" type="number" min="0" step="0.0001" value="0" /></label>
+          <label class="form-field"><span>Output cost / 1M tokens</span><input id="model-output-cost" type="number" min="0" step="0.0001" value="0" /></label>
+          <label class="form-field"><span>Context window tokens</span><input id="model-context" type="number" min="0" step="1" value="0" /></label>
+          <label class="form-field"><span>Fallback routes</span><textarea id="model-fallback-routes" placeholder="openai/gpt-4o-mini&#10;local-ollama/gemma4:31b-cloud"></textarea><small class="field-help">Existing route ids to try in order after a failure.</small></label>
+          <label class="form-field"><span>Weighted routes</span><textarea id="model-weighted-routes" placeholder="openai/gpt-4o-mini 80&#10;local-vllm/llama-3.1-8b 20"></textarea><small class="field-help">Existing route id plus relative traffic weight.</small></label>
+          <label class="form-field"><span>Retries per candidate</span><input id="model-retry-attempts" type="number" min="0" max="5" step="1" value="0" /></label>
+          <label class="form-field"><span>Request timeout ms</span><input id="model-timeout-ms" type="number" min="0" step="1000" value="0" /></label>
           <label class="check"><input id="model-streaming" type="checkbox" checked /> Streaming</label>
           <label class="check"><input id="model-enabled" type="checkbox" checked /> Enabled</label>
           <label class="check"><input id="model-health-routing" type="checkbox" checked /> Health routing</label>
@@ -574,7 +575,7 @@ function modelRows() {
   return `
     <div class="table-scroll">
       <table>
-        <thead><tr><th>Route</th><th>Provider</th><th>Model id</th><th>Name</th><th>Input</th><th>Output</th><th>Context</th><th>Fallback routes</th><th>Retries</th><th>Timeout ms</th><th>Health routing</th><th>Streaming</th><th>Enabled</th><th>Actions</th></tr></thead>
+        <thead><tr><th>Route</th><th>Provider</th><th>Model id</th><th>Name</th><th>Input</th><th>Output</th><th>Context</th><th>Fallback routes</th><th>Weighted routes</th><th>Retries</th><th>Timeout ms</th><th>Health routing</th><th>Streaming</th><th>Enabled</th><th>Actions</th></tr></thead>
         <tbody>
           ${state.adminModels.map(m => `
             <tr data-model-row="${esc(m.id)}">
@@ -586,6 +587,7 @@ function modelRows() {
               <td><input data-model-field="output_cost_per_million" type="number" min="0" step="0.0001" value="${attr(m.output_cost_per_million)}" /></td>
               <td><input data-model-field="context_window" type="number" min="0" step="1" value="${attr(m.context_window)}" /></td>
               <td><textarea data-model-field="fallback_routes" placeholder="route-a&#10;route-b">${attr(m.fallback_routes || '')}</textarea></td>
+              <td><textarea data-model-field="weighted_routes" placeholder="route-a 80&#10;route-b 20">${attr(m.weighted_routes || '')}</textarea></td>
               <td><input data-model-field="retry_attempts" type="number" min="0" max="5" step="1" value="${attr(m.retry_attempts || 0)}" /></td>
               <td><input data-model-field="request_timeout_ms" type="number" min="0" step="1000" value="${attr(m.request_timeout_ms || 0)}" /></td>
               <td><input data-model-field="health_routing_enabled" type="checkbox" ${m.health_routing_enabled !== false ? 'checked' : ''} /></td>
@@ -821,6 +823,7 @@ function afterRender() {
         output_cost_per_million: num('model-output-cost'),
         context_window: intNum('model-context'),
         fallback_routes: val('model-fallback-routes'),
+        weighted_routes: val('model-weighted-routes'),
         retry_attempts: intNum('model-retry-attempts'),
         request_timeout_ms: intNum('model-timeout-ms'),
         health_routing_enabled: checked('model-health-routing'),

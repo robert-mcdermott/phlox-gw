@@ -634,6 +634,120 @@ func TestOpenAIChatCompletionsFallsBackAfterPrimaryProviderFailure(t *testing.T)
 	}
 }
 
+func TestOpenAIChatCompletionsUsesWeightedRoute(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer st.Close()
+	user := store.User{ID: "user_weighted", Username: "weighted", DisplayName: "Weighted", Role: "user", IsActive: true}
+	if err := st.CreateUser(ctx, user); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	plain, prefix, keyHash, err := auth.NewAPIKey()
+	if err != nil {
+		t.Fatalf("NewAPIKey: %v", err)
+	}
+	if err := st.CreateAPIKey(ctx, store.APIKey{ID: "key_weighted", UserID: user.ID, Name: "Weighted key", Prefix: prefix, KeyHash: keyHash}); err != nil {
+		t.Fatalf("CreateAPIKey: %v", err)
+	}
+
+	primaryHits := 0
+	weightedHits := 0
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		var body string
+		switch r.URL.Host {
+		case "primary-weighted.test":
+			primaryHits++
+			body = `{"error":{"message":"primary should not be selected"}}`
+		case "weighted.test":
+			weightedHits++
+			var req map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("weighted decode: %v", err)
+			}
+			if req["model"] != "weighted-model" {
+				t.Fatalf("weighted upstream model = %#v", req["model"])
+			}
+			body = `{"id":"chatcmpl_weighted","object":"chat.completion","model":"weighted-model","choices":[{"message":{"role":"assistant","content":"weighted ok"}}],"usage":{"prompt_tokens":5,"completion_tokens":6,"total_tokens":11}}`
+		default:
+			t.Fatalf("unexpected upstream host: %s", r.URL.Host)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Request:    r,
+		}, nil
+	})
+
+	primaryProvider := store.Provider{ID: "primary-weighted", Name: "Primary", Type: "openai", BaseURL: "http://primary-weighted.test/v1", Enabled: true}
+	weightedProvider := store.Provider{ID: "weighted-openai", Name: "Weighted", Type: "openai", BaseURL: "http://weighted.test/v1", Enabled: true}
+	if err := st.CreateProvider(ctx, primaryProvider); err != nil {
+		t.Fatalf("CreateProvider primary: %v", err)
+	}
+	if err := st.CreateProvider(ctx, weightedProvider); err != nil {
+		t.Fatalf("CreateProvider weighted: %v", err)
+	}
+	primaryModel := store.Model{
+		ID:                   "model_primary_weighted",
+		ProviderID:           primaryProvider.ID,
+		ModelID:              "primary-model",
+		Route:                "gateway/weighted-model",
+		DisplayName:          "Weighted gateway model",
+		Enabled:              true,
+		SupportsStreaming:    true,
+		WeightedRoutes:       "weighted-openai/weighted-model 100",
+		HealthRoutingEnabled: true,
+	}
+	weightedModel := store.Model{
+		ID:                   "model_weighted_target",
+		ProviderID:           weightedProvider.ID,
+		ModelID:              "weighted-model",
+		Route:                "weighted-openai/weighted-model",
+		DisplayName:          "Weighted target",
+		Enabled:              true,
+		SupportsStreaming:    true,
+		HealthRoutingEnabled: true,
+	}
+	if err := st.CreateModel(ctx, primaryModel); err != nil {
+		t.Fatalf("CreateModel primary: %v", err)
+	}
+	if err := st.CreateModel(ctx, weightedModel); err != nil {
+		t.Fatalf("CreateModel weighted: %v", err)
+	}
+
+	handler, err := New(Options{
+		Config: config.Config{SessionSecret: "test-secret"},
+		Store:  st,
+		Frontend: fstest.MapFS{
+			"frontend/dist/index.html": &fstest.MapFile{Data: []byte("<html></html>")},
+		},
+		HTTPClient: &http.Client{Transport: transport},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	resp := jsonRequest(t, handler, http.MethodPost, "/v1/chat/completions", plain, map[string]any{
+		"model":    primaryModel.Route,
+		"messages": []map[string]string{{"role": "user", "content": "hello"}},
+	})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", resp.Code, resp.Body.String())
+	}
+	if primaryHits != 0 || weightedHits != 1 {
+		t.Fatalf("unexpected hit counts primary=%d weighted=%d", primaryHits, weightedHits)
+	}
+	usage, err := st.UsageForUser(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("UsageForUser: %v", err)
+	}
+	if usage.Requests != 1 || usage.InputTokens != 5 || usage.OutputTokens != 6 || usage.TotalTokens != 11 {
+		t.Fatalf("unexpected weighted usage: %#v", usage)
+	}
+}
+
 type fakeBedrockClient struct {
 	input *bedrockruntime.ConverseInput
 }

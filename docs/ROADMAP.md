@@ -22,10 +22,10 @@
 - [x] API key rotation workflow and self-service expiration controls.
 - [x] User, department, provider, and model-level RPM/TPM rate limits.
 - [x] Provider reliability policies: ordered fallback routes, retry attempts, per-attempt request timeouts, and health-aware routing.
+- [x] Weighted routing and traffic-splitting policies.
 
 ## Next
 
-- Add weighted routing and traffic-splitting policies.
 - Add budget burn-down, provider drilldowns, and model drilldowns.
 - Add Bedrock streaming with ConverseStream and richer multimodal/tool-call mapping.
 - Add Anthropic streaming support and streamed usage capture where compatible endpoints expose it.
