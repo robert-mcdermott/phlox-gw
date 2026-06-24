@@ -36,6 +36,6 @@
 
 - Prometheus metrics and OpenTelemetry traces.
 - Semantic response cache.
-- Request metadata search and signed admin configuration export.
+- Signed admin configuration export.
 - Cluster mode with Postgres.
 - External secrets management.

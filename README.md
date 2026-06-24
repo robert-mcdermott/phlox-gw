@@ -1,138 +1,334 @@
 # Phlox-GW
 
-Phlox-GW is an enterprise LLM gateway focused on secure model access, cost control,
-budget enforcement, and operational visibility.
+Phlox-GW is a self-hosted enterprise LLM gateway. It gives administrators one place to
+publish model routes, control who can use them, attach prices, enforce budgets and rate
+limits, and report usage for chargeback.
 
-This repository is intentionally separate from Phlox. Phlox-GW keeps the useful platform
-ideas from Phlox, but narrows the product to a high-performance gateway:
+The product is intentionally narrower than the broader Phlox platform. Phlox-GW is not a
+chat assistant, RAG system, or agent runtime. It is the gateway and governance layer that
+sits between users, applications, local model runtimes, cloud LLM APIs, and AWS Bedrock.
 
-- Local auth with optional Entra ID/OIDC SSO and department claim mapping.
+## What It Does
+
+Phlox-GW provides:
+
+- Local browser authentication with admin and user roles.
+- Optional Entra ID or other OIDC single sign-on.
 - User-owned API keys for programmatic access.
 - OpenAI-compatible gateway endpoints for OpenAI, Ollama, OpenRouter, LiteLLM, vLLM,
-  LM Studio, and compatible local runtimes.
+  LM Studio, and other compatible endpoints.
 - Anthropic-compatible gateway endpoint support.
 - AWS Bedrock access through the OpenAI-compatible chat endpoint using Bedrock Converse.
-- Provider/model catalog with administrator-owned pricing.
-- Usage ledger for per-user and per-department chargeback.
-- Monthly user and department budgets with warning thresholds and hard limits.
-- Per-key model allowlists, monthly budgets, RPM limits, and TPM limits.
-- Enterprise RPM/TPM rate limits by user, department, provider, and model.
-- Embedded dashboard served from the same Go binary.
-- SQLite database stored in the application data directory.
+- Provider and model catalog management from the admin UI.
+- Public model routes that can be stable aliases instead of provider-specific names.
+- Per-model input and output prices in USD per 1 million tokens.
+- Per-user and per-department monthly chargeback from an append-only usage ledger.
+- User, department, provider, model, and API-key level RPM and TPM limits.
+- User, department, and API-key monthly budgets with hard-limit enforcement.
+- Provider health tracking with circuit-open blocking after repeated failures.
+- Model fallback routes, retries, request timeouts, health-aware routing, and weighted
+  traffic splitting.
+- Admin operations charts for cost, tokens, requests, errors, latency, providers, and
+  models.
+- Budget burn-down views and CSV exports.
+- Request metadata search and CSV export without storing prompt text, response text, image
+  bytes, tool contents, API keys, or provider secrets by default.
+- A browser dashboard embedded into the same Go binary as the gateway API.
+- A SQLite database that can live next to the application binary or in a configured data
+  directory.
 
-## Current State
+## Architecture
 
-This is the first implementation scaffold. It includes:
+```text
+Applications, SDKs, and users
+  |
+  |  OpenAI-compatible /v1/*
+  |  Anthropic-compatible /anthropic/v1/*
+  v
+Phlox-GW single Go binary
+  |
+  |-- Browser auth and API key auth
+  |-- Provider and model route catalog
+  |-- Budget, API-key policy, and rate-limit gates
+  |-- Provider adapters for OpenAI-compatible, Anthropic-compatible, and Bedrock
+  |-- Usage ledger, request metadata log, audit log, and admin APIs
+  |-- Embedded dashboard assets from frontend/dist
+  v
+SQLite database
+```
 
-- Go HTTP server using the standard library.
-- SQLite persistence through a pure-Go SQLite driver.
-- Seeded local admin account: `admin` / `admin`.
-- Session token auth, admin/user roles, users, API keys, providers, models, budgets,
-  and usage ledger schema.
-- Optional OIDC browser login for Entra ID or other OIDC providers, with signed state
-  cookies, local user provisioning, department claim mapping, and admin group mapping.
-- Dashboard workflows to create users, mint user API keys, add/update providers, add/update
-  models and token prices, and create/delete budgets.
-- Admin lifecycle controls for enabling/disabling users, resetting passwords, deleting
-  users/providers/models, testing enabled models, and exporting usage to CSV.
-- Admin API key governance for owner inventory, model allowlists, monthly key budgets,
-  request-per-minute limits, token-per-minute limits, and revocation.
-- Self-service API key expiration updates and in-place key rotation with one-time secret
-  display.
-- Admin-managed RPM/TPM rate limits by user, department, provider, and model, enforced
-  before provider dispatch.
-- Immutable audit log for local login, admin configuration changes, model tests, and API
-  key lifecycle events.
-- Provider health state with automatic failure tracking and circuit-open blocking after
-  repeated provider failures.
-- Model-level reliability controls for fallback routes, retry attempts, request timeouts,
-  and health-aware routing.
-- Model-level weighted route policies for traffic splitting across compatible backend
-  routes.
-- Admin operations charts for 30-day cost, tokens, requests, errors, average latency,
-  provider drilldowns, and model drilldowns.
-- Admin request metadata search and CSV export for support/audit workflows without
-  storing prompt text, response text, image bytes, tool contents, or secrets by default.
-- Budget burn-down reporting with current-month spend, remaining budget, daily run rate,
-  and projected month-end spend.
-- `/v1/models`, `/v1/chat/completions`, and `/anthropic/v1/messages` gateway surfaces.
-- Bedrock models can be exposed through `/v1/chat/completions` for text chat and
-  streaming chat, with usage captured from Bedrock token metadata.
-- Bedrock OpenAI-shape requests support text, data URL image inputs, function tool
-  definitions, and tool-call/tool-result round trips where the selected Bedrock model
-  supports those features.
-- Streaming OpenAI-compatible calls are proxied through while recording usage when the
-  upstream stream includes a final usage chunk.
-- OpenAI-compatible text calls that omit usage metadata get an in-memory token estimate
-  for chargeback; prompt and response content are still not stored.
-- Streaming Anthropic-compatible calls are proxied through while recording usage from
-  `message_start` and `message_delta` stream events when the upstream emits them.
-- Embedded dashboard assets under `frontend/dist`.
+The first deployment mode is a single executable and a single SQLite database file. The
+design keeps the backend simple for Linux, macOS, and Windows while leaving room for later
+Postgres or multi-node operation.
 
-Guardrails, semantic caching, and full Prometheus/OpenTelemetry
-integrations are documented in the roadmap and will be added behind the existing provider,
-policy, and usage seams.
+## Requirements
+
+- Go matching the version in [go.mod](go.mod). The current module declares Go 1.26.
+- Node.js and npm only if you plan to rebuild the frontend from `frontend/src`.
+- Network access from the gateway host to the configured upstream providers.
+- AWS credentials on the gateway host if you use Bedrock.
+
+The checked-in `frontend/dist` assets are already embedded by `go build`, so a normal
+backend build does not require Node.
 
 ## Quick Start
 
-```bash
-go mod tidy
-go run ./cmd/phlox-gw
-```
-
-Open `http://127.0.0.1:8080` and sign in as `admin` / `admin`.
-
-Important environment variables:
+From the repository root:
 
 ```bash
-PHLOX_GW_ADDR=127.0.0.1:8080
-PHLOX_GW_DATA_DIR=/path/to/data
-PHLOX_GW_SESSION_SECRET='replace-this-with-a-long-random-secret'
+go test ./...
+go build -o phlox-gw ./cmd/phlox-gw
+./phlox-gw
 ```
 
-Optional OIDC/Entra ID environment variables:
+Open [http://127.0.0.1:8080](http://127.0.0.1:8080) and sign in with the seeded local
+administrator:
+
+```text
+Username: admin
+Password: admin
+```
+
+Change that password before any shared use.
+
+By default Phlox-GW stores `phlox-gw.db` in the current working directory and listens on
+`127.0.0.1:8080`.
+
+## Production-Oriented Run
+
+Set a persistent data directory and a long random session secret:
 
 ```bash
-PHLOX_GW_OIDC_ENABLED=true
-PHLOX_GW_OIDC_DISPLAY_NAME='Entra ID'
-PHLOX_GW_OIDC_ISSUER_URL='https://login.microsoftonline.com/<tenant-id>/v2.0'
-PHLOX_GW_OIDC_CLIENT_ID='<app-client-id>'
-PHLOX_GW_OIDC_CLIENT_SECRET='<app-client-secret>'
-PHLOX_GW_OIDC_REDIRECT_URL='https://gateway.example.com/api/auth/oidc/callback'
-PHLOX_GW_OIDC_DEPARTMENT_CLAIM='department'
-PHLOX_GW_OIDC_GROUPS_CLAIM='groups'
-PHLOX_GW_OIDC_ADMIN_GROUPS='<admin-group-object-id-or-name>'
+export PHLOX_GW_ADDR="127.0.0.1:8080"
+export PHLOX_GW_DATA_DIR="/var/lib/phlox-gw"
+export PHLOX_GW_SESSION_SECRET="$(openssl rand -base64 48)"
+
+./phlox-gw
 ```
 
-If `PHLOX_GW_OIDC_REDIRECT_URL` is omitted, Phlox-GW derives it from the incoming request
-host and `/api/auth/oidc/callback`. Auto-provisioning is enabled by default and can be
-disabled with `PHLOX_GW_OIDC_AUTO_PROVISION=false`.
+For production, put Phlox-GW behind a TLS-terminating reverse proxy or load balancer. The
+application currently serves HTTP directly and expects TLS to be handled at the edge.
 
-Provider secrets can be stored directly for local development, but production deployments
-should prefer environment variable references. The database stores the provider
-`api_key_env` field and resolves it at request time.
+See the [Operator Guide](docs/OPERATIONS.md) for systemd, macOS, Windows, OIDC, provider,
+backup, and reverse-proxy guidance.
 
-Bedrock providers use the configured `aws_region` and the AWS SDK default credential
-chain. That means standard sources such as `AWS_PROFILE`, `AWS_ACCESS_KEY_ID`,
-`AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, SSO-backed profiles, ECS task roles, and EC2
-instance roles can be used without storing AWS secrets in Phlox-GW.
+## Build Options
+
+Build for the current OS:
+
+```bash
+go build -o phlox-gw ./cmd/phlox-gw
+```
+
+Build for common targets from macOS or Linux:
+
+```bash
+GOOS=linux GOARCH=amd64 go build -o dist/phlox-gw-linux-amd64 ./cmd/phlox-gw
+GOOS=darwin GOARCH=arm64 go build -o dist/phlox-gw-darwin-arm64 ./cmd/phlox-gw
+GOOS=windows GOARCH=amd64 go build -o dist/phlox-gw-windows-amd64.exe ./cmd/phlox-gw
+```
+
+If you edit the frontend source, rebuild the dashboard before compiling the Go binary:
+
+```bash
+cd frontend
+npm install
+npm run build
+cd ..
+go build -o phlox-gw ./cmd/phlox-gw
+```
+
+## First-Time Setup
+
+1. Start the gateway and sign in as `admin`.
+2. Go to `Admin -> Users` and create real users with departments.
+3. Go to `Admin -> Providers` and enable or create provider profiles.
+4. Go to `Admin -> Models` and create routes for upstream models.
+5. Set input and output prices in USD per 1 million tokens.
+6. Go to `Admin -> Budgets` and configure user or department monthly limits.
+7. Go to `Admin -> Rate Limits` for user, department, provider, or model RPM/TPM limits.
+8. Go to `API Keys` as a user, or `Admin -> API Keys` as an admin, and mint a key.
+9. Test the key with `/v1/models` or `/v1/chat/completions`.
+
+## Providers
+
+Provider rows describe where Phlox-GW sends requests after model routing.
+
+| Provider type | Typical base URL | Notes |
+| --- | --- | --- |
+| `openai` | `https://api.openai.com/v1` | Also works for OpenRouter, LiteLLM, vLLM, Ollama, LM Studio, and other OpenAI-compatible APIs. |
+| `openai` for Ollama | `http://localhost:11434/v1` | Local Ollama exposes an OpenAI-compatible API at `/v1`. |
+| `anthropic` | `https://api.anthropic.com` | Phlox-GW appends `/v1/messages`. |
+| `bedrock` | blank | Uses the AWS SDK credential chain and configured AWS region. |
+
+Provider API keys can be stored directly for local testing, but production deployments
+should prefer environment variable references. For example, set `api_key_env` to
+`OPENAI_API_KEY` and run the gateway with that environment variable set.
+
+Bedrock does not need a provider API key. It uses standard AWS credential sources such as
+`AWS_PROFILE`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, SSO
+profiles, ECS task roles, or EC2 instance roles.
+
+## Models And Routes
+
+A model row maps a public route to an upstream provider model.
+
+Important fields:
+
+- `Provider`: the provider profile that owns the upstream endpoint or Bedrock region.
+- `Upstream model id`: the model name Phlox-GW sends upstream.
+- `Route id`: the public model name clients send to Phlox-GW. If blank, it defaults to
+  `provider_id/model_id`.
+- `Input cost` and `Output cost`: USD per 1 million tokens.
+- `Streaming`: whether the route should be advertised for streaming.
+- `Fallback routes`: ordered backup routes to try on provider failure.
+- `Weighted routes`: traffic split entries such as `openai/gpt-4o-mini 80`.
+
+Example route:
+
+```text
+Provider: local-ollama
+Upstream model id: gemma4:31b-cloud
+Route id: local-ollama/gemma4:31b-cloud
+```
+
+Clients then call:
+
+```json
+{
+  "model": "local-ollama/gemma4:31b-cloud",
+  "messages": [
+    { "role": "user", "content": "Write a one sentence status update." }
+  ]
+}
+```
+
+For detailed route behavior, see [Model Routing](docs/ROUTING.md).
+
+## Using The Gateway
+
+List available models:
+
+```bash
+curl -sS http://127.0.0.1:8080/v1/models \
+  -H "Authorization: Bearer pgw-sk-your-key"
+```
+
+Call an OpenAI-compatible chat route:
+
+```bash
+curl -sS http://127.0.0.1:8080/v1/chat/completions \
+  -H "Authorization: Bearer pgw-sk-your-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "local-ollama/gemma4:31b-cloud",
+    "messages": [
+      { "role": "user", "content": "Explain Phlox-GW in one sentence." }
+    ]
+  }'
+```
+
+Stream a response:
+
+```bash
+curl -N http://127.0.0.1:8080/v1/chat/completions \
+  -H "Authorization: Bearer pgw-sk-your-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "local-ollama/gemma4:31b-cloud",
+    "stream": true,
+    "messages": [
+      { "role": "user", "content": "Give me three deployment checks." }
+    ]
+  }'
+```
+
+Call an Anthropic-compatible route:
+
+```bash
+curl -sS http://127.0.0.1:8080/anthropic/v1/messages \
+  -H "x-api-key: pgw-sk-your-key" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "anthropic/claude-3-5-sonnet-latest",
+    "max_tokens": 256,
+    "messages": [
+      { "role": "user", "content": "Summarize this gateway." }
+    ]
+  }'
+```
+
+More examples are in [API Usage](docs/API_USAGE.md).
+
+## Configuration
+
+Core environment variables:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `PHLOX_GW_ADDR` | `127.0.0.1:8080` | HTTP listen address. |
+| `PHLOX_GW_DATA_DIR` | current working directory | Directory containing `phlox-gw.db`. |
+| `PHLOX_GW_SESSION_SECRET` | random development secret | HMAC secret for browser sessions. Set this explicitly for shared use. |
+
+OIDC and Entra ID settings:
+
+| Variable | Purpose |
+| --- | --- |
+| `PHLOX_GW_OIDC_ENABLED` | Enables browser SSO when `true`. |
+| `PHLOX_GW_OIDC_DISPLAY_NAME` | Button label in the login UI. Defaults to `Entra ID`. |
+| `PHLOX_GW_OIDC_ISSUER_URL` | OIDC issuer, for example `https://login.microsoftonline.com/<tenant-id>/v2.0`. |
+| `PHLOX_GW_OIDC_CLIENT_ID` | Application client ID. |
+| `PHLOX_GW_OIDC_CLIENT_SECRET` | Application client secret. |
+| `PHLOX_GW_OIDC_REDIRECT_URL` | Optional fixed callback URL. |
+| `PHLOX_GW_OIDC_SCOPES` | Optional space or comma separated scopes. `openid` is always included. |
+| `PHLOX_GW_OIDC_USERNAME_CLAIM` | Claim used for the local username. Defaults to `preferred_username`. |
+| `PHLOX_GW_OIDC_DEPARTMENT_CLAIM` | Claim used for chargeback department. Defaults to `department`. |
+| `PHLOX_GW_OIDC_GROUPS_CLAIM` | Claim containing group memberships. Defaults to `groups`. |
+| `PHLOX_GW_OIDC_ADMIN_GROUPS` | Space or comma separated groups that grant Phlox-GW admin role. |
+| `PHLOX_GW_OIDC_AUTO_PROVISION` | Creates local users on first SSO login. Defaults to `true`. |
+
+The full configuration reference is in the [Operator Guide](docs/OPERATIONS.md).
+
+## Accounting And Privacy
+
+The usage ledger records request metadata needed for chargeback: user, department, API key
+metadata, provider, model route, token counts, cost, status, latency, and timestamp.
+
+Provider-reported token usage is preferred. Some local OpenAI-compatible providers omit
+usage metadata, especially for streaming responses. In that case Phlox-GW estimates text
+tokens in memory so cost accounting does not fall to zero. Prompt and response content are
+discarded after the estimate and are not written to SQLite by default.
+
+## Documentation
+
+- [Operator Guide](docs/OPERATIONS.md): build, configuration, SSO, providers, deployment,
+  backups, and troubleshooting.
+- [API Usage](docs/API_USAGE.md): client endpoints, curl examples, streaming, errors, and
+  integration notes.
+- [Design](docs/DESIGN.md): architecture and implementation decisions.
+- [Model Routing](docs/ROUTING.md): route IDs, fallback routes, weighted routes, and common
+  patterns.
+- [Plan](docs/PLAN.md): product scope and implementation phases.
+- [Roadmap](docs/ROADMAP.md): completed and planned work.
 
 ## Repository Map
 
 ```text
 cmd/phlox-gw/        Binary entry point
-internal/auth/       Password hashing and signed session tokens
+embed.go            Go embed declaration for frontend/dist
+internal/auth/       Password hashing, API key generation, and signed session tokens
 internal/config/     Environment and data path loading
-internal/httpapi/    REST, admin, API key, and gateway handlers
-internal/store/      SQLite schema and persistence methods
-frontend/dist/       Embedded first-pass dashboard
-frontend/src/        React/Vite source scaffold for the dashboard
-docs/                Plan, design, and roadmap
+internal/httpapi/    Browser, admin, API key, provider, and gateway handlers
+internal/store/      SQLite schema, migrations, and persistence methods
+frontend/dist/       Embedded dashboard assets
+frontend/src/        React/Vite source scaffold for future dashboard work
+docs/                Design, operator, API, routing, plan, and roadmap docs
 ```
 
-## Documentation
+## Current Roadmap Focus
 
-- [Plan](docs/PLAN.md)
-- [Design](docs/DESIGN.md)
-- [Model Routing](docs/ROUTING.md)
-- [Roadmap](docs/ROADMAP.md)
+The gateway foundation is in place. The next major implementation area is a guardrail
+plugin layer with PII redaction policy controls, followed by Prometheus metrics,
+OpenTelemetry tracing, semantic cache support, external secrets management, and cluster
+database options.

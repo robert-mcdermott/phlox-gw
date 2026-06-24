@@ -205,11 +205,12 @@ Current implementation:
   and API key lifecycle events.
 - Persisted provider health state and circuit-open blocking after repeated provider
   failures.
+- Request metadata search and CSV export without prompt or response content storage by
+  default.
 - No prompt content stored in the ledger.
 
 Planned:
 
-- Request metadata search across gateway calls.
 - Provider secret encryption or external vault integration.
 - Guardrails and redaction policies.
 - TLS termination guidance and secure cookie mode.
