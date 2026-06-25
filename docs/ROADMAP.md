@@ -32,10 +32,11 @@
 - [x] Prometheus metrics and OpenTelemetry traces.
 - [x] Signed admin configuration export.
 - [x] Anthropic-compatible streaming translation to Bedrock ConverseStream.
+- [x] Optional Postgres database backend with SQLite still the default.
 
 ## Next
 
-- Cluster mode with Postgres.
+- Cluster deployment hardening with Postgres: migration locking, scale-out runbooks, and multi-node validation.
 
 ## Later
 

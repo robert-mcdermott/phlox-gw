@@ -3,6 +3,7 @@ package config
 import (
 	"crypto/rand"
 	"encoding/base64"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -13,10 +14,17 @@ type Config struct {
 	Addr               string
 	DataDir            string
 	DBPath             string
+	Database           DatabaseConfig
 	SessionSecret      string
 	UsingDefaultSecret bool
 	OIDC               OIDCConfig
 	Telemetry          TelemetryConfig
+}
+
+type DatabaseConfig struct {
+	Driver string
+	Path   string
+	URL    string
 }
 
 type OIDCConfig struct {
@@ -59,6 +67,10 @@ func Load() (Config, error) {
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		return Config{}, err
 	}
+	database := loadDatabaseConfig(dataDir)
+	if err := validateDatabaseConfig(database); err != nil {
+		return Config{}, err
+	}
 
 	secret := os.Getenv("PHLOX_GW_SESSION_SECRET")
 	usingDefault := false
@@ -76,12 +88,71 @@ func Load() (Config, error) {
 	return Config{
 		Addr:               addr,
 		DataDir:            dataDir,
-		DBPath:             filepath.Join(dataDir, "phlox-gw.db"),
+		DBPath:             database.Path,
+		Database:           database,
 		SessionSecret:      secret,
 		UsingDefaultSecret: usingDefault,
 		OIDC:               oidc,
 		Telemetry:          loadTelemetryConfig(),
 	}, nil
+}
+
+func loadDatabaseConfig(dataDir string) DatabaseConfig {
+	dbURL := strings.TrimSpace(os.Getenv("PHLOX_GW_DATABASE_URL"))
+	if dbURL == "" {
+		dbURL = strings.TrimSpace(os.Getenv("PHLOX_GW_POSTGRES_DSN"))
+	}
+
+	driver := strings.TrimSpace(os.Getenv("PHLOX_GW_DATABASE_DRIVER"))
+	if driver == "" {
+		driver = strings.TrimSpace(os.Getenv("PHLOX_GW_DB_DRIVER"))
+	}
+	if driver == "" {
+		if dbURL != "" {
+			driver = "postgres"
+		} else {
+			driver = "sqlite"
+		}
+	}
+	driver = normalizeDatabaseDriver(driver)
+
+	dbPath := strings.TrimSpace(os.Getenv("PHLOX_GW_DB_PATH"))
+	if dbPath == "" {
+		dbPath = filepath.Join(dataDir, "phlox-gw.db")
+	}
+
+	return DatabaseConfig{
+		Driver: driver,
+		Path:   dbPath,
+		URL:    dbURL,
+	}
+}
+
+func normalizeDatabaseDriver(driver string) string {
+	switch strings.ToLower(strings.TrimSpace(driver)) {
+	case "", "sqlite", "sqlite3":
+		return "sqlite"
+	case "postgres", "postgresql", "pgx":
+		return "postgres"
+	default:
+		return strings.ToLower(strings.TrimSpace(driver))
+	}
+}
+
+func validateDatabaseConfig(database DatabaseConfig) error {
+	switch database.Driver {
+	case "sqlite":
+		if strings.TrimSpace(database.Path) == "" {
+			return fmt.Errorf("PHLOX_GW_DB_PATH is required when PHLOX_GW_DATABASE_DRIVER=sqlite")
+		}
+	case "postgres":
+		if strings.TrimSpace(database.URL) == "" {
+			return fmt.Errorf("PHLOX_GW_DATABASE_URL is required when PHLOX_GW_DATABASE_DRIVER=postgres")
+		}
+	default:
+		return fmt.Errorf("unsupported PHLOX_GW_DATABASE_DRIVER %q", database.Driver)
+	}
+	return nil
 }
 
 func getenv(key, fallback string) string {

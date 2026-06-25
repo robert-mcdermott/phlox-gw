@@ -97,8 +97,8 @@ Password: admin
 
 Change that password before any shared use.
 
-By default Phlox-GW stores `phlox-gw.db` in the current working directory and listens on
-`127.0.0.1:8080`.
+By default Phlox-GW uses SQLite, stores `phlox-gw.db` in the current working directory,
+and listens on `127.0.0.1:8080`.
 
 ## Production-Oriented Run
 
@@ -111,6 +111,17 @@ export PHLOX_GW_SESSION_SECRET="$(openssl rand -base64 48)"
 
 ./phlox-gw
 ```
+
+SQLite remains the default database. To use Postgres instead, set a database URL:
+
+```bash
+export PHLOX_GW_DATABASE_URL="postgres://phlox_gw:<password>@db.example.com:5432/phlox_gw?sslmode=require"
+
+./phlox-gw
+```
+
+The [Operator Guide](docs/OPERATIONS.md#local-postgres-with-podman) includes a local
+Podman Postgres setup and troubleshooting notes.
 
 For production, put Phlox-GW behind a TLS-terminating reverse proxy or load balancer. The
 application currently serves HTTP directly and expects TLS to be handled at the edge.
@@ -298,8 +309,17 @@ Core environment variables:
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `PHLOX_GW_ADDR` | `127.0.0.1:8080` | HTTP listen address. |
-| `PHLOX_GW_DATA_DIR` | current working directory | Directory containing `phlox-gw.db`. |
+| `PHLOX_GW_DATA_DIR` | current working directory | Directory containing local runtime files and the default SQLite database. |
 | `PHLOX_GW_SESSION_SECRET` | random development secret | HMAC secret for browser sessions. Set this explicitly for shared use. |
+
+Database settings:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `PHLOX_GW_DATABASE_DRIVER` | `sqlite`, or `postgres` when `PHLOX_GW_DATABASE_URL` is set | Database backend. Supports `sqlite` and `postgres`. |
+| `PHLOX_GW_DATABASE_URL` | empty | Postgres connection URL. Setting this enables Postgres when no explicit driver is set. |
+| `PHLOX_GW_DB_PATH` | `<PHLOX_GW_DATA_DIR>/phlox-gw.db` | SQLite database path. |
+| `PHLOX_GW_POSTGRES_DSN` | empty | Legacy alias for `PHLOX_GW_DATABASE_URL`. |
 
 OIDC and Entra ID settings:
 

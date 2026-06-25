@@ -26,9 +26,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	db, err := store.Open(cfg.DBPath)
+	db, err := store.OpenWithOptions(store.OpenOptions{
+		Driver: cfg.Database.Driver,
+		Path:   cfg.Database.Path,
+		URL:    cfg.Database.URL,
+	})
 	if err != nil {
-		logger.Error("open database", "path", cfg.DBPath, "error", err)
+		logger.Error("open database", "driver", cfg.Database.Driver, "target", databaseLogTarget(cfg), "error", err)
 		os.Exit(1)
 	}
 	defer db.Close()
@@ -76,7 +80,7 @@ func main() {
 	}
 
 	go func() {
-		logger.Info("phlox-gw listening", "addr", cfg.Addr, "db", cfg.DBPath)
+		logger.Info("phlox-gw listening", "addr", cfg.Addr, "db_driver", cfg.Database.Driver, "db", databaseLogTarget(cfg))
 		if cfg.UsingDefaultSecret {
 			logger.Warn("using development session secret; set PHLOX_GW_SESSION_SECRET before shared use")
 		}
@@ -96,4 +100,11 @@ func main() {
 		logger.Error("shutdown failed", "error", err)
 		os.Exit(1)
 	}
+}
+
+func databaseLogTarget(cfg config.Config) string {
+	if cfg.Database.Driver == "postgres" {
+		return "postgres"
+	}
+	return cfg.DBPath
 }

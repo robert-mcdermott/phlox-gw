@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	_ "github.com/jackc/pgx/v5/stdlib"
 	_ "modernc.org/sqlite"
 )
 
@@ -17,8 +18,22 @@ var ErrNotFound = errors.New("not found")
 var ErrConflict = errors.New("conflict")
 
 type Store struct {
-	db *sql.DB
+	db      *sql.DB
+	dialect sqlDialect
 }
+
+type OpenOptions struct {
+	Driver string
+	Path   string
+	URL    string
+}
+
+type sqlDialect string
+
+const (
+	dialectSQLite   sqlDialect = "sqlite"
+	dialectPostgres sqlDialect = "postgres"
+)
 
 type User struct {
 	ID           string     `json:"id"`
@@ -346,15 +361,48 @@ type AuditLog struct {
 }
 
 func Open(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", path)
+	return OpenWithOptions(OpenOptions{Driver: string(dialectSQLite), Path: path})
+}
+
+func OpenWithOptions(opts OpenOptions) (*Store, error) {
+	driver := normalizeDriver(opts.Driver)
+	var sqlDriver, dsn string
+	var dialect sqlDialect
+	switch driver {
+	case "", "sqlite", "sqlite3":
+		if strings.TrimSpace(opts.Path) == "" {
+			return nil, errors.New("sqlite database path is required")
+		}
+		sqlDriver = "sqlite"
+		dsn = opts.Path
+		dialect = dialectSQLite
+	case "postgres", "postgresql", "pgx":
+		if strings.TrimSpace(opts.URL) == "" {
+			return nil, errors.New("postgres database URL is required")
+		}
+		sqlDriver = "pgx"
+		dsn = opts.URL
+		dialect = dialectPostgres
+	default:
+		return nil, fmt.Errorf("unsupported database driver %q", opts.Driver)
+	}
+
+	db, err := sql.Open(sqlDriver, dsn)
 	if err != nil {
 		return nil, err
 	}
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
-	db.SetConnMaxLifetime(0)
+	switch dialect {
+	case dialectSQLite:
+		db.SetMaxOpenConns(1)
+		db.SetMaxIdleConns(1)
+		db.SetConnMaxLifetime(0)
+	case dialectPostgres:
+		db.SetMaxOpenConns(25)
+		db.SetMaxIdleConns(25)
+		db.SetConnMaxLifetime(30 * time.Minute)
+	}
 
-	s := &Store{db: db}
+	s := &Store{db: db, dialect: dialect}
 	if err := s.init(context.Background()); err != nil {
 		db.Close()
 		return nil, err
@@ -366,19 +414,137 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
-func (s *Store) init(ctx context.Context) error {
-	pragmas := []string{
-		"PRAGMA journal_mode = WAL",
-		"PRAGMA foreign_keys = ON",
-		"PRAGMA busy_timeout = 5000",
+func normalizeDriver(driver string) string {
+	return strings.ToLower(strings.TrimSpace(driver))
+}
+
+func (s *Store) exec(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	return s.db.ExecContext(ctx, s.rebind(query), args...)
+}
+
+func (s *Store) query(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+	return s.db.QueryContext(ctx, s.rebind(query), args...)
+}
+
+func (s *Store) queryRow(ctx context.Context, query string, args ...any) *sql.Row {
+	return s.db.QueryRowContext(ctx, s.rebind(query), args...)
+}
+
+func (s *Store) txExec(ctx context.Context, tx *sql.Tx, query string, args ...any) (sql.Result, error) {
+	return tx.ExecContext(ctx, s.rebind(query), args...)
+}
+
+func (s *Store) txQueryRow(ctx context.Context, tx *sql.Tx, query string, args ...any) *sql.Row {
+	return tx.QueryRowContext(ctx, s.rebind(query), args...)
+}
+
+func (s *Store) rebind(query string) string {
+	if s.dialect != dialectPostgres {
+		return query
 	}
-	for _, stmt := range pragmas {
-		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
-			return err
+	return rebindPostgres(query)
+}
+
+func rebindPostgres(query string) string {
+	var b strings.Builder
+	b.Grow(len(query) + 8)
+	arg := 1
+	inSingle := false
+	inDouble := false
+	inLineComment := false
+	inBlockComment := false
+
+	for i := 0; i < len(query); i++ {
+		ch := query[i]
+		next := byte(0)
+		if i+1 < len(query) {
+			next = query[i+1]
+		}
+
+		if inLineComment {
+			b.WriteByte(ch)
+			if ch == '\n' {
+				inLineComment = false
+			}
+			continue
+		}
+		if inBlockComment {
+			b.WriteByte(ch)
+			if ch == '*' && next == '/' {
+				b.WriteByte(next)
+				i++
+				inBlockComment = false
+			}
+			continue
+		}
+		if inSingle {
+			b.WriteByte(ch)
+			if ch == '\'' {
+				if next == '\'' {
+					b.WriteByte(next)
+					i++
+					continue
+				}
+				inSingle = false
+			}
+			continue
+		}
+		if inDouble {
+			b.WriteByte(ch)
+			if ch == '"' {
+				if next == '"' {
+					b.WriteByte(next)
+					i++
+					continue
+				}
+				inDouble = false
+			}
+			continue
+		}
+
+		switch {
+		case ch == '-' && next == '-':
+			b.WriteByte(ch)
+			b.WriteByte(next)
+			i++
+			inLineComment = true
+		case ch == '/' && next == '*':
+			b.WriteByte(ch)
+			b.WriteByte(next)
+			i++
+			inBlockComment = true
+		case ch == '\'':
+			b.WriteByte(ch)
+			inSingle = true
+		case ch == '"':
+			b.WriteByte(ch)
+			inDouble = true
+		case ch == '?':
+			b.WriteByte('$')
+			b.WriteString(fmt.Sprint(arg))
+			arg++
+		default:
+			b.WriteByte(ch)
+		}
+	}
+	return b.String()
+}
+
+func (s *Store) init(ctx context.Context) error {
+	if s.dialect == dialectSQLite {
+		pragmas := []string{
+			"PRAGMA journal_mode = WAL",
+			"PRAGMA foreign_keys = ON",
+			"PRAGMA busy_timeout = 5000",
+		}
+		for _, stmt := range pragmas {
+			if _, err := s.exec(ctx, stmt); err != nil {
+				return err
+			}
 		}
 	}
 	for _, stmt := range schema {
-		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
+		if _, err := s.exec(ctx, stmt); err != nil {
 			return err
 		}
 	}
@@ -391,7 +557,7 @@ func (s *Store) migrate(ctx context.Context) error {
 		column string
 		spec   string
 	}{
-		{table: "api_keys", column: "budget_usd", spec: "REAL NOT NULL DEFAULT 0"},
+		{table: "api_keys", column: "budget_usd", spec: "DOUBLE PRECISION NOT NULL DEFAULT 0"},
 		{table: "api_keys", column: "rpm_limit", spec: "INTEGER NOT NULL DEFAULT 0"},
 		{table: "api_keys", column: "tpm_limit", spec: "INTEGER NOT NULL DEFAULT 0"},
 		{table: "api_keys", column: "model_allowlist", spec: "TEXT NOT NULL DEFAULT ''"},
@@ -416,28 +582,45 @@ func (s *Store) migrate(ctx context.Context) error {
 }
 
 func (s *Store) ensureColumn(ctx context.Context, table, column, spec string) error {
-	rows, err := s.db.QueryContext(ctx, "PRAGMA table_info("+table+")")
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var cid int
-		var name, typ string
-		var notNull int
-		var defaultValue any
-		var pk int
-		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+	switch s.dialect {
+	case dialectSQLite:
+		rows, err := s.query(ctx, "PRAGMA table_info("+table+")")
+		if err != nil {
 			return err
 		}
-		if name == column {
-			return rows.Err()
+		defer rows.Close()
+		for rows.Next() {
+			var cid int
+			var name, typ string
+			var notNull int
+			var defaultValue any
+			var pk int
+			if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+				return err
+			}
+			if name == column {
+				return rows.Err()
+			}
 		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+	case dialectPostgres:
+		var count int
+		if err := s.queryRow(ctx, `
+			SELECT COUNT(*)
+			FROM information_schema.columns
+			WHERE table_schema = current_schema() AND table_name = ? AND column_name = ?`,
+			table, column).Scan(&count); err != nil {
+			return err
+		}
+		if count > 0 {
+			return nil
+		}
+	default:
+		return fmt.Errorf("unsupported database dialect %q", s.dialect)
 	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	_, err = s.db.ExecContext(ctx, "ALTER TABLE "+table+" ADD COLUMN "+column+" "+spec)
+	_, err := s.exec(ctx, "ALTER TABLE "+table+" ADD COLUMN "+column+" "+spec)
 	return err
 }
 
@@ -445,11 +628,11 @@ func (s *Store) EnsureSeedData(adminPasswordHash string) error {
 	ctx := context.Background()
 	now := time.Now().UTC()
 	var count int
-	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM users").Scan(&count); err != nil {
+	if err := s.queryRow(ctx, "SELECT COUNT(*) FROM users").Scan(&count); err != nil {
 		return err
 	}
 	if count == 0 {
-		if _, err := s.db.ExecContext(ctx, `
+		if _, err := s.exec(ctx, `
 			INSERT INTO users (id, username, email, display_name, department, role, password_hash, auth_provider, is_active, created_at, updated_at)
 			VALUES (?, 'admin', 'admin@localhost', 'Administrator', 'IT', 'admin', ?, 'local', 1, ?, ?)`,
 			"user_admin", adminPasswordHash, formatTime(now), formatTime(now)); err != nil {
@@ -464,9 +647,10 @@ func (s *Store) EnsureSeedData(adminPasswordHash string) error {
 		{ID: "bedrock", Name: "AWS Bedrock", Type: "bedrock", BaseURL: "", AWSRegion: "us-east-1", Enabled: false},
 	}
 	for _, p := range seeds {
-		if _, err := s.db.ExecContext(ctx, `
-			INSERT OR IGNORE INTO providers (id, name, type, base_url, api_key, api_key_env, aws_region, enabled, created_at, updated_at)
-			VALUES (?, ?, ?, ?, '', ?, ?, ?, ?, ?)`,
+		if _, err := s.exec(ctx, `
+			INSERT INTO providers (id, name, type, base_url, api_key, api_key_env, aws_region, enabled, created_at, updated_at)
+			VALUES (?, ?, ?, ?, '', ?, ?, ?, ?, ?)
+			ON CONFLICT DO NOTHING`,
 			p.ID, p.Name, p.Type, p.BaseURL, p.APIKeyEnv, p.AWSRegion, boolInt(p.Enabled), formatTime(now), formatTime(now)); err != nil {
 			return err
 		}
@@ -478,9 +662,10 @@ func (s *Store) EnsureSeedData(adminPasswordHash string) error {
 		{ID: "model_anthropic_sonnet", ProviderID: "anthropic", ModelID: "claude-3-5-sonnet-latest", Route: "anthropic/claude-3-5-sonnet-latest", DisplayName: "Claude Sonnet", Enabled: false, SupportsStreaming: true},
 	}
 	for _, m := range models {
-		if _, err := s.db.ExecContext(ctx, `
-			INSERT OR IGNORE INTO models (id, provider_id, model_id, route, display_name, input_cost_per_million, output_cost_per_million, context_window, supports_streaming, enabled, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, 0, 0, 0, ?, ?, ?, ?)`,
+		if _, err := s.exec(ctx, `
+			INSERT INTO models (id, provider_id, model_id, route, display_name, input_cost_per_million, output_cost_per_million, context_window, supports_streaming, enabled, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, 0, 0, 0, ?, ?, ?, ?)
+			ON CONFLICT DO NOTHING`,
 			m.ID, m.ProviderID, m.ModelID, m.Route, m.DisplayName, boolInt(m.SupportsStreaming), boolInt(m.Enabled), formatTime(now), formatTime(now)); err != nil {
 			return err
 		}
@@ -489,22 +674,22 @@ func (s *Store) EnsureSeedData(adminPasswordHash string) error {
 }
 
 func (s *Store) GetUserByUsername(ctx context.Context, username string) (User, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id, username, email, display_name, department, role, password_hash, auth_provider, is_active, created_at, updated_at, last_login_at FROM users WHERE username = ?`, username)
+	row := s.queryRow(ctx, `SELECT id, username, email, display_name, department, role, password_hash, auth_provider, is_active, created_at, updated_at, last_login_at FROM users WHERE username = ?`, username)
 	return scanUser(row)
 }
 
 func (s *Store) GetUserByID(ctx context.Context, id string) (User, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id, username, email, display_name, department, role, password_hash, auth_provider, is_active, created_at, updated_at, last_login_at FROM users WHERE id = ?`, id)
+	row := s.queryRow(ctx, `SELECT id, username, email, display_name, department, role, password_hash, auth_provider, is_active, created_at, updated_at, last_login_at FROM users WHERE id = ?`, id)
 	return scanUser(row)
 }
 
 func (s *Store) TouchLogin(ctx context.Context, userID string, t time.Time) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE users SET last_login_at = ?, updated_at = ? WHERE id = ?`, formatTime(t), formatTime(t), userID)
+	_, err := s.exec(ctx, `UPDATE users SET last_login_at = ?, updated_at = ? WHERE id = ?`, formatTime(t), formatTime(t), userID)
 	return err
 }
 
 func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, username, email, display_name, department, role, password_hash, auth_provider, is_active, created_at, updated_at, last_login_at FROM users ORDER BY username`)
+	rows, err := s.query(ctx, `SELECT id, username, email, display_name, department, role, password_hash, auth_provider, is_active, created_at, updated_at, last_login_at FROM users ORDER BY username`)
 	if err != nil {
 		return nil, err
 	}
@@ -522,7 +707,7 @@ func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
 
 func (s *Store) CreateUser(ctx context.Context, u User) error {
 	now := time.Now().UTC()
-	_, err := s.db.ExecContext(ctx, `
+	_, err := s.exec(ctx, `
 		INSERT INTO users (id, username, email, display_name, department, role, password_hash, auth_provider, is_active, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		u.ID, u.Username, u.Email, u.DisplayName, u.Department, u.Role, u.PasswordHash, valueOr(u.AuthProvider, "local"), boolInt(u.IsActive), formatTime(now), formatTime(now))
@@ -534,7 +719,7 @@ func (s *Store) CreateUser(ctx context.Context, u User) error {
 
 func (s *Store) UpdateUser(ctx context.Context, u User) error {
 	now := time.Now().UTC()
-	res, err := s.db.ExecContext(ctx, `
+	res, err := s.exec(ctx, `
 		UPDATE users
 		SET email = ?, display_name = ?, department = ?, role = ?, is_active = ?, updated_at = ?
 		WHERE id = ?`,
@@ -551,7 +736,7 @@ func (s *Store) UpdateUser(ctx context.Context, u User) error {
 
 func (s *Store) UpdateFederatedUser(ctx context.Context, u User) error {
 	now := time.Now().UTC()
-	res, err := s.db.ExecContext(ctx, `
+	res, err := s.exec(ctx, `
 		UPDATE users
 		SET email = ?, display_name = ?, department = ?, role = ?, auth_provider = ?, updated_at = ?
 		WHERE id = ?`,
@@ -568,7 +753,7 @@ func (s *Store) UpdateFederatedUser(ctx context.Context, u User) error {
 
 func (s *Store) SetUserPassword(ctx context.Context, userID, passwordHash string) error {
 	now := time.Now().UTC()
-	res, err := s.db.ExecContext(ctx, `UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?`, passwordHash, formatTime(now), userID)
+	res, err := s.exec(ctx, `UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?`, passwordHash, formatTime(now), userID)
 	if err != nil {
 		return err
 	}
@@ -585,13 +770,13 @@ func (s *Store) DeleteUser(ctx context.Context, userID string) error {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `DELETE FROM budgets WHERE scope_type = 'user' AND scope_value = ?`, userID); err != nil {
+	if _, err := s.txExec(ctx, tx, `DELETE FROM budgets WHERE scope_type = 'user' AND scope_value = ?`, userID); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM rate_limits WHERE scope_type = 'user' AND scope_value = ?`, userID); err != nil {
+	if _, err := s.txExec(ctx, tx, `DELETE FROM rate_limits WHERE scope_type = 'user' AND scope_value = ?`, userID); err != nil {
 		return err
 	}
-	res, err := tx.ExecContext(ctx, `DELETE FROM users WHERE id = ?`, userID)
+	res, err := s.txExec(ctx, tx, `DELETE FROM users WHERE id = ?`, userID)
 	if err != nil {
 		return err
 	}
@@ -603,7 +788,7 @@ func (s *Store) DeleteUser(ctx context.Context, userID string) error {
 }
 
 func (s *Store) ListAPIKeys(ctx context.Context, userID string) ([]APIKey, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT `+apiKeyColumns+` FROM api_keys WHERE user_id = ? ORDER BY created_at DESC`, userID)
+	rows, err := s.query(ctx, `SELECT `+apiKeyColumns+` FROM api_keys WHERE user_id = ? ORDER BY created_at DESC`, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -621,12 +806,16 @@ func (s *Store) ListAPIKeys(ctx context.Context, userID string) ([]APIKey, error
 
 func (s *Store) ListAllAPIKeys(ctx context.Context) ([]AdminAPIKey, error) {
 	start, end := monthBounds(time.Now().UTC())
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT `+apiKeyColumnsAliased+`, u.username, u.department, COALESCE(SUM(l.cost_usd), 0)
+	rows, err := s.query(ctx, `
+		SELECT `+apiKeyColumnsAliased+`, u.username, u.department, COALESCE(spend.monthly_spend_usd, 0)
 		FROM api_keys k
 		JOIN users u ON u.id = k.user_id
-		LEFT JOIN usage_ledger l ON l.api_key_id = k.id AND l.created_at >= ? AND l.created_at < ?
-		GROUP BY k.id
+		LEFT JOIN (
+			SELECT api_key_id, SUM(cost_usd) AS monthly_spend_usd
+			FROM usage_ledger
+			WHERE created_at >= ? AND created_at < ?
+			GROUP BY api_key_id
+		) spend ON spend.api_key_id = k.id
 		ORDER BY k.created_at DESC`, formatTime(start), formatTime(end))
 	if err != nil {
 		return nil, err
@@ -650,7 +839,7 @@ func (s *Store) CreateAPIKey(ctx context.Context, k APIKey) error {
 	if k.ExpiresAt != nil {
 		expires = formatTime(*k.ExpiresAt)
 	}
-	_, err := s.db.ExecContext(ctx, `
+	_, err := s.exec(ctx, `
 		INSERT INTO api_keys (id, user_id, name, prefix, key_hash, is_active, expires_at, created_at, budget_usd, rpm_limit, tpm_limit, model_allowlist)
 		VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)`,
 		k.ID, k.UserID, k.Name, k.Prefix, k.KeyHash, expires, formatTime(now), k.BudgetUSD, k.RPMLimit, k.TPMLimit, k.ModelAllowlist)
@@ -665,7 +854,7 @@ func (s *Store) UpdateAPIKeySelf(ctx context.Context, k APIKey) error {
 	if k.ExpiresAt != nil {
 		expires = formatTime(*k.ExpiresAt)
 	}
-	res, err := s.db.ExecContext(ctx, `
+	res, err := s.exec(ctx, `
 		UPDATE api_keys
 		SET name = ?, expires_at = ?
 		WHERE id = ? AND user_id = ? AND is_active = 1`,
@@ -681,7 +870,7 @@ func (s *Store) UpdateAPIKeySelf(ctx context.Context, k APIKey) error {
 }
 
 func (s *Store) RotateAPIKey(ctx context.Context, userID, keyID, prefix, hash string) error {
-	res, err := s.db.ExecContext(ctx, `
+	res, err := s.exec(ctx, `
 		UPDATE api_keys
 		SET prefix = ?, key_hash = ?, last_used_at = NULL
 		WHERE id = ? AND user_id = ? AND is_active = 1`,
@@ -697,7 +886,7 @@ func (s *Store) RotateAPIKey(ctx context.Context, userID, keyID, prefix, hash st
 }
 
 func (s *Store) RotateAPIKeyAdmin(ctx context.Context, keyID, prefix, hash string) error {
-	res, err := s.db.ExecContext(ctx, `
+	res, err := s.exec(ctx, `
 		UPDATE api_keys
 		SET prefix = ?, key_hash = ?, last_used_at = NULL
 		WHERE id = ? AND is_active = 1`,
@@ -713,7 +902,7 @@ func (s *Store) RotateAPIKeyAdmin(ctx context.Context, keyID, prefix, hash strin
 }
 
 func (s *Store) RevokeAPIKey(ctx context.Context, userID, keyID string) error {
-	res, err := s.db.ExecContext(ctx, `UPDATE api_keys SET is_active = 0 WHERE id = ? AND user_id = ?`, keyID, userID)
+	res, err := s.exec(ctx, `UPDATE api_keys SET is_active = 0 WHERE id = ? AND user_id = ?`, keyID, userID)
 	if err != nil {
 		return err
 	}
@@ -725,7 +914,7 @@ func (s *Store) RevokeAPIKey(ctx context.Context, userID, keyID string) error {
 }
 
 func (s *Store) RevokeAPIKeyAdmin(ctx context.Context, keyID string) error {
-	res, err := s.db.ExecContext(ctx, `UPDATE api_keys SET is_active = 0 WHERE id = ?`, keyID)
+	res, err := s.exec(ctx, `UPDATE api_keys SET is_active = 0 WHERE id = ?`, keyID)
 	if err != nil {
 		return err
 	}
@@ -741,7 +930,7 @@ func (s *Store) UpdateAPIKeyControls(ctx context.Context, k APIKey) error {
 	if k.ExpiresAt != nil {
 		expires = formatTime(*k.ExpiresAt)
 	}
-	res, err := s.db.ExecContext(ctx, `
+	res, err := s.exec(ctx, `
 		UPDATE api_keys
 		SET name = ?, is_active = ?, expires_at = ?, budget_usd = ?, rpm_limit = ?, tpm_limit = ?, model_allowlist = ?
 		WHERE id = ?`,
@@ -757,7 +946,7 @@ func (s *Store) UpdateAPIKeyControls(ctx context.Context, k APIKey) error {
 }
 
 func (s *Store) ResolveAPIKey(ctx context.Context, hash string, now time.Time) (User, APIKey, error) {
-	row := s.db.QueryRowContext(ctx, `
+	row := s.queryRow(ctx, `
 		SELECT `+apiKeyColumnsAliased+`,
 		       u.id, u.username, u.email, u.display_name, u.department, u.role, u.password_hash, u.auth_provider, u.is_active, u.created_at, u.updated_at, u.last_login_at
 		FROM api_keys k
@@ -774,26 +963,26 @@ func (s *Store) ResolveAPIKey(ctx context.Context, hash string, now time.Time) (
 	if k.ExpiresAt != nil && !k.ExpiresAt.After(now) {
 		return User{}, APIKey{}, ErrNotFound
 	}
-	_, _ = s.db.ExecContext(ctx, `UPDATE api_keys SET last_used_at = ? WHERE id = ?`, formatTime(now), k.ID)
+	_, _ = s.exec(ctx, `UPDATE api_keys SET last_used_at = ? WHERE id = ?`, formatTime(now), k.ID)
 	return u, k, nil
 }
 
 func (s *Store) APIKeyMonthlySpend(ctx context.Context, keyID string, start, end time.Time) (float64, error) {
 	var spend float64
-	err := s.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(cost_usd), 0) FROM usage_ledger WHERE api_key_id = ? AND created_at >= ? AND created_at < ?`,
+	err := s.queryRow(ctx, `SELECT COALESCE(SUM(cost_usd), 0) FROM usage_ledger WHERE api_key_id = ? AND created_at >= ? AND created_at < ?`,
 		keyID, formatTime(start), formatTime(end)).Scan(&spend)
 	return roundCost(spend), err
 }
 
 func (s *Store) APIKeyWindowUsage(ctx context.Context, keyID string, since time.Time) (APIKeyWindowUsage, error) {
 	var usage APIKeyWindowUsage
-	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(total_tokens), 0) FROM usage_ledger WHERE api_key_id = ? AND created_at >= ?`,
+	err := s.queryRow(ctx, `SELECT COUNT(*), COALESCE(SUM(total_tokens), 0) FROM usage_ledger WHERE api_key_id = ? AND created_at >= ?`,
 		keyID, formatTime(since)).Scan(&usage.Requests, &usage.TotalTokens)
 	return usage, err
 }
 
 func (s *Store) ListProviders(ctx context.Context) ([]Provider, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT `+providerColumns+` FROM providers ORDER BY name`)
+	rows, err := s.query(ctx, `SELECT `+providerColumns+` FROM providers ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
@@ -810,12 +999,12 @@ func (s *Store) ListProviders(ctx context.Context) ([]Provider, error) {
 }
 
 func (s *Store) GetProvider(ctx context.Context, id string) (Provider, error) {
-	return scanProvider(s.db.QueryRowContext(ctx, `SELECT `+providerColumns+` FROM providers WHERE id = ?`, id))
+	return scanProvider(s.queryRow(ctx, `SELECT `+providerColumns+` FROM providers WHERE id = ?`, id))
 }
 
 func (s *Store) CreateProvider(ctx context.Context, p Provider) error {
 	now := time.Now().UTC()
-	_, err := s.db.ExecContext(ctx, `
+	_, err := s.exec(ctx, `
 		INSERT INTO providers (id, name, type, base_url, api_key, api_key_env, aws_region, enabled, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		p.ID, p.Name, p.Type, p.BaseURL, p.APIKey, p.APIKeyEnv, p.AWSRegion, boolInt(p.Enabled), formatTime(now), formatTime(now))
@@ -830,13 +1019,13 @@ func (s *Store) UpdateProvider(ctx context.Context, p Provider, updateAPIKey boo
 	var res sql.Result
 	var err error
 	if updateAPIKey {
-		res, err = s.db.ExecContext(ctx, `
+		res, err = s.exec(ctx, `
 			UPDATE providers
 			SET name = ?, type = ?, base_url = ?, api_key = ?, api_key_env = ?, aws_region = ?, enabled = ?, updated_at = ?
 			WHERE id = ?`,
 			p.Name, p.Type, p.BaseURL, p.APIKey, p.APIKeyEnv, p.AWSRegion, boolInt(p.Enabled), formatTime(now), p.ID)
 	} else {
-		res, err = s.db.ExecContext(ctx, `
+		res, err = s.exec(ctx, `
 			UPDATE providers
 			SET name = ?, type = ?, base_url = ?, api_key_env = ?, aws_region = ?, enabled = ?, updated_at = ?
 			WHERE id = ?`,
@@ -853,7 +1042,7 @@ func (s *Store) UpdateProvider(ctx context.Context, p Provider, updateAPIKey boo
 }
 
 func (s *Store) RecordProviderSuccess(ctx context.Context, providerID string, now time.Time) error {
-	res, err := s.db.ExecContext(ctx, `
+	res, err := s.exec(ctx, `
 		UPDATE providers
 		SET health_status = 'healthy', consecutive_failures = 0, last_error = '', circuit_open_until = NULL,
 		    last_health_check_at = ?, updated_at = ?
@@ -883,7 +1072,7 @@ func (s *Store) RecordProviderFailure(ctx context.Context, providerID string, th
 	defer tx.Rollback()
 
 	var failures int
-	err = tx.QueryRowContext(ctx, `SELECT consecutive_failures FROM providers WHERE id = ?`, providerID).Scan(&failures)
+	err = s.txQueryRow(ctx, tx, `SELECT consecutive_failures FROM providers WHERE id = ?`, providerID).Scan(&failures)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Provider{}, ErrNotFound
 	}
@@ -897,7 +1086,7 @@ func (s *Store) RecordProviderFailure(ctx context.Context, providerID string, th
 		status = "down"
 		circuit = formatTime(now.Add(cooldown))
 	}
-	if _, err := tx.ExecContext(ctx, `
+	if _, err := s.txExec(ctx, tx, `
 		UPDATE providers
 		SET health_status = ?, consecutive_failures = ?, last_error = ?, circuit_open_until = ?,
 		    last_health_check_at = ?, updated_at = ?
@@ -917,17 +1106,17 @@ func (s *Store) DeleteProvider(ctx context.Context, id string) error {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `DELETE FROM rate_limits WHERE scope_type = 'provider' AND scope_value = ?`, id); err != nil {
+	if _, err := s.txExec(ctx, tx, `DELETE FROM rate_limits WHERE scope_type = 'provider' AND scope_value = ?`, id); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM rate_limits WHERE scope_type = 'model' AND scope_value IN (
+	if _, err := s.txExec(ctx, tx, `DELETE FROM rate_limits WHERE scope_type = 'model' AND scope_value IN (
 		SELECT route FROM models WHERE provider_id = ?
 		UNION SELECT model_id FROM models WHERE provider_id = ?
 		UNION SELECT id FROM models WHERE provider_id = ?
 	)`, id, id, id); err != nil {
 		return err
 	}
-	res, err := tx.ExecContext(ctx, `DELETE FROM providers WHERE id = ?`, id)
+	res, err := s.txExec(ctx, tx, `DELETE FROM providers WHERE id = ?`, id)
 	if err != nil {
 		return err
 	}
@@ -944,7 +1133,7 @@ func (s *Store) ListModels(ctx context.Context, includeDisabled bool) ([]Model, 
 		query += ` WHERE enabled = 1`
 	}
 	query += ` ORDER BY provider_id, model_id`
-	rows, err := s.db.QueryContext(ctx, query)
+	rows, err := s.query(ctx, query)
 	if err != nil {
 		return nil, err
 	}
@@ -962,7 +1151,7 @@ func (s *Store) ListModels(ctx context.Context, includeDisabled bool) ([]Model, 
 
 func (s *Store) CreateModel(ctx context.Context, m Model) error {
 	now := time.Now().UTC()
-	_, err := s.db.ExecContext(ctx, `
+	_, err := s.exec(ctx, `
 		INSERT INTO models
 		(id, provider_id, model_id, route, display_name, input_cost_per_million, output_cost_per_million, context_window,
 		 supports_streaming, enabled, fallback_routes, weighted_routes, retry_attempts, request_timeout_ms, health_routing_enabled, created_at, updated_at)
@@ -977,7 +1166,7 @@ func (s *Store) CreateModel(ctx context.Context, m Model) error {
 
 func (s *Store) UpdateModel(ctx context.Context, m Model) error {
 	now := time.Now().UTC()
-	res, err := s.db.ExecContext(ctx, `
+	res, err := s.exec(ctx, `
 		UPDATE models
 		SET provider_id = ?, model_id = ?, route = ?, display_name = ?, input_cost_per_million = ?, output_cost_per_million = ?,
 		    context_window = ?, supports_streaming = ?, enabled = ?, fallback_routes = ?, weighted_routes = ?, retry_attempts = ?, request_timeout_ms = ?,
@@ -1009,10 +1198,10 @@ func (s *Store) DeleteModel(ctx context.Context, id string) error {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `DELETE FROM rate_limits WHERE scope_type = 'model' AND scope_value IN (?, ?, ?)`, route.Model.Route, route.Model.ModelID, route.Model.ID); err != nil {
+	if _, err := s.txExec(ctx, tx, `DELETE FROM rate_limits WHERE scope_type = 'model' AND scope_value IN (?, ?, ?)`, route.Model.Route, route.Model.ModelID, route.Model.ID); err != nil {
 		return err
 	}
-	res, err := tx.ExecContext(ctx, `DELETE FROM models WHERE id = ?`, id)
+	res, err := s.txExec(ctx, tx, `DELETE FROM models WHERE id = ?`, id)
 	if err != nil {
 		return err
 	}
@@ -1028,7 +1217,7 @@ func (s *Store) ResolveModelByID(ctx context.Context, id string, requireEnabled 
 	if requireEnabled {
 		query += ` AND m.enabled = 1 AND p.enabled = 1`
 	}
-	return scanRoutedModel(s.db.QueryRowContext(ctx, query, id))
+	return scanRoutedModel(s.queryRow(ctx, query, id))
 }
 
 func (s *Store) ResolveModel(ctx context.Context, requested string) (RoutedModel, error) {
@@ -1038,9 +1227,9 @@ func (s *Store) ResolveModel(ctx context.Context, requested string) (RoutedModel
 	}
 	var row *sql.Row
 	if strings.Contains(requested, "/") {
-		row = s.db.QueryRowContext(ctx, routedModelQuery+` WHERE m.route = ? AND m.enabled = 1 AND p.enabled = 1`, requested)
+		row = s.queryRow(ctx, routedModelQuery+` WHERE m.route = ? AND m.enabled = 1 AND p.enabled = 1`, requested)
 	} else {
-		rows, err := s.db.QueryContext(ctx, routedModelQuery+` WHERE m.model_id = ? AND m.enabled = 1 AND p.enabled = 1`, requested)
+		rows, err := s.query(ctx, routedModelQuery+` WHERE m.model_id = ? AND m.enabled = 1 AND p.enabled = 1`, requested)
 		if err != nil {
 			return RoutedModel{}, err
 		}
@@ -1090,7 +1279,7 @@ func (s *Store) ResolveModelCandidates(ctx context.Context, requested string) ([
 }
 
 func (s *Store) ListBudgets(ctx context.Context) ([]Budget, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, scope_type, scope_value, limit_usd, warn_pct, is_active, created_at, updated_at FROM budgets ORDER BY scope_type, scope_value`)
+	rows, err := s.query(ctx, `SELECT id, scope_type, scope_value, limit_usd, warn_pct, is_active, created_at, updated_at FROM budgets ORDER BY scope_type, scope_value`)
 	if err != nil {
 		return nil, err
 	}
@@ -1108,7 +1297,7 @@ func (s *Store) ListBudgets(ctx context.Context) ([]Budget, error) {
 
 func (s *Store) CreateBudget(ctx context.Context, b Budget) error {
 	now := time.Now().UTC()
-	_, err := s.db.ExecContext(ctx, `
+	_, err := s.exec(ctx, `
 		INSERT INTO budgets (id, scope_type, scope_value, limit_usd, warn_pct, is_active, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		b.ID, b.ScopeType, b.ScopeValue, b.LimitUSD, b.WarnPct, boolInt(b.IsActive), formatTime(now), formatTime(now))
@@ -1119,7 +1308,7 @@ func (s *Store) CreateBudget(ctx context.Context, b Budget) error {
 }
 
 func (s *Store) DeleteBudget(ctx context.Context, id string) error {
-	res, err := s.db.ExecContext(ctx, `DELETE FROM budgets WHERE id = ?`, id)
+	res, err := s.exec(ctx, `DELETE FROM budgets WHERE id = ?`, id)
 	if err != nil {
 		return err
 	}
@@ -1132,7 +1321,7 @@ func (s *Store) DeleteBudget(ctx context.Context, id string) error {
 
 func (s *Store) UpdateBudget(ctx context.Context, b Budget) error {
 	now := time.Now().UTC()
-	res, err := s.db.ExecContext(ctx, `
+	res, err := s.exec(ctx, `
 		UPDATE budgets
 		SET scope_type = ?, scope_value = ?, limit_usd = ?, warn_pct = ?, is_active = ?, updated_at = ?
 		WHERE id = ?`,
@@ -1151,7 +1340,7 @@ func (s *Store) UpdateBudget(ctx context.Context, b Budget) error {
 }
 
 func (s *Store) ListRateLimits(ctx context.Context) ([]RateLimit, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, scope_type, scope_value, rpm_limit, tpm_limit, is_active, created_at, updated_at FROM rate_limits ORDER BY scope_type, scope_value`)
+	rows, err := s.query(ctx, `SELECT id, scope_type, scope_value, rpm_limit, tpm_limit, is_active, created_at, updated_at FROM rate_limits ORDER BY scope_type, scope_value`)
 	if err != nil {
 		return nil, err
 	}
@@ -1168,7 +1357,7 @@ func (s *Store) ListRateLimits(ctx context.Context) ([]RateLimit, error) {
 }
 
 func (s *Store) ApplicableRateLimits(ctx context.Context, u User, route RoutedModel) ([]RateLimit, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.query(ctx, `
 		SELECT id, scope_type, scope_value, rpm_limit, tpm_limit, is_active, created_at, updated_at
 		FROM rate_limits
 		WHERE is_active = 1 AND (
@@ -1196,7 +1385,7 @@ func (s *Store) ApplicableRateLimits(ctx context.Context, u User, route RoutedMo
 
 func (s *Store) CreateRateLimit(ctx context.Context, rl RateLimit) error {
 	now := time.Now().UTC()
-	_, err := s.db.ExecContext(ctx, `
+	_, err := s.exec(ctx, `
 		INSERT INTO rate_limits (id, scope_type, scope_value, rpm_limit, tpm_limit, is_active, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		rl.ID, rl.ScopeType, rl.ScopeValue, rl.RPMLimit, rl.TPMLimit, boolInt(rl.IsActive), formatTime(now), formatTime(now))
@@ -1208,7 +1397,7 @@ func (s *Store) CreateRateLimit(ctx context.Context, rl RateLimit) error {
 
 func (s *Store) UpdateRateLimit(ctx context.Context, rl RateLimit) error {
 	now := time.Now().UTC()
-	res, err := s.db.ExecContext(ctx, `
+	res, err := s.exec(ctx, `
 		UPDATE rate_limits
 		SET scope_type = ?, scope_value = ?, rpm_limit = ?, tpm_limit = ?, is_active = ?, updated_at = ?
 		WHERE id = ?`,
@@ -1227,7 +1416,7 @@ func (s *Store) UpdateRateLimit(ctx context.Context, rl RateLimit) error {
 }
 
 func (s *Store) DeleteRateLimit(ctx context.Context, id string) error {
-	res, err := s.db.ExecContext(ctx, `DELETE FROM rate_limits WHERE id = ?`, id)
+	res, err := s.exec(ctx, `DELETE FROM rate_limits WHERE id = ?`, id)
 	if err != nil {
 		return err
 	}
@@ -1244,7 +1433,7 @@ func (s *Store) RateLimitWindowUsage(ctx context.Context, rl RateLimit, since ti
 		return RateLimitWindowUsage{}, nil
 	}
 	var usage RateLimitWindowUsage
-	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(total_tokens), 0) FROM usage_ledger WHERE `+field+` = ? AND created_at >= ?`,
+	err := s.queryRow(ctx, `SELECT COUNT(*), COALESCE(SUM(total_tokens), 0) FROM usage_ledger WHERE `+field+` = ? AND created_at >= ?`,
 		rl.ScopeValue, formatTime(since)).Scan(&usage.Requests, &usage.TotalTokens)
 	return usage, err
 }
@@ -1269,7 +1458,7 @@ func DefaultGuardrailPolicy() GuardrailPolicy {
 }
 
 func (s *Store) GetGuardrailPolicy(ctx context.Context) (GuardrailPolicy, error) {
-	row := s.db.QueryRowContext(ctx, `
+	row := s.queryRow(ctx, `
 		SELECT id, enabled, input_action, output_action, detect_email, detect_phone, detect_ssn, detect_credit_card, detect_api_key,
 		       custom_patterns, redaction_text, streaming_block_mode, created_at, updated_at
 		FROM guardrail_policies
@@ -1295,7 +1484,7 @@ func (s *Store) UpdateGuardrailPolicy(ctx context.Context, p GuardrailPolicy) (G
 	if created.IsZero() {
 		created = now
 	}
-	_, err = s.db.ExecContext(ctx, `
+	_, err = s.exec(ctx, `
 		INSERT INTO guardrail_policies
 		(id, enabled, input_action, output_action, detect_email, detect_phone, detect_ssn, detect_credit_card, detect_api_key,
 		 custom_patterns, redaction_text, streaming_block_mode, created_at, updated_at)
@@ -1325,7 +1514,7 @@ func (s *Store) BudgetStatus(ctx context.Context, u User, pricedOnly bool) (Budg
 	if !pricedOnly {
 		return BudgetStatus{}, nil
 	}
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.query(ctx, `
 		SELECT id, scope_type, scope_value, limit_usd, warn_pct, is_active, created_at, updated_at
 		FROM budgets
 		WHERE is_active = 1 AND (
@@ -1386,10 +1575,11 @@ func (s *Store) InsertUsage(ctx context.Context, r UsageRecord) error {
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
-	_, err := s.db.ExecContext(ctx, `
-		INSERT OR IGNORE INTO usage_ledger
+	_, err := s.exec(ctx, `
+		INSERT INTO usage_ledger
 		(id, request_id, user_id, username, department, api_key_id, provider_id, model, protocol, input_tokens, output_tokens, total_tokens, cost_usd, latency_ms, status_code, error_text, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT DO NOTHING`,
 		r.ID, r.RequestID, r.UserID, r.Username, r.Department, r.APIKeyID, r.ProviderID, r.Model, r.Protocol,
 		r.InputTokens, r.OutputTokens, r.TotalTokens, r.CostUSD, r.LatencyMS, r.StatusCode, r.ErrorText, formatTime(now))
 	return err
@@ -1481,7 +1671,7 @@ func (s *Store) UsageTimeSeries(ctx context.Context, days int, now time.Time) ([
 		byDate[day] = &points[i]
 	}
 
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.query(ctx, `
 		SELECT substr(created_at, 1, 10) AS day,
 		       COUNT(*) AS requests,
 		       COALESCE(SUM(CASE WHEN status_code >= 400 OR error_text <> '' THEN 1 ELSE 0 END), 0) AS errors,
@@ -1569,7 +1759,7 @@ func (s *Store) usageDrilldownRows(ctx context.Context, dimension string, start 
 	default:
 		return nil, fmt.Errorf("unsupported drilldown dimension %q", dimension)
 	}
-	rows, err := s.db.QueryContext(ctx, query, formatTime(start))
+	rows, err := s.query(ctx, query, formatTime(start))
 	if err != nil {
 		return nil, err
 	}
@@ -1596,7 +1786,7 @@ func (s *Store) usageDrilldownRows(ctx context.Context, dimension string, start 
 }
 
 func (s *Store) UsageExport(ctx context.Context) ([]UsageExportRow, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.query(ctx, `
 		SELECT created_at, request_id, username, department, api_key_id, provider_id, model, protocol,
 		       input_tokens, output_tokens, total_tokens, cost_usd, latency_ms, status_code, error_text
 		FROM usage_ledger
@@ -1626,12 +1816,13 @@ func (s *Store) InsertRequestLog(ctx context.Context, r RequestLogRecord) error 
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
-	_, err := s.db.ExecContext(ctx, `
-		INSERT OR IGNORE INTO request_log
+	_, err := s.exec(ctx, `
+		INSERT INTO request_log
 		(id, request_id, user_id, username, department, api_key_id, api_key_prefix, api_key_name, provider_id, provider_type,
 		 model_route, upstream_model_id, protocol, method, endpoint, streaming, input_tokens, output_tokens, total_tokens, cost_usd,
 		 latency_ms, status_code, error_text, client_ip, user_agent, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT DO NOTHING`,
 		r.ID, r.RequestID, r.UserID, r.Username, r.Department, r.APIKeyID, r.APIKeyPrefix, r.APIKeyName, r.ProviderID, r.ProviderType,
 		r.ModelRoute, r.UpstreamModelID, r.Protocol, r.Method, r.Endpoint, boolInt(r.Streaming), r.InputTokens, r.OutputTokens, r.TotalTokens, r.CostUSD,
 		r.LatencyMS, r.StatusCode, limitProviderError(r.ErrorText), r.ClientIP, r.UserAgent, formatTime(now))
@@ -1645,12 +1836,12 @@ func (s *Store) SearchRequestLogs(ctx context.Context, q RequestLogQuery) (Reque
 	}
 	where, args := requestLogWhere(q)
 	var total int64
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM request_log `+where, args...).Scan(&total); err != nil {
+	if err := s.queryRow(ctx, `SELECT COUNT(*) FROM request_log `+where, args...).Scan(&total); err != nil {
 		return RequestLogSearchResult{}, err
 	}
 	queryArgs := append([]any{}, args...)
 	queryArgs = append(queryArgs, q.Limit, q.Offset)
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.query(ctx, `
 		SELECT id, request_id, user_id, username, department, api_key_id, api_key_prefix, api_key_name, provider_id, provider_type,
 		       model_route, upstream_model_id, protocol, method, endpoint, streaming, input_tokens, output_tokens, total_tokens, cost_usd,
 		       latency_ms, status_code, error_text, client_ip, user_agent, created_at
@@ -1680,7 +1871,7 @@ func (s *Store) RequestLogExport(ctx context.Context, q RequestLogQuery) ([]Requ
 	q.Offset = 0
 	where, args := requestLogWhere(q)
 	args = append(args, q.Limit)
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.query(ctx, `
 		SELECT id, request_id, user_id, username, department, api_key_id, api_key_prefix, api_key_name, provider_id, provider_type,
 		       model_route, upstream_model_id, protocol, method, endpoint, streaming, input_tokens, output_tokens, total_tokens, cost_usd,
 		       latency_ms, status_code, error_text, client_ip, user_agent, created_at
@@ -1768,7 +1959,7 @@ func clampQueryLimit(value, fallback, max int) int {
 
 func (s *Store) usageSummary(ctx context.Context, where string, args ...any) (UsageSummary, error) {
 	var summary UsageSummary
-	row := s.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0), COALESCE(SUM(total_tokens),0), COALESCE(SUM(cost_usd),0), COUNT(*) FROM usage_ledger `+where, args...)
+	row := s.queryRow(ctx, `SELECT COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0), COALESCE(SUM(total_tokens),0), COALESCE(SUM(cost_usd),0), COUNT(*) FROM usage_ledger `+where, args...)
 	if err := row.Scan(&summary.InputTokens, &summary.OutputTokens, &summary.TotalTokens, &summary.CostUSD, &summary.Requests); err != nil {
 		return UsageSummary{}, err
 	}
@@ -1776,7 +1967,7 @@ func (s *Store) usageSummary(ctx context.Context, where string, args ...any) (Us
 
 	query := `SELECT model, provider_id, department, username, COUNT(*) AS requests, COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0), COALESCE(SUM(total_tokens),0), COALESCE(SUM(cost_usd),0) AS cost
 		FROM usage_ledger ` + where + ` GROUP BY model, provider_id, department, username ORDER BY cost DESC, requests DESC LIMIT 100`
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := s.query(ctx, query, args...)
 	if err != nil {
 		return UsageSummary{}, err
 	}
@@ -1797,7 +1988,7 @@ func (s *Store) InsertAuditLog(ctx context.Context, item AuditLog) error {
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
-	_, err := s.db.ExecContext(ctx, `
+	_, err := s.exec(ctx, `
 		INSERT INTO audit_log
 		(id, actor_user_id, actor_username, action, target_type, target_id, target_display, details, ip_address, user_agent, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -1809,7 +2000,7 @@ func (s *Store) ListAuditLogs(ctx context.Context, limit int) ([]AuditLog, error
 	if limit <= 0 || limit > 1000 {
 		limit = 200
 	}
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.query(ctx, `
 		SELECT id, actor_user_id, actor_username, action, target_type, target_id, target_display, details, ip_address, user_agent, created_at
 		FROM audit_log
 		ORDER BY created_at DESC
@@ -1840,7 +2031,7 @@ func (s *Store) spendForBudget(ctx context.Context, b Budget, start, end time.Ti
 		return 0, nil
 	}
 	var spend float64
-	err := s.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(cost_usd), 0) FROM usage_ledger WHERE `+field+` = ? AND created_at >= ? AND created_at < ?`,
+	err := s.queryRow(ctx, `SELECT COALESCE(SUM(cost_usd), 0) FROM usage_ledger WHERE `+field+` = ? AND created_at >= ? AND created_at < ?`,
 		b.ScopeValue, formatTime(start), formatTime(end)).Scan(&spend)
 	return spend, err
 }
@@ -2346,7 +2537,7 @@ var schema = []string{
 		expires_at TEXT,
 		last_used_at TEXT,
 		created_at TEXT NOT NULL,
-		budget_usd REAL NOT NULL DEFAULT 0,
+		budget_usd DOUBLE PRECISION NOT NULL DEFAULT 0,
 		rpm_limit INTEGER NOT NULL DEFAULT 0,
 		tpm_limit INTEGER NOT NULL DEFAULT 0,
 		model_allowlist TEXT NOT NULL DEFAULT ''
@@ -2375,8 +2566,8 @@ var schema = []string{
 		model_id TEXT NOT NULL,
 		route TEXT NOT NULL UNIQUE,
 		display_name TEXT NOT NULL DEFAULT '',
-		input_cost_per_million REAL NOT NULL DEFAULT 0,
-		output_cost_per_million REAL NOT NULL DEFAULT 0,
+		input_cost_per_million DOUBLE PRECISION NOT NULL DEFAULT 0,
+		output_cost_per_million DOUBLE PRECISION NOT NULL DEFAULT 0,
 		context_window INTEGER NOT NULL DEFAULT 0,
 		supports_streaming INTEGER NOT NULL DEFAULT 1,
 		enabled INTEGER NOT NULL DEFAULT 1,
@@ -2393,8 +2584,8 @@ var schema = []string{
 		id TEXT PRIMARY KEY,
 		scope_type TEXT NOT NULL CHECK (scope_type IN ('user', 'department')),
 		scope_value TEXT NOT NULL,
-		limit_usd REAL NOT NULL,
-		warn_pct REAL NOT NULL DEFAULT 90,
+		limit_usd DOUBLE PRECISION NOT NULL,
+		warn_pct DOUBLE PRECISION NOT NULL DEFAULT 90,
 		is_active INTEGER NOT NULL DEFAULT 1,
 		created_at TEXT NOT NULL,
 		updated_at TEXT NOT NULL,
@@ -2440,7 +2631,7 @@ var schema = []string{
 		input_tokens INTEGER NOT NULL DEFAULT 0,
 		output_tokens INTEGER NOT NULL DEFAULT 0,
 		total_tokens INTEGER NOT NULL DEFAULT 0,
-		cost_usd REAL NOT NULL DEFAULT 0,
+		cost_usd DOUBLE PRECISION NOT NULL DEFAULT 0,
 		latency_ms INTEGER NOT NULL DEFAULT 0,
 		status_code INTEGER NOT NULL DEFAULT 0,
 		error_text TEXT NOT NULL DEFAULT '',
@@ -2471,7 +2662,7 @@ var schema = []string{
 		input_tokens INTEGER NOT NULL DEFAULT 0,
 		output_tokens INTEGER NOT NULL DEFAULT 0,
 		total_tokens INTEGER NOT NULL DEFAULT 0,
-		cost_usd REAL NOT NULL DEFAULT 0,
+		cost_usd DOUBLE PRECISION NOT NULL DEFAULT 0,
 		latency_ms INTEGER NOT NULL DEFAULT 0,
 		status_code INTEGER NOT NULL DEFAULT 0,
 		error_text TEXT NOT NULL DEFAULT '',

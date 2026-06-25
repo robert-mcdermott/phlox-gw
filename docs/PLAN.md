@@ -37,7 +37,7 @@ not complicate the first gateway release.
 - Prometheus metrics and OpenTelemetry traces.
 - Secret management through environment references first, then external vaults.
 - SCIM or Graph sync for departments/groups after Entra ID SSO.
-- Multi-node mode with Postgres or another shared database after SQLite reaches its limit.
+- Optional Postgres backend first, then cluster hardening after SQLite reaches its limit.
 - Signed config export/import for regulated environments.
 
 ## Implementation Phases
@@ -80,5 +80,6 @@ not complicate the first gateway release.
 ### Phase 3: Enterprise Operations
 
 - Add semantic cache as an optional cost/latency optimization.
-- Add cluster-safe database option and migration tooling.
+- Add optional Postgres database support. `[implemented]`
+- Add cluster deployment hardening and migration tooling.
 - Add secrets backends and signed configuration bundles.

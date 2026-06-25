@@ -68,7 +68,7 @@ scripts\run-local.ps1
 
 ## Runtime Files
 
-Phlox-GW writes one SQLite database file:
+Phlox-GW uses SQLite by default and writes one SQLite database file:
 
 ```text
 <PHLOX_GW_DATA_DIR>/phlox-gw.db
@@ -78,6 +78,17 @@ If `PHLOX_GW_DATA_DIR` is not set, the current working directory is used.
 
 Keep the database on persistent local storage. Do not place the same SQLite database file
 behind multiple running Phlox-GW nodes.
+
+Postgres is available as an optional database backend. When Postgres is enabled, the
+application still uses `PHLOX_GW_DATA_DIR` for local runtime files such as signing keys,
+but users, providers, models, keys, budgets, usage, request logs, and audit logs are stored
+in Postgres instead of the SQLite file.
+
+```bash
+export PHLOX_GW_DATABASE_URL="postgres://phlox_gw:<password>@db.example.com:5432/phlox_gw?sslmode=require"
+```
+
+Do not commit Postgres connection strings or shell files that contain passwords.
 
 Phlox-GW may also create an Ed25519 signing key used for admin configuration exports:
 
@@ -170,7 +181,7 @@ data.
 | Variable | Default | Required | Description |
 | --- | --- | --- | --- |
 | `PHLOX_GW_ADDR` | `127.0.0.1:8080` | No | HTTP listen address. Use `0.0.0.0:8080` only when the host/network is trusted or TLS is terminated in front of the gateway. |
-| `PHLOX_GW_DATA_DIR` | current working directory | No | Directory containing `phlox-gw.db`. Created on startup if missing. |
+| `PHLOX_GW_DATA_DIR` | current working directory | No | Directory containing local runtime files and the default SQLite database. Created on startup if missing. |
 | `PHLOX_GW_SESSION_SECRET` | generated development secret | Production | HMAC secret for browser sessions. Set to a stable high-entropy value before shared use. |
 
 The development session secret changes each process start. Users may be logged out after a
@@ -188,6 +199,122 @@ Generate one with PowerShell:
 $bytes = New-Object byte[] 48
 [Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
 [Convert]::ToBase64String($bytes)
+```
+
+### Database Backend
+
+SQLite is the default and requires no database server:
+
+```bash
+export PHLOX_GW_DATABASE_DRIVER=sqlite
+export PHLOX_GW_DB_PATH=/var/lib/phlox-gw/phlox-gw.db
+```
+
+`PHLOX_GW_DB_PATH` is optional. If it is not set, Phlox-GW uses
+`<PHLOX_GW_DATA_DIR>/phlox-gw.db`.
+
+To use Postgres, provide a Postgres URL. If `PHLOX_GW_DATABASE_DRIVER` is not set,
+Phlox-GW infers `postgres` when `PHLOX_GW_DATABASE_URL` is present.
+
+Example database setup:
+
+```sql
+CREATE ROLE phlox_gw LOGIN PASSWORD '<password>';
+CREATE DATABASE phlox_gw OWNER phlox_gw;
+```
+
+```bash
+export PHLOX_GW_DATABASE_URL="postgres://phlox_gw:<password>@db.example.com:5432/phlox_gw?sslmode=require"
+```
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `PHLOX_GW_DATABASE_DRIVER` | `sqlite`, or `postgres` when `PHLOX_GW_DATABASE_URL` is set | Database backend. Accepted values: `sqlite`, `postgres`. Aliases: `sqlite3`, `postgresql`, `pgx`. |
+| `PHLOX_GW_DATABASE_URL` | empty | Postgres connection URL used by the pgx driver. |
+| `PHLOX_GW_POSTGRES_DSN` | empty | Alias for `PHLOX_GW_DATABASE_URL`. |
+| `PHLOX_GW_DB_PATH` | `<PHLOX_GW_DATA_DIR>/phlox-gw.db` | SQLite database path. Ignored by Postgres. |
+
+Phlox-GW creates the required tables at startup for both SQLite and Postgres. Existing
+SQLite databases are not automatically copied into Postgres; migrate data with an external
+database migration/export process if you need to move an existing installation.
+
+### Local Postgres With Podman
+
+For local development or validation, run Postgres in Podman with a persistent named
+volume:
+
+```bash
+podman volume create phlox-gw-postgres
+
+podman run -d \
+  --name phlox-gw-postgres \
+  -e POSTGRES_USER=phlox_gw \
+  -e POSTGRES_PASSWORD=phlox-gw-dev-password \
+  -e POSTGRES_DB=phlox_gw \
+  -p 127.0.0.1:5432:5432 \
+  -v phlox-gw-postgres:/var/lib/postgresql/data \
+  docker.io/library/postgres:16
+```
+
+Verify the container is running and accepting connections:
+
+```bash
+podman ps
+podman logs phlox-gw-postgres
+podman exec phlox-gw-postgres pg_isready -U phlox_gw -d phlox_gw
+```
+
+Rebuild Phlox-GW after database-code changes. Running `go test` does not update the local
+`./phlox-gw` executable:
+
+```bash
+go build -o phlox-gw ./cmd/phlox-gw
+```
+
+Start Phlox-GW against the Podman Postgres instance:
+
+```bash
+export PHLOX_GW_DATABASE_URL="postgres://phlox_gw:phlox-gw-dev-password@127.0.0.1:5432/phlox_gw?sslmode=disable"
+export PHLOX_GW_DATA_DIR=".phlox-gw-data"
+export PHLOX_GW_SESSION_SECRET="$(openssl rand -base64 48)"
+
+./phlox-gw
+```
+
+The startup log should include:
+
+```text
+db_driver=postgres db=postgres
+```
+
+If it shows `db_driver=sqlite`, the running process did not receive
+`PHLOX_GW_DATABASE_URL` or the binary was not rebuilt with Postgres support.
+
+When using `scripts/run-local.sh`, place the Postgres URL in `.env`:
+
+```bash
+PHLOX_GW_DATABASE_URL=postgres://phlox_gw:phlox-gw-dev-password@127.0.0.1:5432/phlox_gw?sslmode=disable
+```
+
+Useful lifecycle commands:
+
+```bash
+podman stop phlox-gw-postgres
+podman start phlox-gw-postgres
+podman logs -f phlox-gw-postgres
+```
+
+To inspect the initialized schema:
+
+```bash
+podman exec -it phlox-gw-postgres psql -U phlox_gw -d phlox_gw -c '\dt'
+```
+
+To delete the local Postgres container and all persisted local database data:
+
+```bash
+podman rm -f phlox-gw-postgres
+podman volume rm phlox-gw-postgres
 ```
 
 ### OIDC And Entra ID
