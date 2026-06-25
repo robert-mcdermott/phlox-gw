@@ -125,6 +125,44 @@ If a provider used a direct stored API key, the export marks its `secret_source`
 `direct-redacted`. Re-enter that secret manually, or move it to an environment variable,
 when recreating the provider in another environment.
 
+## Demo Data Seeding
+
+For product screenshots, documentation, or demos, Phlox-GW includes a reusable demo
+data seeder:
+
+```bash
+scripts/seed-demo-data.sh phlox-gw.db
+```
+
+For a department-only budget demo, where all demo budgets are department budgets and no
+demo user budgets are created, use:
+
+```bash
+scripts/seed-demo-department-budgets.sh phlox-gw.db
+```
+
+Both shell scripts call the same Go implementation, `scripts/seed-demo-data.go`. To call
+it directly, use:
+
+```bash
+go run ./scripts/seed-demo-data.go -db phlox-gw.db -budget-mode department-and-user -yes
+go run ./scripts/seed-demo-data.go -db phlox-gw.db -budget-mode department -yes
+```
+
+Stop Phlox-GW before running it, or run it against a copied database. The script is
+idempotent for demo data: it replaces rows with the `demo_` prefix, creates 18 demo users,
+adds budgets according to the selected budget mode, configures the `bedrock` provider,
+and inserts 30 days of Bedrock usage and request metadata split across:
+
+- `bedrock/us.anthropic.claude-opus-4-8`
+- `bedrock/us.anthropic.claude-sonnet-4-6`
+
+The six demo departments are `Bridgeworks`, `SciComp`, `Informatics`, `SoftwareEng`,
+`CompBio`, and `DaSL`. Bridgeworks is intentionally over its current monthly budget so
+budget warning and hard-limit states are visible in the dashboard. The script replaces
+department budgets for those six department names, so do not run it against production
+data.
+
 ## Environment Variables
 
 ### Core Settings
