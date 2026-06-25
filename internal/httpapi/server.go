@@ -4729,8 +4729,7 @@ func (s *Server) runBedrockHealthCheck(parent context.Context, route store.Route
 		"messages": []any{
 			map[string]any{"role": "user", "content": "Reply with exactly: OK"},
 		},
-		"max_tokens":  float64(8),
-		"temperature": float64(0),
+		"max_tokens": float64(8),
 	})
 	if err != nil {
 		result.Error = err.Error()

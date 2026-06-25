@@ -594,6 +594,38 @@ func TestOpenAIChatCompletionsRoutesToBedrockAndRecordsUsage(t *testing.T) {
 	}
 }
 
+func TestBedrockHealthCheckOmitsTemperature(t *testing.T) {
+	fake := &fakeBedrockClient{}
+	s := &Server{
+		bedrockClientFactory: func(_ context.Context, _ store.Provider) (BedrockConverseClient, error) {
+			return fake, nil
+		},
+	}
+	route := store.RoutedModel{
+		Provider: store.Provider{ID: "aws-bedrock-health", Type: "bedrock", AWSRegion: "us-west-2", Enabled: true},
+		Model: store.Model{
+			ID:         "model_bedrock_health",
+			ProviderID: "aws-bedrock-health",
+			ModelID:    "us.anthropic.claude-sonnet-4-6",
+			Route:      "bedrock/sonnet-4-6",
+			Enabled:    true,
+		},
+	}
+	result := s.runModelHealthCheck(context.Background(), route)
+	if !result.OK {
+		t.Fatalf("health check failed: %#v", result)
+	}
+	if fake.input == nil || fake.input.InferenceConfig == nil {
+		t.Fatalf("bedrock input missing inference config: %#v", fake.input)
+	}
+	if fake.input.InferenceConfig.MaxTokens == nil || *fake.input.InferenceConfig.MaxTokens != 8 {
+		t.Fatalf("unexpected max tokens: %#v", fake.input.InferenceConfig)
+	}
+	if fake.input.InferenceConfig.Temperature != nil {
+		t.Fatalf("health check should not set temperature: %#v", fake.input.InferenceConfig)
+	}
+}
+
 func TestOpenAIChatCompletionsStreamsBedrockAndRecordsUsage(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
