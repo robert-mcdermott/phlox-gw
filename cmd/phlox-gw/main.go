@@ -27,9 +27,13 @@ func main() {
 	}
 
 	db, err := store.OpenWithOptions(store.OpenOptions{
-		Driver: cfg.Database.Driver,
-		Path:   cfg.Database.Path,
-		URL:    cfg.Database.URL,
+		Driver:               cfg.Database.Driver,
+		Path:                 cfg.Database.Path,
+		URL:                  cfg.Database.URL,
+		MaxOpenConns:         cfg.Database.MaxOpenConns,
+		MaxIdleConns:         cfg.Database.MaxIdleConns,
+		ConnMaxLifetime:      cfg.Database.ConnMaxLifetime,
+		MigrationLockTimeout: cfg.Database.MigrationLockTimeout,
 	})
 	if err != nil {
 		logger.Error("open database", "driver", cfg.Database.Driver, "target", databaseLogTarget(cfg), "error", err)
@@ -80,7 +84,7 @@ func main() {
 	}
 
 	go func() {
-		logger.Info("phlox-gw listening", "addr", cfg.Addr, "db_driver", cfg.Database.Driver, "db", databaseLogTarget(cfg))
+		logger.Info("phlox-gw listening", "addr", cfg.Addr, "deployment_mode", cfg.Deployment.Mode, "instance_id", cfg.Deployment.InstanceID, "db_driver", cfg.Database.Driver, "db", databaseLogTarget(cfg))
 		if cfg.UsingDefaultSecret {
 			logger.Warn("using development session secret; set PHLOX_GW_SESSION_SECRET before shared use")
 		}
@@ -99,6 +103,9 @@ func main() {
 	if err := server.Shutdown(ctx); err != nil {
 		logger.Error("shutdown failed", "error", err)
 		os.Exit(1)
+	}
+	if err := db.MarkClusterNodeStatus(context.Background(), cfg.Deployment.InstanceID, "stopped", time.Now().UTC()); err != nil && !errors.Is(err, store.ErrNotFound) {
+		logger.Warn("mark cluster node stopped failed", "instance_id", cfg.Deployment.InstanceID, "error", err)
 	}
 }
 

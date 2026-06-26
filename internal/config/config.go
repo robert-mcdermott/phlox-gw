@@ -8,23 +8,37 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type Config struct {
-	Addr               string
-	DataDir            string
-	DBPath             string
-	Database           DatabaseConfig
-	SessionSecret      string
-	UsingDefaultSecret bool
-	OIDC               OIDCConfig
-	Telemetry          TelemetryConfig
+	Addr                 string
+	DataDir              string
+	DBPath               string
+	Database             DatabaseConfig
+	Deployment           DeploymentConfig
+	SessionSecret        string
+	UsingDefaultSecret   bool
+	ConfigSigningKeyFile string
+	OIDC                 OIDCConfig
+	Telemetry            TelemetryConfig
 }
 
 type DatabaseConfig struct {
-	Driver string
-	Path   string
-	URL    string
+	Driver               string
+	Path                 string
+	URL                  string
+	MaxOpenConns         int
+	MaxIdleConns         int
+	ConnMaxLifetime      time.Duration
+	MigrationLockTimeout time.Duration
+}
+
+type DeploymentConfig struct {
+	Mode              string
+	InstanceID        string
+	HeartbeatInterval time.Duration
+	NodeStaleAfter    time.Duration
 }
 
 type OIDCConfig struct {
@@ -84,16 +98,22 @@ func Load() (Config, error) {
 			return Config{}, errMissingOIDCConfig()
 		}
 	}
+	deployment := loadDeploymentConfig(database)
+	if err := validateDeploymentConfig(deployment, database, usingDefault); err != nil {
+		return Config{}, err
+	}
 
 	return Config{
-		Addr:               addr,
-		DataDir:            dataDir,
-		DBPath:             database.Path,
-		Database:           database,
-		SessionSecret:      secret,
-		UsingDefaultSecret: usingDefault,
-		OIDC:               oidc,
-		Telemetry:          loadTelemetryConfig(),
+		Addr:                 addr,
+		DataDir:              dataDir,
+		DBPath:               database.Path,
+		Database:             database,
+		Deployment:           deployment,
+		SessionSecret:        secret,
+		UsingDefaultSecret:   usingDefault,
+		ConfigSigningKeyFile: strings.TrimSpace(os.Getenv("PHLOX_GW_CONFIG_SIGNING_KEY_FILE")),
+		OIDC:                 oidc,
+		Telemetry:            loadTelemetryConfig(),
 	}, nil
 }
 
@@ -122,9 +142,13 @@ func loadDatabaseConfig(dataDir string) DatabaseConfig {
 	}
 
 	return DatabaseConfig{
-		Driver: driver,
-		Path:   dbPath,
-		URL:    dbURL,
+		Driver:               driver,
+		Path:                 dbPath,
+		URL:                  dbURL,
+		MaxOpenConns:         intEnv("PHLOX_GW_DB_MAX_OPEN_CONNS", 25),
+		MaxIdleConns:         intEnv("PHLOX_GW_DB_MAX_IDLE_CONNS", 25),
+		ConnMaxLifetime:      durationEnv("PHLOX_GW_DB_CONN_MAX_LIFETIME", 30*time.Minute),
+		MigrationLockTimeout: durationEnv("PHLOX_GW_DB_MIGRATION_LOCK_TIMEOUT", 30*time.Second),
 	}
 }
 
@@ -151,6 +175,76 @@ func validateDatabaseConfig(database DatabaseConfig) error {
 		}
 	default:
 		return fmt.Errorf("unsupported PHLOX_GW_DATABASE_DRIVER %q", database.Driver)
+	}
+	return nil
+}
+
+func loadDeploymentConfig(database DatabaseConfig) DeploymentConfig {
+	mode := normalizeDeploymentMode(os.Getenv("PHLOX_GW_DEPLOYMENT_MODE"))
+	if mode == "" {
+		if database.Driver == "postgres" {
+			mode = "single-postgres"
+		} else {
+			mode = "single-sqlite"
+		}
+	}
+	instanceID := strings.TrimSpace(os.Getenv("PHLOX_GW_INSTANCE_ID"))
+	if instanceID == "" {
+		instanceID = defaultInstanceID()
+	}
+	return DeploymentConfig{
+		Mode:              mode,
+		InstanceID:        instanceID,
+		HeartbeatInterval: durationEnv("PHLOX_GW_CLUSTER_HEARTBEAT_INTERVAL", 10*time.Second),
+		NodeStaleAfter:    durationEnv("PHLOX_GW_CLUSTER_NODE_STALE_AFTER", 45*time.Second),
+	}
+}
+
+func normalizeDeploymentMode(mode string) string {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	switch mode {
+	case "", "single-sqlite", "sqlite":
+		if mode == "sqlite" {
+			return "single-sqlite"
+		}
+		return mode
+	case "single-postgres", "single-postgresql", "postgres", "postgresql":
+		return "single-postgres"
+	case "cluster-postgres", "cluster-postgresql", "cluster":
+		return "cluster-postgres"
+	default:
+		return mode
+	}
+}
+
+func validateDeploymentConfig(deployment DeploymentConfig, database DatabaseConfig, usingDefaultSecret bool) error {
+	switch deployment.Mode {
+	case "single-sqlite":
+		if database.Driver != "sqlite" {
+			return fmt.Errorf("PHLOX_GW_DEPLOYMENT_MODE=single-sqlite requires PHLOX_GW_DATABASE_DRIVER=sqlite")
+		}
+	case "single-postgres":
+		if database.Driver != "postgres" {
+			return fmt.Errorf("PHLOX_GW_DEPLOYMENT_MODE=single-postgres requires PHLOX_GW_DATABASE_DRIVER=postgres")
+		}
+	case "cluster-postgres":
+		if database.Driver != "postgres" {
+			return fmt.Errorf("PHLOX_GW_DEPLOYMENT_MODE=cluster-postgres requires PHLOX_GW_DATABASE_URL")
+		}
+		if usingDefaultSecret {
+			return fmt.Errorf("PHLOX_GW_SESSION_SECRET is required when PHLOX_GW_DEPLOYMENT_MODE=cluster-postgres")
+		}
+	default:
+		return fmt.Errorf("unsupported PHLOX_GW_DEPLOYMENT_MODE %q", deployment.Mode)
+	}
+	if strings.TrimSpace(deployment.InstanceID) == "" {
+		return fmt.Errorf("PHLOX_GW_INSTANCE_ID could not be derived")
+	}
+	if deployment.HeartbeatInterval <= 0 {
+		return fmt.Errorf("PHLOX_GW_CLUSTER_HEARTBEAT_INTERVAL must be positive")
+	}
+	if deployment.NodeStaleAfter <= deployment.HeartbeatInterval {
+		return fmt.Errorf("PHLOX_GW_CLUSTER_NODE_STALE_AFTER must be greater than PHLOX_GW_CLUSTER_HEARTBEAT_INTERVAL")
 	}
 	return nil
 }
@@ -234,6 +328,30 @@ func floatEnv(key string, fallback float64) float64 {
 	return parsed
 }
 
+func intEnv(key string, fallback int) int {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed < 0 {
+		return fallback
+	}
+	return parsed
+}
+
+func durationEnv(key string, fallback time.Duration) time.Duration {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := time.ParseDuration(value)
+	if err != nil || parsed <= 0 {
+		return fallback
+	}
+	return parsed
+}
+
 func scopesEnv(key string, fallback []string) []string {
 	values := listEnv(key)
 	if len(values) == 0 {
@@ -283,4 +401,14 @@ func devSecret() string {
 		return "phlox-gw-development-secret-change-me"
 	}
 	return base64.RawURLEncoding.EncodeToString(buf)
+}
+
+func defaultInstanceID() string {
+	hostname, err := os.Hostname()
+	if err != nil || strings.TrimSpace(hostname) == "" {
+		hostname = "localhost"
+	}
+	hostname = strings.ToLower(strings.TrimSpace(hostname))
+	hostname = strings.NewReplacer(" ", "-", ".", "-").Replace(hostname)
+	return fmt.Sprintf("%s-%d", hostname, os.Getpid())
 }

@@ -6,8 +6,10 @@ Phlox-GW is a low-latency, high-concurrency gateway for enterprise LLM access. I
 centralize provider configuration, authentication, budget enforcement, usage accounting,
 and reporting while remaining easy to run on Linux, macOS, and Windows.
 
-The first deployment target is a single binary with a SQLite database in the application
-data directory. The design keeps clear seams for future cluster and database upgrades.
+The default deployment target is a single binary with a SQLite database in the application
+data directory. Postgres is available for single-node operation and explicit
+`cluster-postgres` deployments where multiple gateway processes share state behind a load
+balancer.
 
 ## Architecture
 
@@ -27,7 +29,7 @@ Phlox-GW Go server
   |-- Admin dashboard API
   |
   v
-SQLite database
+SQLite or Postgres database
 ```
 
 The frontend is an embedded static application. The Go binary serves both the API and the
@@ -42,6 +44,8 @@ dashboard so the production artifact can be distributed as one executable.
 - SHA-256 hashed API keys; plaintext keys are shown only once.
 - Provider secrets resolved from environment variable references when configured.
 - Optional OIDC authorization-code login for Entra ID or other OIDC providers.
+- Optional Postgres backend with advisory startup migration locking.
+- Cluster node heartbeat and readiness reporting for `cluster-postgres` deployments.
 
 ## Data Model
 
@@ -62,6 +66,8 @@ Core tables:
   and blocking.
 - `audit_log`: append-only local login, admin, and API key lifecycle events with
   sanitized details, client IP, and user agent.
+- `cluster_nodes`: node identity, deployment mode, database backend, status, and heartbeat
+  timestamps for Admin -> Cluster and readiness checks.
 
 The usage ledger snapshots username and department at write time so chargeback rows remain
 billable if users are later deleted or moved.

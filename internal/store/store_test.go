@@ -61,6 +61,66 @@ func TestCostUsesInputAndOutputPricing(t *testing.T) {
 	}
 }
 
+func TestClusterNodeUpsertAndList(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+
+	started := time.Now().UTC().Add(-time.Minute)
+	if err := s.UpsertClusterNode(ctx, ClusterNode{
+		InstanceID:     "node-1",
+		Hostname:       "host-a",
+		Version:        "test",
+		Addr:           "127.0.0.1:8081",
+		DeploymentMode: "cluster-postgres",
+		DBDriver:       "postgres",
+		Status:         "starting",
+		StartedAt:      started,
+		LastSeenAt:     started,
+		Metadata:       `{"role":"test"}`,
+	}); err != nil {
+		t.Fatalf("UpsertClusterNode insert: %v", err)
+	}
+	seen := started.Add(time.Minute)
+	if err := s.UpsertClusterNode(ctx, ClusterNode{
+		InstanceID:     "node-1",
+		Hostname:       "host-a",
+		Version:        "test",
+		Addr:           "127.0.0.1:8082",
+		DeploymentMode: "cluster-postgres",
+		DBDriver:       "postgres",
+		Status:         "ready",
+		StartedAt:      started,
+		LastSeenAt:     seen,
+		Metadata:       `{"role":"test"}`,
+	}); err != nil {
+		t.Fatalf("UpsertClusterNode update: %v", err)
+	}
+	nodes, err := s.ListClusterNodes(ctx)
+	if err != nil {
+		t.Fatalf("ListClusterNodes: %v", err)
+	}
+	if len(nodes) != 1 {
+		t.Fatalf("node count = %d, want 1", len(nodes))
+	}
+	if nodes[0].Status != "ready" || nodes[0].Addr != "127.0.0.1:8082" || !nodes[0].LastSeenAt.Equal(seen) {
+		t.Fatalf("unexpected node: %#v", nodes[0])
+	}
+	if err := s.MarkClusterNodeStatus(ctx, "node-1", "stopped", seen.Add(time.Second)); err != nil {
+		t.Fatalf("MarkClusterNodeStatus: %v", err)
+	}
+	nodes, err = s.ListClusterNodes(ctx)
+	if err != nil {
+		t.Fatalf("ListClusterNodes after mark: %v", err)
+	}
+	if nodes[0].Status != "stopped" {
+		t.Fatalf("status = %q, want stopped", nodes[0].Status)
+	}
+}
+
 func TestGuardrailPolicyDefaultsAndUpdate(t *testing.T) {
 	ctx := context.Background()
 	s, err := Open(filepath.Join(t.TempDir(), "test.db"))

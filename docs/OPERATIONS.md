@@ -183,6 +183,9 @@ data.
 | `PHLOX_GW_ADDR` | `127.0.0.1:8080` | No | HTTP listen address. Use `0.0.0.0:8080` only when the host/network is trusted or TLS is terminated in front of the gateway. |
 | `PHLOX_GW_DATA_DIR` | current working directory | No | Directory containing local runtime files and the default SQLite database. Created on startup if missing. |
 | `PHLOX_GW_SESSION_SECRET` | generated development secret | Production | HMAC secret for browser sessions. Set to a stable high-entropy value before shared use. |
+| `PHLOX_GW_DEPLOYMENT_MODE` | inferred | No | Deployment mode: `single-sqlite`, `single-postgres`, or `cluster-postgres`. |
+| `PHLOX_GW_INSTANCE_ID` | hostname plus process id | Cluster | Stable node identity shown in logs and Admin -> Cluster. |
+| `PHLOX_GW_CONFIG_SIGNING_KEY_FILE` | `<PHLOX_GW_DATA_DIR>/phlox-gw-signing-key.json` | Cluster recommended | Shared Ed25519 signing key file for signed config exports. Mount the same file on every node. |
 
 The development session secret changes each process start. Users may be logged out after a
 restart unless `PHLOX_GW_SESSION_SECRET` is set.
@@ -233,10 +236,69 @@ export PHLOX_GW_DATABASE_URL="postgres://phlox_gw:<password>@db.example.com:5432
 | `PHLOX_GW_DATABASE_URL` | empty | Postgres connection URL used by the pgx driver. |
 | `PHLOX_GW_POSTGRES_DSN` | empty | Alias for `PHLOX_GW_DATABASE_URL`. |
 | `PHLOX_GW_DB_PATH` | `<PHLOX_GW_DATA_DIR>/phlox-gw.db` | SQLite database path. Ignored by Postgres. |
+| `PHLOX_GW_DB_MAX_OPEN_CONNS` | `25` | Postgres maximum open database connections. SQLite uses one connection. |
+| `PHLOX_GW_DB_MAX_IDLE_CONNS` | `25` | Postgres maximum idle connections. |
+| `PHLOX_GW_DB_CONN_MAX_LIFETIME` | `30m` | Postgres connection maximum lifetime. |
+| `PHLOX_GW_DB_MIGRATION_LOCK_TIMEOUT` | `30s` | Timeout while waiting for the Postgres advisory migration lock at startup. |
+| `PHLOX_GW_CLUSTER_HEARTBEAT_INTERVAL` | `10s` | Cluster node heartbeat interval. |
+| `PHLOX_GW_CLUSTER_NODE_STALE_AFTER` | `45s` | Time after which a node is shown as stale in Admin -> Cluster. |
 
 Phlox-GW creates the required tables at startup for both SQLite and Postgres. Existing
 SQLite databases are not automatically copied into Postgres; migrate data with an external
 database migration/export process if you need to move an existing installation.
+
+### Deployment Modes
+
+Phlox-GW supports three deployment modes:
+
+| Mode | Database | Intended use |
+| --- | --- | --- |
+| `single-sqlite` | SQLite | Default local or small single-node deployment. |
+| `single-postgres` | Postgres | One gateway process with an external database server. |
+| `cluster-postgres` | Postgres | Multiple gateway processes behind a load balancer. |
+
+If `PHLOX_GW_DEPLOYMENT_MODE` is not set, Phlox-GW uses `single-sqlite` unless
+`PHLOX_GW_DATABASE_URL` is set, in which case it uses `single-postgres`.
+`cluster-postgres` is never inferred; set it explicitly.
+
+Cluster mode requires:
+
+- `PHLOX_GW_DEPLOYMENT_MODE=cluster-postgres`
+- `PHLOX_GW_DATABASE_URL` pointing to Postgres
+- the same stable `PHLOX_GW_SESSION_SECRET` on every node
+- provider/API environment variables available on every node
+- a stable `PHLOX_GW_INSTANCE_ID` per node
+
+Recommended cluster settings:
+
+```bash
+export PHLOX_GW_DEPLOYMENT_MODE=cluster-postgres
+export PHLOX_GW_DATABASE_URL="postgres://phlox_gw:<password>@db.example.com:5432/phlox_gw?sslmode=require"
+export PHLOX_GW_SESSION_SECRET="<same-long-random-secret-on-every-node>"
+export PHLOX_GW_INSTANCE_ID="phlox-gw-1"
+export PHLOX_GW_CONFIG_SIGNING_KEY_FILE="/var/lib/phlox-gw/shared/phlox-gw-signing-key.json"
+export PHLOX_GW_DB_MAX_OPEN_CONNS=25
+export PHLOX_GW_DB_MAX_IDLE_CONNS=25
+export PHLOX_GW_DB_CONN_MAX_LIFETIME=30m
+export PHLOX_GW_DB_MIGRATION_LOCK_TIMEOUT=30s
+export PHLOX_GW_CLUSTER_HEARTBEAT_INTERVAL=10s
+export PHLOX_GW_CLUSTER_NODE_STALE_AFTER=45s
+```
+
+In cluster mode, startup schema creation and migrations are protected by a Postgres
+advisory lock so multiple nodes can start at the same time without racing schema changes.
+Nodes write heartbeats to the `cluster_nodes` table. Admins can view deployment mode,
+database backend, current node, and active or stale nodes in `Admin -> Cluster`.
+
+Load balancers can use:
+
+- `GET /health` for process liveness. This does not require database access.
+- `GET /ready` for readiness. This checks database connectivity and, in cluster mode, the
+  current node heartbeat.
+
+Current limitation: budget and rate-limit checks use shared database state, but strict
+distributed RPM/TPM enforcement can still be race-prone under very high concurrency. Use
+conservative limits or front-door rate limiting when hard global guarantees are required.
 
 ### Local Postgres With Podman
 
@@ -316,6 +378,43 @@ To delete the local Postgres container and all persisted local database data:
 podman rm -f phlox-gw-postgres
 podman volume rm phlox-gw-postgres
 ```
+
+### Single-Host Demo Cluster
+
+For demos or development validation, start two or three Phlox-GW nodes on one workstation
+against the same Postgres container. First start Postgres as shown above and export the
+database URL:
+
+```bash
+export PHLOX_GW_DATABASE_URL="postgres://phlox_gw:phlox-gw-dev-password@127.0.0.1:5432/phlox_gw?sslmode=disable"
+```
+
+Then run:
+
+```bash
+scripts/run-demo-cluster.sh
+```
+
+The script starts three nodes by default:
+
+- `http://127.0.0.1:8081/`
+- `http://127.0.0.1:8082/`
+- `http://127.0.0.1:8083/`
+
+It writes runtime files under `.phlox-gw-cluster-demo/`, generates one shared session
+secret, uses one shared config signing key path, and writes per-node logs in that
+directory. Press `Ctrl+C` in the script terminal to stop all demo nodes.
+
+Optional controls:
+
+```bash
+export PHLOX_GW_CLUSTER_NODES=2
+export PHLOX_GW_CLUSTER_BASE_PORT=8091
+export PHLOX_GW_CLUSTER_DEMO_DIR=.phlox-gw-cluster-demo
+scripts/run-demo-cluster.sh
+```
+
+Open the first node and sign in as `admin` / `admin`, then inspect `Admin -> Cluster`.
 
 ### OIDC And Entra ID
 

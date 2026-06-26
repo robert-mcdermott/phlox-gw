@@ -33,12 +33,13 @@
 - [x] Signed admin configuration export.
 - [x] Anthropic-compatible streaming translation to Bedrock ConverseStream.
 - [x] Optional Postgres database backend with SQLite still the default.
+- [x] Cluster deployment hardening with Postgres: explicit deployment modes, migration locking, node heartbeats, readiness checks, admin cluster UI, and single-host demo runbook.
 
 ## Next
 
-- Cluster deployment hardening with Postgres: migration locking, scale-out runbooks, and multi-node validation.
+- External secrets management.
 
 ## Later
 
 - Semantic response cache.
-- External secrets management.
+- Strict distributed RPM/TPM counters for hard global cluster limits under high concurrency.

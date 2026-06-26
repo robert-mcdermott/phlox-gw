@@ -403,6 +403,9 @@ func (s *Server) adminConfigSigningKey() (adminConfigSigningKey, error) {
 }
 
 func (s *Server) adminConfigSigningKeyPath() string {
+	if path := strings.TrimSpace(s.cfg.ConfigSigningKeyFile); path != "" {
+		return path
+	}
 	dir := strings.TrimSpace(s.cfg.DataDir)
 	if dir == "" {
 		dir = "."

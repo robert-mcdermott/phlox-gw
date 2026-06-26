@@ -1,10 +1,12 @@
 .DS_Store
 .gocache/
+.gomodcache/
 /phlox-gw
 /phlox-gw.exe
 /dist/
 /.env
 /.phlox-gw-data/
+/.phlox-gw-cluster-demo/
 phlox-gw.db
 phlox-gw.db-*
 phlox-gw-signing-key.json

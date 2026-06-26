@@ -33,6 +33,7 @@ const state = {
   guardrailPolicy: null,
   guardrailPreview: null,
   guardrailPreviewText: 'Contact me at jane@example.com, call 206-555-2407, employee EMP-12345.',
+  clusterStatus: null,
   usageSeries: [],
   usageDrilldowns: { providers: [], models: [] },
   budgetBurnDown: [],
@@ -47,6 +48,7 @@ applyTheme(state.theme, false);
 
 const ADMIN_SECTIONS = [
   { id: 'operations', label: 'Operations', icon: 'chart', description: '30-day usage, latency, cost, and error movement.' },
+  { id: 'cluster', label: 'Cluster', icon: 'network', description: 'Deployment mode, database backend, readiness, and node heartbeats.' },
   { id: 'requests', label: 'Requests', icon: 'file', description: 'Search gateway request metadata without prompt or response bodies.' },
   { id: 'guardrails', label: 'Guardrails', icon: 'shield', description: 'Configure built-in PII detection, redaction, and blocking policies.' },
   { id: 'config', label: 'Configuration', icon: 'file', description: 'Export signed, sanitized admin configuration for review or migration.' },
@@ -157,7 +159,7 @@ async function refresh() {
       state.keys = keys || [];
       state.usage = usage;
       if (state.user.role === 'admin') {
-        const [providers, users, budgets, rateLimits, adminUsage, adminModels, adminKeys, auditLogs, requestLog, guardrailPolicy, usageSeries, usageDrilldowns, budgetBurnDown] = await Promise.all([
+        const [providers, users, budgets, rateLimits, adminUsage, adminModels, adminKeys, auditLogs, requestLog, guardrailPolicy, clusterStatus, usageSeries, usageDrilldowns, budgetBurnDown] = await Promise.all([
           api('/api/admin/providers'),
           api('/api/admin/users'),
           api('/api/admin/budgets'),
@@ -168,6 +170,7 @@ async function refresh() {
           api('/api/admin/audit-log?limit=100'),
           api(requestLogPath()),
           api('/api/admin/guardrails'),
+          api('/api/admin/cluster/status'),
           api('/api/admin/usage/timeseries?days=30'),
           api('/api/admin/usage/drilldowns?days=30'),
           api('/api/admin/budgets/burndown')
@@ -182,6 +185,7 @@ async function refresh() {
         state.auditLogs = auditLogs || [];
         state.requestLog = requestLog || { items: [], total: 0, limit: 100, offset: 0 };
         state.guardrailPolicy = guardrailPolicy || defaultGuardrailPolicy();
+        state.clusterStatus = clusterStatus || null;
         state.usageSeries = usageSeries || [];
         state.usageDrilldowns = usageDrilldowns || { providers: [], models: [] };
         state.budgetBurnDown = budgetBurnDown || [];
@@ -443,6 +447,9 @@ function adminView() {
 }
 
 function adminContentView(usage) {
+  if (state.adminTab === 'cluster') {
+    return adminPanel('Cluster status', 'network', 'Cluster mode is explicit. SQLite remains the default single-instance deployment.', clusterStatusView());
+  }
   if (state.adminTab === 'requests') {
     return `
       ${adminPanel('Request metadata search', 'file', 'Operational request and response metadata only. Prompt text, response text, image bytes, tool contents, and secrets are not stored.', requestLogSearchView())}
@@ -579,6 +586,7 @@ function adminContentView(usage) {
 
 function adminSectionCount(id) {
   const counts = {
+    cluster: state.clusterStatus?.cluster_enabled ? (state.clusterStatus?.active_node_count || 0) : 'off',
     requests: state.requestLog?.total || 0,
     guardrails: state.guardrailPolicy?.enabled ? 'on' : 'off',
     config: 'JSON',
@@ -617,6 +625,58 @@ function configExportView() {
     <div class="actions">
       <button class="btn primary" id="config-export">${icon('file', 'btn-icon')}Download signed JSON</button>
       <span class="muted">Excludes direct provider secrets, user credentials, API key hashes, sessions, usage ledger rows, request logs, and audit logs.</span>
+    </div>
+  `;
+}
+
+function clusterStatusView() {
+  const status = state.clusterStatus || {};
+  const nodes = status.nodes || [];
+  return `
+    <div class="metric-strip">
+      ${miniMetric('Mode', status.deployment_mode || 'unknown')}
+      ${miniMetric('Cluster', status.cluster_enabled ? 'enabled' : 'disabled')}
+      ${miniMetric('Status', status.status || 'unknown')}
+      ${miniMetric('Active nodes', status.active_node_count || 0)}
+      ${miniMetric('Stale nodes', status.stale_node_count || 0)}
+      ${miniMetric('Database', status.database_driver || 'unknown')}
+    </div>
+    <div class="cluster-grid">
+      <div class="mini-metric cluster-card">
+        <div class="label">Current node</div>
+        <strong class="mono">${esc(status.instance_id || '')}</strong>
+        <span>${esc(status.hostname || '')} ${status.addr ? `· ${esc(status.addr)}` : ''}</span>
+        <span>Started ${fmt(status.started_at)}</span>
+        <span>Last heartbeat ${fmt(status.last_heartbeat_at)}</span>
+      </div>
+      <div class="mini-metric cluster-card">
+        <div class="label">Database target</div>
+        <strong class="mono">${esc(status.database_target || '')}</strong>
+        <span>Heartbeat every ${compact(status.heartbeat_interval_seconds || 0)}s; stale after ${compact(status.node_stale_after_seconds || 0)}s</span>
+        <span>Signing key: ${status.signing_key_shared ? 'shared file configured' : 'local/default path'}</span>
+      </div>
+    </div>
+    ${(status.notes || []).length ? `<div class="panel-note">${status.notes.map(note => `<p>${esc(note)}</p>`).join('')}</div>` : ''}
+    <div class="table-scroll">
+      <table>
+        <thead><tr><th>Node</th><th>Host</th><th>Address</th><th>Mode</th><th>DB</th><th>Version</th><th>Status</th><th>Started</th><th>Last seen</th><th>Age</th></tr></thead>
+        <tbody>
+          ${nodes.length ? nodes.map(node => `
+            <tr>
+              <td><span class="mono">${esc(node.instance_id)}</span>${node.current ? ' <span class="pill on">current</span>' : ''}</td>
+              <td>${esc(node.hostname || '')}</td>
+              <td class="mono">${esc(node.addr || '')}</td>
+              <td>${esc(node.deployment_mode || '')}</td>
+              <td>${esc(node.db_driver || '')}</td>
+              <td>${esc(node.version || '')}</td>
+              <td>${node.stale ? '<span class="pill off">stale</span>' : statusPill(node.status || 'unknown')}</td>
+              <td>${fmt(node.started_at)}</td>
+              <td>${fmt(node.last_seen_at)}</td>
+              <td>${compact(node.age_seconds || 0)}s</td>
+            </tr>
+          `).join('') : '<tr><td colspan="10">No registered nodes.</td></tr>'}
+        </tbody>
+      </table>
     </div>
   `;
 }
@@ -1561,6 +1621,7 @@ function icon(name, className = 'icon') {
     key: '<path d="M15 7.5a5 5 0 1 0-4.1 4.9L13 14.5V17h2.5v2.5H18V22h3v-3.2l-6-6"/><circle cx="7.5" cy="7.5" r="1.2"/>',
     cpu: '<rect x="7" y="7" width="10" height="10" rx="2"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M1 9h3M1 15h3M20 9h3M20 15h3"/>',
     chart: '<path d="M4 19V5"/><path d="M4 19h16"/><path d="M8 16v-5"/><path d="M12 16V8"/><path d="M16 16v-9"/>',
+    network: '<rect x="9" y="2" width="6" height="6" rx="1.5"/><rect x="3" y="16" width="6" height="6" rx="1.5"/><rect x="15" y="16" width="6" height="6" rx="1.5"/><path d="M12 8v4"/><path d="M6 16v-2a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v2"/>',
     shield: '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/><path d="M9 12l2 2 4-5"/>',
     server: '<rect x="3" y="4" width="18" height="6" rx="2"/><rect x="3" y="14" width="18" height="6" rx="2"/><path d="M7 7h.01M7 17h.01"/>',
     users: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.9"/><path d="M16 3.1a4 4 0 0 1 0 7.8"/>',
