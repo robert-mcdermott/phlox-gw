@@ -448,6 +448,61 @@ func TestBedrockConverseInputMapsImagesAndTools(t *testing.T) {
 	}
 }
 
+func TestAnthropicToBedrockToolDescriptionFallback(t *testing.T) {
+	openAIRaw, err := anthropicRequestToOpenAI(map[string]any{
+		"model":      "bedrock/claude",
+		"max_tokens": float64(64),
+		"messages": []any{
+			map[string]any{"role": "user", "content": "Search the web"},
+		},
+		"tools": []any{
+			map[string]any{
+				"name":        "WebSearch",
+				"description": "",
+				"input_schema": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"query": map[string]any{"type": "string"},
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("anthropicRequestToOpenAI: %v", err)
+	}
+	openAITools, ok := openAIRaw["tools"].([]any)
+	if !ok || len(openAITools) != 1 {
+		t.Fatalf("unexpected OpenAI tools: %#v", openAIRaw["tools"])
+	}
+	openAITool, ok := openAITools[0].(map[string]any)
+	if !ok {
+		t.Fatalf("unexpected OpenAI tool entry: %#v", openAITools[0])
+	}
+	function, ok := openAITool["function"].(map[string]any)
+	if !ok {
+		t.Fatalf("unexpected function entry: %#v", openAITool["function"])
+	}
+	if got := function["description"]; got != "Tool WebSearch." {
+		t.Fatalf("OpenAI tool description = %#v, want fallback", got)
+	}
+
+	input, err := bedrockConverseInput("anthropic.claude-3-5-sonnet-20240620-v1:0", openAIRaw)
+	if err != nil {
+		t.Fatalf("bedrockConverseInput: %v", err)
+	}
+	if input.ToolConfig == nil || len(input.ToolConfig.Tools) != 1 {
+		t.Fatalf("tool config not mapped: %#v", input.ToolConfig)
+	}
+	spec, ok := input.ToolConfig.Tools[0].(*types.ToolMemberToolSpec)
+	if !ok {
+		t.Fatalf("unexpected Bedrock tool type: %#v", input.ToolConfig.Tools[0])
+	}
+	if got := aws.ToString(spec.Value.Description); got != "Tool WebSearch." {
+		t.Fatalf("Bedrock tool description = %q, want fallback", got)
+	}
+}
+
 func TestOpenAIResponseFromBedrockMapsToolUse(t *testing.T) {
 	route := store.RoutedModel{Model: store.Model{Route: "bedrock/claude"}}
 	response := openAIResponseFromBedrock(route, &bedrockruntime.ConverseOutput{

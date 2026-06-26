@@ -2607,12 +2607,24 @@ func anthropicToolsToOpenAI(value any) ([]any, bool) {
 			"type": "function",
 			"function": map[string]any{
 				"name":        name,
-				"description": description,
+				"description": normalizedToolDescription(name, description),
 				"parameters":  parameters,
 			},
 		})
 	}
 	return tools, len(tools) > 0
+}
+
+func normalizedToolDescription(name, description string) string {
+	description = strings.TrimSpace(description)
+	if description != "" {
+		return description
+	}
+	name = strings.TrimSpace(name)
+	if name != "" {
+		return "Tool " + name + "."
+	}
+	return "No description provided."
 }
 
 func anthropicToolChoiceToOpenAI(value any) (any, bool) {
@@ -5916,7 +5928,7 @@ func bedrockToolConfig(raw map[string]any) (*types.ToolConfiguration, error) {
 		description, _ := function["description"].(string)
 		tools = append(tools, &types.ToolMemberToolSpec{Value: types.ToolSpecification{
 			Name:        aws.String(name),
-			Description: aws.String(description),
+			Description: aws.String(normalizedToolDescription(name, description)),
 			InputSchema: &types.ToolInputSchemaMemberJson{Value: bedrockdocument.NewLazyDocument(parameters)},
 		}})
 	}
