@@ -2178,11 +2178,16 @@ func anthropicUserMessageToOpenAI(msg map[string]any) ([]any, error) {
 			flushUserContent()
 			toolUseID, _ := block["tool_use_id"].(string)
 			resultText := anthropicToolResultContentToText(block["content"])
+			isError, _ := block["is_error"].(bool)
 			if toolUseID == "" {
 				out = append(out, map[string]any{"role": "user", "content": resultText})
 				continue
 			}
-			out = append(out, map[string]any{"role": "tool", "tool_call_id": toolUseID, "content": resultText})
+			toolMessage := map[string]any{"role": "tool", "tool_call_id": toolUseID, "content": resultText}
+			if isError {
+				toolMessage["is_error"] = true
+			}
+			out = append(out, toolMessage)
 		}
 	}
 	flushUserContent()
@@ -2410,6 +2415,16 @@ func anthropicResponseFromOpenAI(route store.RoutedModel, body []byte) ([]byte, 
 			content = []map[string]any{{"type": "text", "text": reasoning}}
 		}
 	}
+	toolContent, err := openAIToolCallsToAnthropic(message["tool_calls"])
+	if err != nil {
+		return nil, err
+	}
+	if len(toolContent) > 0 {
+		if anthropicTextContentEmpty(content) {
+			content = nil
+		}
+		content = append(content, toolContent...)
+	}
 	usage, _ := raw["usage"].(map[string]any)
 	inputTokens := intValue(firstPresent(usage, "prompt_tokens", "input_tokens"))
 	outputTokens := intValue(firstPresent(usage, "completion_tokens", "output_tokens"))
@@ -2458,6 +2473,83 @@ func openAIContentToAnthropic(value any) []map[string]any {
 		}
 	}
 	return []map[string]any{{"type": "text", "text": ""}}
+}
+
+func openAIToolCallsToAnthropic(value any) ([]map[string]any, error) {
+	var items []any
+	switch v := value.(type) {
+	case nil:
+		return nil, nil
+	case []any:
+		items = v
+	case []map[string]any:
+		items = make([]any, 0, len(v))
+		for _, item := range v {
+			items = append(items, item)
+		}
+	default:
+		return nil, nil
+	}
+
+	out := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		call, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		block, ok, err := openAIToolCallToAnthropic(call)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			out = append(out, block)
+		}
+	}
+	return out, nil
+}
+
+func openAIToolCallToAnthropic(call map[string]any) (map[string]any, bool, error) {
+	function, _ := call["function"].(map[string]any)
+	name, _ := function["name"].(string)
+	if strings.TrimSpace(name) == "" {
+		name = "tool"
+	}
+	input, err := openAIToolCallArgumentsToAnthropicInput(function["arguments"])
+	if err != nil {
+		return nil, false, err
+	}
+	id, _ := call["id"].(string)
+	return map[string]any{
+		"type":  "tool_use",
+		"id":    fallbackString(id, "toolu_"+requestID()),
+		"name":  name,
+		"input": input,
+	}, true, nil
+}
+
+func openAIToolCallArgumentsToAnthropicInput(value any) (map[string]any, error) {
+	switch v := value.(type) {
+	case nil:
+		return map[string]any{}, nil
+	case string:
+		if strings.TrimSpace(v) == "" {
+			return map[string]any{}, nil
+		}
+		var out map[string]any
+		decoder := json.NewDecoder(strings.NewReader(v))
+		decoder.UseNumber()
+		if err := decoder.Decode(&out); err != nil {
+			return nil, fmt.Errorf("could not parse OpenAI tool call arguments: %w", err)
+		}
+		if out == nil {
+			return map[string]any{}, nil
+		}
+		return out, nil
+	case map[string]any:
+		return v, nil
+	default:
+		return nil, fmt.Errorf("unsupported OpenAI tool call arguments type %T", value)
+	}
 }
 
 func anthropicTextContentEmpty(blocks []map[string]any) bool {
@@ -5189,6 +5281,14 @@ func bedrockConverseInput(modelID string, raw map[string]any) (*bedrockruntime.C
 	}
 	var messages []types.Message
 	var system []types.SystemContentBlock
+	var pendingToolResults []types.ContentBlock
+	flushToolResults := func() {
+		if len(pendingToolResults) == 0 {
+			return
+		}
+		messages = append(messages, types.Message{Role: types.ConversationRoleUser, Content: pendingToolResults})
+		pendingToolResults = nil
+	}
 	for _, item := range messagesRaw {
 		msg, ok := item.(map[string]any)
 		if !ok {
@@ -5207,6 +5307,7 @@ func bedrockConverseInput(modelID string, raw map[string]any) (*bedrockruntime.C
 			}
 			system = append(system, &types.SystemContentBlockMemberText{Value: text})
 		case "user", "assistant":
+			flushToolResults()
 			content, err := openAIContentBlocks(msg["content"], role)
 			if err != nil {
 				return nil, err
@@ -5234,14 +5335,12 @@ func bedrockConverseInput(modelID string, raw map[string]any) (*bedrockruntime.C
 			if err != nil {
 				return nil, err
 			}
-			if len(content) == 0 {
-				continue
-			}
-			messages = append(messages, types.Message{Role: types.ConversationRoleUser, Content: content})
+			pendingToolResults = append(pendingToolResults, content...)
 		default:
 			return nil, fmt.Errorf("Bedrock adapter supports user, assistant, system, developer, and tool messages only; got role %q", role)
 		}
 	}
+	flushToolResults()
 	if len(messages) == 0 {
 		return nil, errors.New("at least one non-empty user or assistant message is required")
 	}
@@ -5474,13 +5573,14 @@ func openAIToolResultBlocks(msg map[string]any) ([]types.ContentBlock, error) {
 	if err != nil {
 		return nil, err
 	}
-	if strings.TrimSpace(text) == "" {
-		return nil, nil
-	}
-	return []types.ContentBlock{&types.ContentBlockMemberToolResult{Value: types.ToolResultBlock{
+	result := types.ToolResultBlock{
 		ToolUseId: aws.String(toolUseID),
 		Content:   []types.ToolResultContentBlock{&types.ToolResultContentBlockMemberText{Value: text}},
-	}}}, nil
+	}
+	if isError, _ := msg["is_error"].(bool); isError {
+		result.Status = types.ToolResultStatusError
+	}
+	return []types.ContentBlock{&types.ContentBlockMemberToolResult{Value: result}}, nil
 }
 
 func bedrockToolConfig(raw map[string]any) (*types.ToolConfiguration, error) {

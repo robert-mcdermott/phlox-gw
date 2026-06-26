@@ -475,6 +475,58 @@ func TestOpenAIResponseFromBedrockMapsToolUse(t *testing.T) {
 	}
 }
 
+func TestBedrockConverseInputGroupsToolResultsAndKeepsEmptyResults(t *testing.T) {
+	input, err := bedrockConverseInput("anthropic.claude-3-5-sonnet-20240620-v1:0", map[string]any{
+		"messages": []any{
+			map[string]any{"role": "user", "content": "Use tools"},
+			map[string]any{
+				"role":    "assistant",
+				"content": nil,
+				"tool_calls": []any{
+					map[string]any{
+						"id":   "tooluse_empty",
+						"type": "function",
+						"function": map[string]any{
+							"name":      "Empty",
+							"arguments": "{}",
+						},
+					},
+					map[string]any{
+						"id":   "tooluse_read",
+						"type": "function",
+						"function": map[string]any{
+							"name":      "Read",
+							"arguments": "{\"file_path\":\"README.md\"}",
+						},
+					},
+				},
+			},
+			map[string]any{"role": "tool", "tool_call_id": "tooluse_empty", "content": "", "is_error": true},
+			map[string]any{"role": "tool", "tool_call_id": "tooluse_read", "content": "contents"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("bedrockConverseInput: %v", err)
+	}
+	if len(input.Messages) != 3 {
+		t.Fatalf("messages len = %d, want 3: %#v", len(input.Messages), input.Messages)
+	}
+	resultMessage := input.Messages[2]
+	if resultMessage.Role != types.ConversationRoleUser || len(resultMessage.Content) != 2 {
+		t.Fatalf("unexpected tool result message: %#v", resultMessage)
+	}
+	first := resultMessage.Content[0].(*types.ContentBlockMemberToolResult).Value
+	firstText := first.Content[0].(*types.ToolResultContentBlockMemberText).Value
+	if aws.ToString(first.ToolUseId) != "tooluse_empty" || firstText != "" || first.Status != types.ToolResultStatusError {
+		t.Fatalf("unexpected first tool result: %#v", first)
+	}
+	second := resultMessage.Content[1].(*types.ContentBlockMemberToolResult).Value
+	secondText := second.Content[0].(*types.ToolResultContentBlockMemberText).Value
+	if aws.ToString(second.ToolUseId) != "tooluse_read" || secondText != "contents" {
+		t.Fatalf("unexpected second tool result: %#v", second)
+	}
+}
+
 func TestOpenAIChatCompletionsRoutesToBedrockAndRecordsUsage(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
@@ -1509,6 +1561,53 @@ func TestAnthropicMessagesAcceptsXAPIKeyAndTranslatesOpenAICompatibleRoute(t *te
 	}
 	if usage.Requests != 1 || usage.InputTokens != 4 || usage.OutputTokens != 2 || usage.TotalTokens != 6 || usage.CostUSD != 0.000008 {
 		t.Fatalf("unexpected stored usage: %#v", usage)
+	}
+}
+
+func TestAnthropicResponseFromOpenAIMapsToolCalls(t *testing.T) {
+	body, err := anthropicResponseFromOpenAI(store.RoutedModel{Model: store.Model{Route: "bedrock/claude"}}, []byte(`{
+		"id":"chatcmpl_tool",
+		"model":"bedrock/claude",
+		"choices":[{
+			"index":0,
+			"message":{
+				"role":"assistant",
+				"content":null,
+				"tool_calls":[{
+					"id":"call_read",
+					"type":"function",
+					"function":{
+						"name":"Read",
+						"arguments":"{\"file_path\":\"README.md\"}"
+					}
+				}]
+			},
+			"finish_reason":"tool_calls"
+		}],
+		"usage":{"prompt_tokens":10,"completion_tokens":4,"total_tokens":14}
+	}`))
+	if err != nil {
+		t.Fatalf("anthropicResponseFromOpenAI: %v", err)
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(body, &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp["stop_reason"] != "tool_use" {
+		t.Fatalf("stop_reason = %#v, want tool_use", resp["stop_reason"])
+	}
+	content, _ := resp["content"].([]any)
+	if len(content) != 1 {
+		t.Fatalf("content = %#v, want one tool_use block", resp["content"])
+	}
+	block, _ := content[0].(map[string]any)
+	if block["type"] != "tool_use" || block["id"] != "call_read" || block["name"] != "Read" {
+		t.Fatalf("unexpected tool_use block: %#v", block)
+	}
+	input, _ := block["input"].(map[string]any)
+	if input["file_path"] != "README.md" {
+		t.Fatalf("unexpected tool input: %#v", input)
 	}
 }
 
