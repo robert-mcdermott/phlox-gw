@@ -62,12 +62,12 @@ Phlox-GW single Go binary
   |-- Usage ledger, request metadata log, audit log, and admin APIs
   |-- Embedded dashboard assets from frontend/dist
   v
-SQLite database
+SQLite or Postgres database
 ```
 
-The first deployment mode is a single executable and a single SQLite database file. The
-design keeps the backend simple for Linux, macOS, and Windows while leaving room for later
-Postgres or multi-node operation.
+SQLite single-instance mode remains the default. Postgres can be used for a single node
+or explicit `cluster-postgres` mode, where multiple gateway processes share one Postgres
+database behind a load balancer.
 
 ## Requirements
 
@@ -114,7 +114,8 @@ export PHLOX_GW_SESSION_SECRET="$(openssl rand -base64 48)"
 ./phlox-gw
 ```
 
-SQLite remains the default database. To use Postgres instead, set a database URL:
+SQLite remains the default database. To use single-node Postgres instead, set a database
+URL:
 
 ```bash
 export PHLOX_GW_DATABASE_URL="postgres://phlox_gw:<password>@db.example.com:5432/phlox_gw?sslmode=require"
@@ -122,8 +123,20 @@ export PHLOX_GW_DATABASE_URL="postgres://phlox_gw:<password>@db.example.com:5432
 ./phlox-gw
 ```
 
+To run multiple nodes, use explicit cluster mode and the same session secret on every
+node:
+
+```bash
+export PHLOX_GW_DEPLOYMENT_MODE=cluster-postgres
+export PHLOX_GW_DATABASE_URL="postgres://phlox_gw:<password>@db.example.com:5432/phlox_gw?sslmode=require"
+export PHLOX_GW_SESSION_SECRET="<same-long-random-secret-on-every-node>"
+export PHLOX_GW_INSTANCE_ID="node-1"
+
+./phlox-gw
+```
+
 The [Operator Guide](docs/OPERATIONS.md#local-postgres-with-podman) includes a local
-Podman Postgres setup and troubleshooting notes.
+Podman Postgres setup, cluster runbook, and single-host demo cluster script.
 
 For production, put Phlox-GW behind a TLS-terminating reverse proxy or load balancer. The
 application currently serves HTTP directly and expects TLS to be handled at the edge.
@@ -313,6 +326,9 @@ Core environment variables:
 | `PHLOX_GW_ADDR` | `127.0.0.1:8080` | HTTP listen address. |
 | `PHLOX_GW_DATA_DIR` | current working directory | Directory containing local runtime files and the default SQLite database. |
 | `PHLOX_GW_SESSION_SECRET` | random development secret | HMAC secret for browser sessions. Set this explicitly for shared use. |
+| `PHLOX_GW_DEPLOYMENT_MODE` | `single-sqlite`, or `single-postgres` when `PHLOX_GW_DATABASE_URL` is set | Deployment mode. Supports `single-sqlite`, `single-postgres`, and `cluster-postgres`. |
+| `PHLOX_GW_INSTANCE_ID` | derived from hostname and process id | Node identity shown in logs and Admin -> Cluster. Set a stable value in cluster mode. |
+| `PHLOX_GW_CONFIG_SIGNING_KEY_FILE` | `<PHLOX_GW_DATA_DIR>/phlox-gw-signing-key.json` | Optional shared Ed25519 signing key file for signed admin config exports. In cluster mode, mount the same file on every node. |
 
 Database settings:
 
@@ -322,6 +338,12 @@ Database settings:
 | `PHLOX_GW_DATABASE_URL` | empty | Postgres connection URL. Setting this enables Postgres when no explicit driver is set. |
 | `PHLOX_GW_DB_PATH` | `<PHLOX_GW_DATA_DIR>/phlox-gw.db` | SQLite database path. |
 | `PHLOX_GW_POSTGRES_DSN` | empty | Legacy alias for `PHLOX_GW_DATABASE_URL`. |
+| `PHLOX_GW_DB_MAX_OPEN_CONNS` | `25` | Postgres maximum open connections. SQLite always uses one connection. |
+| `PHLOX_GW_DB_MAX_IDLE_CONNS` | `25` | Postgres maximum idle connections. |
+| `PHLOX_GW_DB_CONN_MAX_LIFETIME` | `30m` | Postgres connection lifetime. |
+| `PHLOX_GW_DB_MIGRATION_LOCK_TIMEOUT` | `30s` | Timeout while waiting for the Postgres advisory migration lock at startup. |
+| `PHLOX_GW_CLUSTER_HEARTBEAT_INTERVAL` | `10s` | Cluster node heartbeat interval. |
+| `PHLOX_GW_CLUSTER_NODE_STALE_AFTER` | `45s` | Time after which a cluster node is shown as stale. |
 
 OIDC and Entra ID settings:
 
@@ -403,6 +425,6 @@ docs/                Design, operator, API, routing, plan, and roadmap docs
 
 ## Current Roadmap Focus
 
-The gateway foundation, first guardrail policy layer, and observability hooks are in
-place. The next major implementation area is semantic cache support, followed by external
-secrets management, signed configuration export, and cluster database options.
+The gateway foundation, guardrails, observability, signed configuration export, optional
+Postgres, and first cluster deployment support are in place. The next major implementation
+areas are external secrets management and later semantic response caching.

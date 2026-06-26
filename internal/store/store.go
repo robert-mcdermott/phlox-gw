@@ -23,9 +23,13 @@ type Store struct {
 }
 
 type OpenOptions struct {
-	Driver string
-	Path   string
-	URL    string
+	Driver               string
+	Path                 string
+	URL                  string
+	MaxOpenConns         int
+	MaxIdleConns         int
+	ConnMaxLifetime      time.Duration
+	MigrationLockTimeout time.Duration
 }
 
 type sqlDialect string
@@ -360,6 +364,19 @@ type AuditLog struct {
 	CreatedAt     time.Time `json:"created_at"`
 }
 
+type ClusterNode struct {
+	InstanceID     string    `json:"instance_id"`
+	Hostname       string    `json:"hostname"`
+	Version        string    `json:"version"`
+	Addr           string    `json:"addr"`
+	DeploymentMode string    `json:"deployment_mode"`
+	DBDriver       string    `json:"db_driver"`
+	Status         string    `json:"status"`
+	StartedAt      time.Time `json:"started_at"`
+	LastSeenAt     time.Time `json:"last_seen_at"`
+	Metadata       string    `json:"metadata"`
+}
+
 func Open(path string) (*Store, error) {
 	return OpenWithOptions(OpenOptions{Driver: string(dialectSQLite), Path: path})
 }
@@ -397,13 +414,25 @@ func OpenWithOptions(opts OpenOptions) (*Store, error) {
 		db.SetMaxIdleConns(1)
 		db.SetConnMaxLifetime(0)
 	case dialectPostgres:
-		db.SetMaxOpenConns(25)
-		db.SetMaxIdleConns(25)
-		db.SetConnMaxLifetime(30 * time.Minute)
+		maxOpen := opts.MaxOpenConns
+		if maxOpen <= 0 {
+			maxOpen = 25
+		}
+		maxIdle := opts.MaxIdleConns
+		if maxIdle <= 0 {
+			maxIdle = maxOpen
+		}
+		lifetime := opts.ConnMaxLifetime
+		if lifetime <= 0 {
+			lifetime = 30 * time.Minute
+		}
+		db.SetMaxOpenConns(maxOpen)
+		db.SetMaxIdleConns(maxIdle)
+		db.SetConnMaxLifetime(lifetime)
 	}
 
 	s := &Store{db: db, dialect: dialect}
-	if err := s.init(context.Background()); err != nil {
+	if err := s.init(context.Background(), opts.MigrationLockTimeout); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -412,6 +441,14 @@ func OpenWithOptions(opts OpenOptions) (*Store, error) {
 
 func (s *Store) Close() error {
 	return s.db.Close()
+}
+
+func (s *Store) Ping(ctx context.Context) error {
+	return s.db.PingContext(ctx)
+}
+
+func (s *Store) Driver() string {
+	return string(s.dialect)
 }
 
 func normalizeDriver(driver string) string {
@@ -530,7 +567,9 @@ func rebindPostgres(query string) string {
 	return b.String()
 }
 
-func (s *Store) init(ctx context.Context) error {
+const postgresMigrationLockKey int64 = 0x50484c4f584757
+
+func (s *Store) init(ctx context.Context, lockTimeout time.Duration) error {
 	if s.dialect == dialectSQLite {
 		pragmas := []string{
 			"PRAGMA journal_mode = WAL",
@@ -543,6 +582,13 @@ func (s *Store) init(ctx context.Context) error {
 			}
 		}
 	}
+	if s.dialect == dialectPostgres {
+		return s.initPostgresSchema(ctx, lockTimeout)
+	}
+	return s.initSchema(ctx)
+}
+
+func (s *Store) initSchema(ctx context.Context) error {
 	for _, stmt := range schema {
 		if _, err := s.exec(ctx, stmt); err != nil {
 			return err
@@ -551,34 +597,96 @@ func (s *Store) init(ctx context.Context) error {
 	return s.migrate(ctx)
 }
 
-func (s *Store) migrate(ctx context.Context) error {
-	migrations := []struct {
-		table  string
-		column string
-		spec   string
-	}{
-		{table: "api_keys", column: "budget_usd", spec: "DOUBLE PRECISION NOT NULL DEFAULT 0"},
-		{table: "api_keys", column: "rpm_limit", spec: "INTEGER NOT NULL DEFAULT 0"},
-		{table: "api_keys", column: "tpm_limit", spec: "INTEGER NOT NULL DEFAULT 0"},
-		{table: "api_keys", column: "model_allowlist", spec: "TEXT NOT NULL DEFAULT ''"},
-		{table: "providers", column: "health_status", spec: "TEXT NOT NULL DEFAULT 'unknown'"},
-		{table: "providers", column: "consecutive_failures", spec: "INTEGER NOT NULL DEFAULT 0"},
-		{table: "providers", column: "last_health_check_at", spec: "TEXT"},
-		{table: "providers", column: "last_error", spec: "TEXT NOT NULL DEFAULT ''"},
-		{table: "providers", column: "circuit_open_until", spec: "TEXT"},
-		{table: "models", column: "fallback_routes", spec: "TEXT NOT NULL DEFAULT ''"},
-		{table: "models", column: "weighted_routes", spec: "TEXT NOT NULL DEFAULT ''"},
-		{table: "models", column: "retry_attempts", spec: "INTEGER NOT NULL DEFAULT 0"},
-		{table: "models", column: "request_timeout_ms", spec: "INTEGER NOT NULL DEFAULT 0"},
-		{table: "models", column: "health_routing_enabled", spec: "INTEGER NOT NULL DEFAULT 1"},
-		{table: "guardrail_policies", column: "custom_patterns", spec: "TEXT NOT NULL DEFAULT '[]'"},
+func (s *Store) initPostgresSchema(ctx context.Context, lockTimeout time.Duration) error {
+	if lockTimeout <= 0 {
+		lockTimeout = 30 * time.Second
 	}
-	for _, migration := range migrations {
+	lockCtx, cancel := context.WithTimeout(ctx, lockTimeout)
+	defer cancel()
+	conn, err := s.db.Conn(lockCtx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	tx, err := conn.BeginTx(lockCtx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(lockCtx, "SELECT pg_advisory_xact_lock($1)", postgresMigrationLockKey); err != nil {
+		return err
+	}
+	for _, stmt := range schema {
+		if _, err := tx.ExecContext(lockCtx, s.rebind(stmt)); err != nil {
+			return err
+		}
+	}
+	if err := s.migrateTx(lockCtx, tx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+type columnMigration struct {
+	table  string
+	column string
+	spec   string
+}
+
+var columnMigrations = []columnMigration{
+	{table: "api_keys", column: "budget_usd", spec: "DOUBLE PRECISION NOT NULL DEFAULT 0"},
+	{table: "api_keys", column: "rpm_limit", spec: "INTEGER NOT NULL DEFAULT 0"},
+	{table: "api_keys", column: "tpm_limit", spec: "INTEGER NOT NULL DEFAULT 0"},
+	{table: "api_keys", column: "model_allowlist", spec: "TEXT NOT NULL DEFAULT ''"},
+	{table: "providers", column: "health_status", spec: "TEXT NOT NULL DEFAULT 'unknown'"},
+	{table: "providers", column: "consecutive_failures", spec: "INTEGER NOT NULL DEFAULT 0"},
+	{table: "providers", column: "last_health_check_at", spec: "TEXT"},
+	{table: "providers", column: "last_error", spec: "TEXT NOT NULL DEFAULT ''"},
+	{table: "providers", column: "circuit_open_until", spec: "TEXT"},
+	{table: "models", column: "fallback_routes", spec: "TEXT NOT NULL DEFAULT ''"},
+	{table: "models", column: "weighted_routes", spec: "TEXT NOT NULL DEFAULT ''"},
+	{table: "models", column: "retry_attempts", spec: "INTEGER NOT NULL DEFAULT 0"},
+	{table: "models", column: "request_timeout_ms", spec: "INTEGER NOT NULL DEFAULT 0"},
+	{table: "models", column: "health_routing_enabled", spec: "INTEGER NOT NULL DEFAULT 1"},
+	{table: "guardrail_policies", column: "custom_patterns", spec: "TEXT NOT NULL DEFAULT '[]'"},
+}
+
+func (s *Store) migrate(ctx context.Context) error {
+	for _, migration := range columnMigrations {
 		if err := s.ensureColumn(ctx, migration.table, migration.column, migration.spec); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func (s *Store) migrateTx(ctx context.Context, tx *sql.Tx) error {
+	for _, migration := range columnMigrations {
+		if err := s.ensureColumnTx(ctx, tx, migration.table, migration.column, migration.spec); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) ensureColumnTx(ctx context.Context, tx *sql.Tx, table, column, spec string) error {
+	if s.dialect != dialectPostgres {
+		return fmt.Errorf("transactional migration is unsupported for database dialect %q", s.dialect)
+	}
+	var count int
+	if err := tx.QueryRowContext(ctx, s.rebind(`
+		SELECT COUNT(*)
+		FROM information_schema.columns
+		WHERE table_schema = current_schema() AND table_name = ? AND column_name = ?`),
+		table, column).Scan(&count); err != nil {
+		return err
+	}
+	if count > 0 {
+		return nil
+	}
+	_, err := tx.ExecContext(ctx, s.rebind("ALTER TABLE "+table+" ADD COLUMN "+column+" "+spec))
+	return err
 }
 
 func (s *Store) ensureColumn(ctx context.Context, table, column, spec string) error {
@@ -2020,6 +2128,76 @@ func (s *Store) ListAuditLogs(ctx context.Context, limit int) ([]AuditLog, error
 	return out, rows.Err()
 }
 
+func (s *Store) UpsertClusterNode(ctx context.Context, node ClusterNode) error {
+	now := node.LastSeenAt
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	started := node.StartedAt
+	if started.IsZero() {
+		started = now
+	}
+	if strings.TrimSpace(node.Status) == "" {
+		node.Status = "ready"
+	}
+	_, err := s.exec(ctx, `
+		INSERT INTO cluster_nodes
+		(instance_id, hostname, version, addr, deployment_mode, db_driver, status, started_at, last_seen_at, metadata)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(instance_id) DO UPDATE SET
+			hostname = excluded.hostname,
+			version = excluded.version,
+			addr = excluded.addr,
+			deployment_mode = excluded.deployment_mode,
+			db_driver = excluded.db_driver,
+			status = excluded.status,
+			started_at = excluded.started_at,
+			last_seen_at = excluded.last_seen_at,
+			metadata = excluded.metadata`,
+		node.InstanceID, node.Hostname, node.Version, node.Addr, node.DeploymentMode, node.DBDriver, node.Status,
+		formatTime(started), formatTime(now), valueOr(node.Metadata, "{}"))
+	return err
+}
+
+func (s *Store) MarkClusterNodeStatus(ctx context.Context, instanceID, status string, t time.Time) error {
+	if t.IsZero() {
+		t = time.Now().UTC()
+	}
+	res, err := s.exec(ctx, `
+		UPDATE cluster_nodes
+		SET status = ?, last_seen_at = ?
+		WHERE instance_id = ?`,
+		valueOr(status, "ready"), formatTime(t), instanceID)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) ListClusterNodes(ctx context.Context) ([]ClusterNode, error) {
+	rows, err := s.query(ctx, `
+		SELECT instance_id, hostname, version, addr, deployment_mode, db_driver, status, started_at, last_seen_at, metadata
+		FROM cluster_nodes
+		ORDER BY last_seen_at DESC, instance_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ClusterNode
+	for rows.Next() {
+		node, err := scanClusterNode(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, node)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) spendForBudget(ctx context.Context, b Budget, start, end time.Time) (float64, error) {
 	var field string
 	switch b.ScopeType {
@@ -2354,6 +2532,24 @@ func scanRequestLog(row scanner) (RequestLogRecord, error) {
 	item.CostUSD = roundCost(item.CostUSD)
 	item.CreatedAt = parseTime(created)
 	return item, nil
+}
+
+func scanClusterNode(row scanner) (ClusterNode, error) {
+	var node ClusterNode
+	var started, lastSeen string
+	err := row.Scan(&node.InstanceID, &node.Hostname, &node.Version, &node.Addr, &node.DeploymentMode, &node.DBDriver, &node.Status, &started, &lastSeen, &node.Metadata)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ClusterNode{}, ErrNotFound
+	}
+	if err != nil {
+		return ClusterNode{}, err
+	}
+	node.StartedAt = parseTime(started)
+	node.LastSeenAt = parseTime(lastSeen)
+	if strings.TrimSpace(node.Metadata) == "" {
+		node.Metadata = "{}"
+	}
+	return node, nil
 }
 
 func formatTime(t time.Time) string {
@@ -2691,4 +2887,17 @@ var schema = []string{
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_audit_log_created ON audit_log(created_at)`,
 	`CREATE INDEX IF NOT EXISTS idx_audit_log_target ON audit_log(target_type, target_id, created_at)`,
+	`CREATE TABLE IF NOT EXISTS cluster_nodes (
+		instance_id TEXT PRIMARY KEY,
+		hostname TEXT NOT NULL DEFAULT '',
+		version TEXT NOT NULL DEFAULT '',
+		addr TEXT NOT NULL DEFAULT '',
+		deployment_mode TEXT NOT NULL DEFAULT '',
+		db_driver TEXT NOT NULL DEFAULT '',
+		status TEXT NOT NULL DEFAULT 'starting',
+		started_at TEXT NOT NULL,
+		last_seen_at TEXT NOT NULL,
+		metadata TEXT NOT NULL DEFAULT '{}'
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_cluster_nodes_last_seen ON cluster_nodes(last_seen_at)`,
 }

@@ -597,6 +597,40 @@ button {
   margin-bottom: 14px;
 }
 
+.cluster-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.cluster-card {
+  display: grid;
+  gap: 6px;
+}
+
+.cluster-card span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.panel-note {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--muted);
+  padding: 10px 12px;
+  margin-bottom: 14px;
+}
+
+.panel-note p {
+  margin: 0;
+}
+
+.panel-note p + p {
+  margin-top: 6px;
+}
+
 .guardrail-form {
   display: grid;
   gap: 16px;
@@ -1144,6 +1178,7 @@ th {
   }
 
   .metric-strip,
+  .cluster-grid,
   .chart-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -1194,6 +1229,7 @@ th {
   }
 
   .metric-strip,
+  .cluster-grid,
   .chart-grid {
     grid-template-columns: 1fr;
   }
