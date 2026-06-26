@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+    branches:
+      - "**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: Build and test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Download Go modules
+        run: go mod download
+
+      - name: Build frontend
+        run: npm run build --prefix frontend
+
+      - name: Test backend
+        run: go test ./...
+
+      - name: Build backend binary
+        run: |
+          mkdir -p dist
+          go build -trimpath -o dist/phlox-gw-linux-amd64 ./cmd/phlox-gw
