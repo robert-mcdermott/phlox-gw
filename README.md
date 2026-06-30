@@ -173,8 +173,12 @@ Build just the Go binaries when `frontend/dist` is already current:
 scripts/build-release.sh --skip-frontend
 ```
 
-The frontend source lives in `frontend/src/static`. `npm run build` copies those files into
-`frontend/dist`, and the Go binary embeds `frontend/dist`.
+The frontend is a React + TypeScript app (Vite, Tailwind v4, shadcn/ui) under `frontend/src`.
+`npm run build` (inside `frontend/`) type-checks and bundles it into `frontend/dist`, which the Go
+binary embeds. `frontend/dist` is gitignored, so **`npm run build` must run before `go build ./...`**
+(or use `scripts/build-release.sh` without `--skip-frontend`). For development, `npm run dev` serves the
+app on Vite and proxies `/api`, `/v1`, `/anthropic`, `/health`, and `/ready` to the Go backend
+(default `127.0.0.1:8080`, override with `VITE_PROXY_TARGET`).
 
 For local runs, copy the environment template and start the gateway:
 
@@ -418,8 +422,8 @@ internal/auth/       Password hashing, API key generation, and signed session to
 internal/config/     Environment and data path loading
 internal/httpapi/    Browser, admin, API key, provider, and gateway handlers
 internal/store/      SQLite schema, migrations, and persistence methods
-frontend/dist/       Embedded dashboard assets
-frontend/src/static/ Source dashboard assets used by the frontend build
+frontend/dist/       Embedded dashboard assets (Vite build output, gitignored)
+frontend/src/        React + TypeScript dashboard source (Vite, Tailwind, shadcn/ui)
 docs/                Design, operator, API, routing, plan, and roadmap docs
 ```
 
