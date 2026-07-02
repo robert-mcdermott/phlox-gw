@@ -212,15 +212,26 @@ Provider rows describe where Phlox-GW sends requests after model routing.
 | `openai` | `https://api.openai.com/v1` | Also works for OpenRouter, LiteLLM, vLLM, Ollama, LM Studio, and other OpenAI-compatible APIs. |
 | `openai` for Ollama | `http://localhost:11434/v1` | Local Ollama exposes an OpenAI-compatible API at `/v1`. |
 | `anthropic` | `https://api.anthropic.com` | Phlox-GW appends `/v1/messages`. |
-| `bedrock` | blank | Uses the AWS SDK credential chain and configured AWS region. |
+| `bedrock` | blank | Calls Bedrock in the configured AWS region using one of three authentication methods (see below). |
 
 Provider API keys can be stored directly for local testing, but production deployments
 should prefer environment variable references. For example, set `api_key_env` to
 `OPENAI_API_KEY` and run the gateway with that environment variable set.
 
-Bedrock does not need a provider API key. It uses standard AWS credential sources such as
-`AWS_PROFILE`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, SSO
-profiles, ECS task roles, or EC2 instance roles.
+Bedrock providers offer three authentication methods, selected per provider in
+`Admin -> Providers`:
+
+- **AWS credential chain** (default): no credentials are stored on the provider. The AWS
+  SDK resolves credentials from standard sources such as `AWS_PROFILE`,
+  `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`,
+  `AWS_BEARER_TOKEN_BEDROCK`, SSO profiles, ECS task roles, or EC2 instance roles.
+- **Access key & secret**: an access key id, secret access key, and optional session token
+  entered on the provider row.
+- **Bedrock API key**: a single API key sent to Bedrock as a Bearer token.
+
+The AWS region is optional in all cases; when blank the SDK falls back to `AWS_REGION`.
+Stored AWS secrets and Bedrock API keys are write-only in the admin UI and are never
+returned to the browser.
 
 ## Models And Routes
 

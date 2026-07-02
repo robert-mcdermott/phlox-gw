@@ -116,8 +116,8 @@ not been changed after download.
 
 The exported payload includes:
 
-- Providers, including base URLs, provider type, AWS region, enabled state, and
-  environment-variable secret references.
+- Providers, including base URLs, provider type, AWS region, Bedrock authentication
+  method, enabled state, and environment-variable secret references.
 - Models, routes, upstream model IDs, pricing, context window, fallback routes, weighted
   routes, retry settings, timeouts, streaming support, and health-routing settings.
 - Budgets and rate limits.
@@ -126,15 +126,24 @@ The exported payload includes:
 
 The export deliberately excludes:
 
-- Direct provider API key values.
+- Direct provider API key values, AWS access keys, AWS secret keys, AWS session tokens, and
+  Bedrock API keys.
 - Users, password hashes, user-minted API keys, and API-key hashes.
 - Sessions, request metadata logs, usage ledger rows, and audit log rows.
 - Runtime provider health state.
 - Runtime environment secrets such as the session secret and OIDC client secret.
 
-If a provider used a direct stored API key, the export marks its `secret_source` as
-`direct-redacted`. Re-enter that secret manually, or move it to an environment variable,
-when recreating the provider in another environment.
+Each provider carries a `secret_source` marker describing how its secret is supplied so it
+can be re-entered when recreating the provider in another environment:
+
+- `environment`: the secret comes from the referenced environment variable.
+- `direct-redacted`: a direct provider API key was stored and redacted.
+- `aws-credential-chain`: Bedrock resolves credentials from the AWS SDK credential chain.
+- `aws-access-keys-redacted`: Bedrock access keys were stored and redacted.
+- `bedrock-api-key-redacted`: a Bedrock API key was stored and redacted.
+
+Re-enter any redacted secret manually, or move it to an environment variable, when
+recreating the provider in another environment.
 
 ## Demo Data Seeding
 
@@ -601,11 +610,15 @@ Provider:
 ID: bedrock
 Type: bedrock
 AWS region: us-east-1
+Authentication: AWS credential chain | Access key & secret | Bedrock API key
 Enabled: true
 ```
 
-No provider API key is needed. The AWS SDK default credential chain is used. Common
-options include:
+Bedrock providers select one of three authentication methods in `Admin -> Providers`. The
+AWS region is optional in all cases; when blank the AWS SDK falls back to `AWS_REGION`.
+
+**AWS credential chain (default).** No credentials are stored on the provider. The AWS SDK
+default credential chain is used. Common options include:
 
 ```bash
 export AWS_PROFILE="my-sso-profile"
@@ -618,9 +631,23 @@ or:
 export AWS_ACCESS_KEY_ID="..."
 export AWS_SECRET_ACCESS_KEY="..."
 export AWS_SESSION_TOKEN="..."
+export AWS_REGION="us-east-1"
 ```
 
-Instance roles, task roles, and SSO-backed profiles are also supported by the AWS SDK.
+Instance roles, task roles, and SSO-backed profiles are also supported by the AWS SDK. An
+`AWS_BEARER_TOKEN_BEDROCK` environment variable is honored as well.
+
+**Access key & secret.** Enter an access key id, secret access key, and optional session
+token on the provider row. These are stored on the gateway and used instead of the
+environment credential chain. Use the session token field for temporary credentials.
+
+**Bedrock API key.** Enter a single Bedrock API key on the provider row. It is sent to
+Bedrock as a Bearer token.
+
+Stored secrets (secret access keys, session tokens, and Bedrock API keys) are write-only
+in the admin UI. They are never returned to the browser, and editing a provider without
+re-entering a secret leaves the stored value unchanged. Changing the authentication method
+clears the credentials that no longer apply.
 
 ## Model Configuration
 
