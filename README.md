@@ -1,6 +1,6 @@
 # Phlox-GW
 
-[![CI](https://github.com/robert-mcdermott/phlox-gw/actions/workflows/ci.yml/badge.svg)](https://github.com/robert-mcdermott/phlox-gw/actions/workflows/ci.yml)
+[![CI](https://github.com/robert-mcdermott/phlox-gw/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/robert-mcdermott/phlox-gw/actions/workflows/ci.yml)
 
 Phlox-GW is a self-hosted enterprise LLM gateway. It gives administrators one place to
 publish model routes, control who can use them, attach prices, enforce budgets and rate
