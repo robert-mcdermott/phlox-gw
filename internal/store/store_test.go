@@ -265,7 +265,7 @@ func TestProviderAndModelCRUD(t *testing.T) {
 	}
 	provider.Name = "Local vLLM Updated"
 	provider.APIKeyEnv = "VLLM_API_KEY"
-	if err := s.UpdateProvider(ctx, provider, false); err != nil {
+	if err := s.UpdateProvider(ctx, provider, ProviderSecretUpdate{}); err != nil {
 		t.Fatalf("UpdateProvider: %v", err)
 	}
 
@@ -341,6 +341,72 @@ func TestProviderAndModelCRUD(t *testing.T) {
 	}
 	if routed.Model.WeightedRoutes != model.WeightedRoutes {
 		t.Fatalf("model weighted routes were not persisted: %#v", routed.Model)
+	}
+}
+
+func TestBedrockProviderCredentialLifecycle(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+
+	provider := Provider{
+		ID:                 "bedrock-keys",
+		Name:               "Bedrock (keys)",
+		Type:               "bedrock",
+		AWSRegion:          "us-west-2",
+		AWSAuthMethod:      "keys",
+		AWSAccessKeyID:     "AKIAEXAMPLE",
+		AWSSecretAccessKey: "secret-1",
+		AWSSessionToken:    "session-1",
+		Enabled:            true,
+	}
+	if err := s.CreateProvider(ctx, provider); err != nil {
+		t.Fatalf("CreateProvider: %v", err)
+	}
+	got, err := s.GetProvider(ctx, provider.ID)
+	if err != nil {
+		t.Fatalf("GetProvider: %v", err)
+	}
+	if got.AWSAuthMethod != "keys" || got.AWSAccessKeyID != "AKIAEXAMPLE" || got.AWSSecretAccessKey != "secret-1" || got.AWSSessionToken != "session-1" {
+		t.Fatalf("bedrock credentials were not persisted: %#v", got)
+	}
+
+	// Update without touching secrets keeps the stored secret and token.
+	got.Name = "Bedrock (renamed)"
+	got.AWSSecretAccessKey = ""
+	got.AWSSessionToken = ""
+	if err := s.UpdateProvider(ctx, got, ProviderSecretUpdate{}); err != nil {
+		t.Fatalf("UpdateProvider: %v", err)
+	}
+	kept, err := s.GetProvider(ctx, provider.ID)
+	if err != nil {
+		t.Fatalf("GetProvider after update: %v", err)
+	}
+	if kept.Name != "Bedrock (renamed)" || kept.AWSSecretAccessKey != "secret-1" || kept.AWSSessionToken != "session-1" {
+		t.Fatalf("secrets should be preserved when not updated: %#v", kept)
+	}
+
+	// Switching to API-key auth replaces the credential set.
+	kept.AWSAuthMethod = "api_key"
+	kept.AWSAccessKeyID = ""
+	kept.AWSSecretAccessKey = ""
+	kept.AWSSessionToken = ""
+	kept.BedrockAPIKey = "bedrock-token-1"
+	if err := s.UpdateProvider(ctx, kept, ProviderSecretUpdate{AWSCredentials: true, BedrockAPIKey: true}); err != nil {
+		t.Fatalf("UpdateProvider auth switch: %v", err)
+	}
+	switched, err := s.GetProvider(ctx, provider.ID)
+	if err != nil {
+		t.Fatalf("GetProvider after auth switch: %v", err)
+	}
+	if switched.AWSAuthMethod != "api_key" || switched.BedrockAPIKey != "bedrock-token-1" {
+		t.Fatalf("bedrock api key auth was not persisted: %#v", switched)
+	}
+	if switched.AWSSecretAccessKey != "" || switched.AWSSessionToken != "" {
+		t.Fatalf("aws credentials should be cleared after auth switch: %#v", switched)
 	}
 }
 

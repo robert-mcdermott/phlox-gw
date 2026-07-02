@@ -30,10 +30,12 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	awscredentials "github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime"
 	bedrockdocument "github.com/aws/aws-sdk-go-v2/service/bedrockruntime/document"
 	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime/types"
 	smithy "github.com/aws/smithy-go"
+	smithybearer "github.com/aws/smithy-go/auth/bearer"
 	oidc "github.com/coreos/go-oidc/v3/oidc"
 	"github.com/robert-mcdermott/phlox-gw/internal/auth"
 	"github.com/robert-mcdermott/phlox-gw/internal/config"
@@ -270,6 +272,7 @@ func New(opts Options) (http.Handler, error) {
 	mux.HandleFunc("PUT /api/admin/models/{id}", s.requireAdmin(s.updateModel))
 	mux.HandleFunc("DELETE /api/admin/models/{id}", s.requireAdmin(s.deleteModel))
 	mux.HandleFunc("POST /api/admin/models/{id}/test", s.requireAdmin(s.testModel))
+	mux.HandleFunc("POST /api/admin/playground/chat", s.requireAdmin(s.playgroundChat))
 	mux.HandleFunc("GET /api/admin/budgets", s.requireAdmin(s.listBudgets))
 	mux.HandleFunc("POST /api/admin/budgets", s.requireAdmin(s.createBudget))
 	mux.HandleFunc("PATCH /api/admin/budgets/{id}", s.requireAdmin(s.updateBudget))
@@ -1129,16 +1132,18 @@ func (s *Server) providers(w http.ResponseWriter, r *http.Request, _ store.User)
 		if providers[i].APIKey != "" {
 			providers[i].APIKeyEnv = providers[i].APIKeyEnv + secretMarker(providers[i].APIKeyEnv)
 		}
+		providers[i].HasAWSSecret = providers[i].AWSSecretAccessKey != ""
+		providers[i].HasBedrockAPIKey = providers[i].BedrockAPIKey != ""
 	}
 	respondJSON(w, http.StatusOK, providers)
 }
 
 func (s *Server) createProvider(w http.ResponseWriter, r *http.Request, admin store.User) {
-	p, updateSecret, ok := s.providerFromRequest(w, r, "")
+	p, secrets, ok := s.providerFromRequest(w, r, "")
 	if !ok {
 		return
 	}
-	if !updateSecret {
+	if !secrets.APIKey {
 		p.APIKey = ""
 	}
 	if err := s.store.CreateProvider(r.Context(), p); err != nil {
@@ -1149,16 +1154,16 @@ func (s *Server) createProvider(w http.ResponseWriter, r *http.Request, admin st
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.audit(r, admin, "provider.create", "provider", p.ID, p.Name, providerAuditDetails(p, updateSecret))
+	s.audit(r, admin, "provider.create", "provider", p.ID, p.Name, providerAuditDetails(p, secrets))
 	respondJSON(w, http.StatusCreated, p)
 }
 
 func (s *Server) updateProvider(w http.ResponseWriter, r *http.Request, admin store.User) {
-	p, updateSecret, ok := s.providerFromRequest(w, r, r.PathValue("id"))
+	p, secrets, ok := s.providerFromRequest(w, r, r.PathValue("id"))
 	if !ok {
 		return
 	}
-	if err := s.store.UpdateProvider(r.Context(), p, updateSecret); err != nil {
+	if err := s.store.UpdateProvider(r.Context(), p, secrets); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			respondError(w, http.StatusNotFound, "provider not found")
 			return
@@ -1166,7 +1171,7 @@ func (s *Server) updateProvider(w http.ResponseWriter, r *http.Request, admin st
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.audit(r, admin, "provider.update", "provider", p.ID, p.Name, providerAuditDetails(p, updateSecret))
+	s.audit(r, admin, "provider.update", "provider", p.ID, p.Name, providerAuditDetails(p, secrets))
 	respondJSON(w, http.StatusOK, p)
 }
 
@@ -1277,6 +1282,285 @@ func (s *Server) testModel(w http.ResponseWriter, r *http.Request, admin store.U
 		"provider_id": result.ProviderID,
 	})
 	respondJSON(w, status, result)
+}
+
+const (
+	playgroundMaxMessages  = 50
+	playgroundMaxChars     = 64 * 1024
+	playgroundDefaultToken = 1024
+	playgroundMaxTokensCap = 8192
+)
+
+type playgroundChatResult struct {
+	OK            bool   `json:"ok"`
+	ProviderID    string `json:"provider_id"`
+	ProviderType  string `json:"provider_type"`
+	ModelRoute    string `json:"model_route"`
+	UpstreamModel string `json:"upstream_model"`
+	StatusCode    int    `json:"status_code"`
+	LatencyMS     int64  `json:"latency_ms"`
+	Content       string `json:"content,omitempty"`
+	InputTokens   int    `json:"input_tokens"`
+	OutputTokens  int    `json:"output_tokens"`
+	TotalTokens   int    `json:"total_tokens"`
+	Error         string `json:"error,omitempty"`
+}
+
+// playgroundChat sends an admin-authored conversation to a routed model so
+// providers and models can be validated from the dashboard. Playground
+// traffic bypasses API keys, budgets, rate limits, and guardrails, and is
+// not recorded in the usage ledger; each call is audit-logged instead.
+func (s *Server) playgroundChat(w http.ResponseWriter, r *http.Request, admin store.User) {
+	var req struct {
+		Route     string `json:"route"`
+		System    string `json:"system"`
+		MaxTokens int    `json:"max_tokens"`
+		Messages  []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"messages"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if strings.TrimSpace(req.Route) == "" {
+		respondError(w, http.StatusBadRequest, "route is required")
+		return
+	}
+	if len(req.Messages) == 0 {
+		respondError(w, http.StatusBadRequest, "messages must be a non-empty array")
+		return
+	}
+	if len(req.Messages) > playgroundMaxMessages {
+		respondError(w, http.StatusBadRequest, "conversation has too many messages")
+		return
+	}
+	system := strings.TrimSpace(req.System)
+	totalChars := len(system)
+	messages := make([]map[string]any, 0, len(req.Messages))
+	for _, m := range req.Messages {
+		role := strings.ToLower(strings.TrimSpace(m.Role))
+		if role != "user" && role != "assistant" {
+			respondError(w, http.StatusBadRequest, "message roles must be user or assistant")
+			return
+		}
+		if strings.TrimSpace(m.Content) == "" {
+			respondError(w, http.StatusBadRequest, "message content cannot be empty")
+			return
+		}
+		totalChars += len(m.Content)
+		messages = append(messages, map[string]any{"role": role, "content": m.Content})
+	}
+	if totalChars > playgroundMaxChars {
+		respondError(w, http.StatusBadRequest, "conversation is too large")
+		return
+	}
+	maxTokens := req.MaxTokens
+	if maxTokens <= 0 {
+		maxTokens = playgroundDefaultToken
+	}
+	if maxTokens > playgroundMaxTokensCap {
+		maxTokens = playgroundMaxTokensCap
+	}
+	route, err := s.store.ResolveModel(r.Context(), strings.TrimSpace(req.Route))
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			respondError(w, http.StatusNotFound, "enabled model route not found")
+			return
+		}
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	result := s.runPlaygroundChat(r.Context(), route, system, messages, maxTokens)
+	s.audit(r, admin, "playground.chat", "model", route.Model.ID, route.Model.Route, map[string]any{
+		"ok":          result.OK,
+		"status_code": result.StatusCode,
+		"latency_ms":  result.LatencyMS,
+		"provider_id": result.ProviderID,
+		"messages":    len(messages),
+	})
+	respondJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) runPlaygroundChat(parent context.Context, route store.RoutedModel, system string, messages []map[string]any, maxTokens int) playgroundChatResult {
+	result := playgroundChatResult{
+		ProviderID:    route.Provider.ID,
+		ProviderType:  route.Provider.Type,
+		ModelRoute:    route.Model.Route,
+		UpstreamModel: route.Model.ModelID,
+	}
+	timeout := 60 * time.Second
+	if route.Model.RequestTimeoutMS > 0 {
+		timeout = time.Duration(route.Model.RequestTimeoutMS) * time.Millisecond
+	}
+	ctx, cancel := context.WithTimeout(parent, timeout)
+	defer cancel()
+
+	if route.Provider.Type == "bedrock" {
+		return s.runBedrockPlaygroundChat(ctx, route, system, messages, maxTokens, result)
+	}
+
+	var endpoint string
+	var payload map[string]any
+	switch route.Provider.Type {
+	case "openai":
+		endpoint = strings.TrimRight(route.Provider.BaseURL, "/") + "/chat/completions"
+		withSystem := messages
+		if system != "" {
+			withSystem = append([]map[string]any{{"role": "system", "content": system}}, messages...)
+		}
+		payload = map[string]any{
+			"model":      route.Model.ModelID,
+			"messages":   withSystem,
+			"max_tokens": maxTokens,
+			"stream":     false,
+		}
+	case "anthropic":
+		endpoint = strings.TrimRight(route.Provider.BaseURL, "/") + "/v1/messages"
+		payload = map[string]any{
+			"model":      route.Model.ModelID,
+			"max_tokens": maxTokens,
+			"messages":   messages,
+		}
+		if system != "" {
+			payload["system"] = system
+		}
+	default:
+		result.Error = "unsupported provider type"
+		return result
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		result.Error = err.Error()
+		return result
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		result.Error = err.Error()
+		return result
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if route.Provider.Type == "anthropic" {
+		req.Header.Set("anthropic-version", "2023-06-01")
+		if apiKey := providerAPIKey(route.Provider); apiKey != "" {
+			req.Header.Set("x-api-key", apiKey)
+		}
+	} else if apiKey := providerAPIKey(route.Provider); apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	req.Header.Set("User-Agent", "Phlox-GW/0.1")
+
+	start := time.Now()
+	resp, err := s.httpClient.Do(req)
+	result.LatencyMS = time.Since(start).Milliseconds()
+	if err != nil {
+		result.Error = err.Error()
+		return result
+	}
+	defer resp.Body.Close()
+	result.StatusCode = resp.StatusCode
+	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		result.Error = err.Error()
+		return result
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		result.Error = limitString(string(responseBody), 2000)
+		return result
+	}
+	var usage tokenUsage
+	if route.Provider.Type == "anthropic" {
+		result.Content = anthropicResponseText(responseBody)
+		usage = parseAnthropicUsage(responseBody)
+	} else {
+		result.Content = openAIResponseText(responseBody)
+		usage = parseOpenAIUsage(responseBody)
+	}
+	result.InputTokens = usage.Input
+	result.OutputTokens = usage.Output
+	result.TotalTokens = usage.Total
+	result.OK = true
+	return result
+}
+
+func (s *Server) runBedrockPlaygroundChat(ctx context.Context, route store.RoutedModel, system string, messages []map[string]any, maxTokens int, result playgroundChatResult) playgroundChatResult {
+	raw := make([]any, 0, len(messages)+1)
+	if system != "" {
+		raw = append(raw, map[string]any{"role": "system", "content": system})
+	}
+	for _, m := range messages {
+		raw = append(raw, m)
+	}
+	input, err := bedrockConverseInput(route.Model.ModelID, map[string]any{
+		"messages":   raw,
+		"max_tokens": float64(maxTokens),
+	})
+	if err != nil {
+		result.Error = err.Error()
+		return result
+	}
+	client, err := s.bedrockClient(ctx, route.Provider)
+	if err != nil {
+		result.StatusCode = http.StatusBadGateway
+		result.Error = err.Error()
+		return result
+	}
+	start := time.Now()
+	output, err := client.Converse(ctx, input)
+	result.LatencyMS = time.Since(start).Milliseconds()
+	if err != nil {
+		result.StatusCode = bedrockErrorStatus(err)
+		result.Error = bedrockErrorMessage(err)
+		return result
+	}
+	result.StatusCode = http.StatusOK
+	result.Content = bedrockOutputText(output)
+	usage := bedrockUsage(output)
+	result.InputTokens = usage.Input
+	result.OutputTokens = usage.Output
+	result.TotalTokens = usage.Total
+	result.OK = true
+	return result
+}
+
+// openAIResponseText extracts the assistant text from a non-streaming OpenAI
+// chat completion body, falling back to reasoning output for models that
+// return their answer there.
+func openAIResponseText(body []byte) string {
+	var raw map[string]any
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return ""
+	}
+	choices, _ := raw["choices"].([]any)
+	if len(choices) == 0 {
+		return ""
+	}
+	choice, _ := choices[0].(map[string]any)
+	message, _ := choice["message"].(map[string]any)
+	if text, err := openAIMessageText(message["content"]); err == nil && strings.TrimSpace(text) != "" {
+		return text
+	}
+	reasoning, _ := firstPresent(message, "reasoning", "reasoning_content").(string)
+	return reasoning
+}
+
+func anthropicResponseText(body []byte) string {
+	var resp struct {
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return ""
+	}
+	var parts []string
+	for _, block := range resp.Content {
+		if block.Type == "text" && block.Text != "" {
+			parts = append(parts, block.Text)
+		}
+	}
+	return strings.Join(parts, "\n")
 }
 
 func (s *Server) usage(w http.ResponseWriter, r *http.Request, user store.User) {
@@ -4393,11 +4677,32 @@ func (s *Server) bedrockClient(ctx context.Context, p store.Provider) (BedrockCo
 	if strings.TrimSpace(p.AWSRegion) != "" {
 		opts = append(opts, awsconfig.WithRegion(strings.TrimSpace(p.AWSRegion)))
 	}
+	var clientOpts []func(*bedrockruntime.Options)
+	switch p.AWSAuthMethod {
+	case "keys":
+		access := strings.TrimSpace(p.AWSAccessKeyID)
+		secret := strings.TrimSpace(p.AWSSecretAccessKey)
+		if access == "" || secret == "" {
+			return nil, errors.New("bedrock provider uses access-key auth but the access key or secret key is not configured")
+		}
+		opts = append(opts, awsconfig.WithCredentialsProvider(awscredentials.NewStaticCredentialsProvider(access, secret, strings.TrimSpace(p.AWSSessionToken))))
+	case "api_key":
+		key := strings.TrimSpace(p.BedrockAPIKey)
+		if key == "" {
+			return nil, errors.New("bedrock provider uses API-key auth but no API key is configured")
+		}
+		clientOpts = append(clientOpts, func(o *bedrockruntime.Options) {
+			o.BearerAuthTokenProvider = smithybearer.TokenProviderFunc(func(context.Context) (smithybearer.Token, error) {
+				return smithybearer.Token{Value: key}, nil
+			})
+			o.AuthSchemePreference = []string{"httpBearerAuth"}
+		})
+	}
 	cfg, err := awsconfig.LoadDefaultConfig(ctx, opts...)
 	if err != nil {
 		return nil, err
 	}
-	return awsBedrockConverseClient{client: bedrockruntime.NewFromConfig(cfg)}, nil
+	return awsBedrockConverseClient{client: bedrockruntime.NewFromConfig(cfg, clientOpts...)}, nil
 }
 
 func (s *Server) recordUsage(ctx context.Context, requestID string, user store.User, key store.APIKey, route store.RoutedModel, protocol string, usage tokenUsage, latencyMS int64, status int, errText string, eventMeta requestEventMeta) {
@@ -5152,46 +5457,114 @@ func (s *Server) runBedrockHealthCheck(parent context.Context, route store.Route
 	return result
 }
 
-func (s *Server) providerFromRequest(w http.ResponseWriter, r *http.Request, pathID string) (store.Provider, bool, bool) {
+func (s *Server) providerFromRequest(w http.ResponseWriter, r *http.Request, pathID string) (store.Provider, store.ProviderSecretUpdate, bool) {
 	var req struct {
-		ID        string `json:"id"`
-		Name      string `json:"name"`
-		Type      string `json:"type"`
-		BaseURL   string `json:"base_url"`
-		APIKey    string `json:"api_key"`
-		APIKeyEnv string `json:"api_key_env"`
-		AWSRegion string `json:"aws_region"`
-		Enabled   bool   `json:"enabled"`
+		ID                 string `json:"id"`
+		Name               string `json:"name"`
+		Type               string `json:"type"`
+		BaseURL            string `json:"base_url"`
+		APIKey             string `json:"api_key"`
+		APIKeyEnv          string `json:"api_key_env"`
+		AWSRegion          string `json:"aws_region"`
+		AWSAuthMethod      string `json:"aws_auth_method"`
+		AWSAccessKeyID     string `json:"aws_access_key_id"`
+		AWSSecretAccessKey string `json:"aws_secret_access_key"`
+		AWSSessionToken    string `json:"aws_session_token"`
+		BedrockAPIKey      string `json:"bedrock_api_key"`
+		Enabled            bool   `json:"enabled"`
 	}
 	if !decodeJSON(w, r, &req) {
-		return store.Provider{}, false, false
+		return store.Provider{}, store.ProviderSecretUpdate{}, false
 	}
+	isCreate := pathID == ""
 	id := strings.TrimSpace(req.ID)
 	if pathID != "" {
 		id = pathID
 	}
 	if id == "" || strings.TrimSpace(req.Name) == "" {
 		respondError(w, http.StatusBadRequest, "provider id and name are required")
-		return store.Provider{}, false, false
+		return store.Provider{}, store.ProviderSecretUpdate{}, false
 	}
 	if req.Type != "openai" && req.Type != "anthropic" && req.Type != "bedrock" {
 		respondError(w, http.StatusBadRequest, "provider type must be openai, anthropic, or bedrock")
-		return store.Provider{}, false, false
+		return store.Provider{}, store.ProviderSecretUpdate{}, false
 	}
 	if req.Type != "bedrock" && strings.TrimSpace(req.BaseURL) == "" {
 		respondError(w, http.StatusBadRequest, "base_url is required for OpenAI and Anthropic-compatible providers")
-		return store.Provider{}, false, false
+		return store.Provider{}, store.ProviderSecretUpdate{}, false
 	}
-	return store.Provider{
-		ID:        id,
-		Name:      strings.TrimSpace(req.Name),
-		Type:      req.Type,
-		BaseURL:   strings.TrimRight(strings.TrimSpace(req.BaseURL), "/"),
-		APIKey:    req.APIKey,
-		APIKeyEnv: strings.TrimSpace(req.APIKeyEnv),
-		AWSRegion: strings.TrimSpace(req.AWSRegion),
-		Enabled:   req.Enabled,
-	}, strings.TrimSpace(req.APIKey) != "", true
+	p := store.Provider{
+		ID:                 id,
+		Name:               strings.TrimSpace(req.Name),
+		Type:               req.Type,
+		BaseURL:            strings.TrimRight(strings.TrimSpace(req.BaseURL), "/"),
+		APIKey:             req.APIKey,
+		APIKeyEnv:          strings.TrimSpace(req.APIKeyEnv),
+		AWSRegion:          strings.TrimSpace(req.AWSRegion),
+		AWSAuthMethod:      strings.TrimSpace(req.AWSAuthMethod),
+		AWSAccessKeyID:     strings.TrimSpace(req.AWSAccessKeyID),
+		AWSSecretAccessKey: strings.TrimSpace(req.AWSSecretAccessKey),
+		AWSSessionToken:    strings.TrimSpace(req.AWSSessionToken),
+		BedrockAPIKey:      strings.TrimSpace(req.BedrockAPIKey),
+		Enabled:            req.Enabled,
+	}
+	secrets := store.ProviderSecretUpdate{APIKey: strings.TrimSpace(req.APIKey) != ""}
+	if p.Type != "bedrock" {
+		// Wipe Bedrock-only settings so stale credentials do not linger
+		// after a provider changes type.
+		p.AWSRegion = ""
+		p.AWSAuthMethod = ""
+		p.AWSAccessKeyID = ""
+		p.AWSSecretAccessKey = ""
+		p.AWSSessionToken = ""
+		p.BedrockAPIKey = ""
+		secrets.AWSCredentials = true
+		secrets.BedrockAPIKey = true
+		return p, secrets, true
+	}
+	// Bedrock providers authenticate via AWS, not a base URL or bearer env var.
+	p.BaseURL = ""
+	p.APIKey = ""
+	p.APIKeyEnv = ""
+	secrets.APIKey = true
+	if p.AWSAuthMethod == "" {
+		p.AWSAuthMethod = "chain"
+	}
+	switch p.AWSAuthMethod {
+	case "chain":
+		p.AWSAccessKeyID = ""
+		p.AWSSecretAccessKey = ""
+		p.AWSSessionToken = ""
+		p.BedrockAPIKey = ""
+		secrets.AWSCredentials = true
+		secrets.BedrockAPIKey = true
+	case "keys":
+		if p.AWSAccessKeyID == "" {
+			respondError(w, http.StatusBadRequest, "aws_access_key_id is required for access-key auth")
+			return store.Provider{}, store.ProviderSecretUpdate{}, false
+		}
+		if isCreate && p.AWSSecretAccessKey == "" {
+			respondError(w, http.StatusBadRequest, "aws_secret_access_key is required for access-key auth")
+			return store.Provider{}, store.ProviderSecretUpdate{}, false
+		}
+		secrets.AWSCredentials = p.AWSSecretAccessKey != ""
+		p.BedrockAPIKey = ""
+		secrets.BedrockAPIKey = true
+	case "api_key":
+		if isCreate && p.BedrockAPIKey == "" {
+			respondError(w, http.StatusBadRequest, "bedrock_api_key is required for API-key auth")
+			return store.Provider{}, store.ProviderSecretUpdate{}, false
+		}
+		secrets.BedrockAPIKey = p.BedrockAPIKey != ""
+		p.AWSAccessKeyID = ""
+		p.AWSSecretAccessKey = ""
+		p.AWSSessionToken = ""
+		secrets.AWSCredentials = true
+	default:
+		respondError(w, http.StatusBadRequest, "aws_auth_method must be chain, keys, or api_key")
+		return store.Provider{}, store.ProviderSecretUpdate{}, false
+	}
+	return p, secrets, true
 }
 
 func (s *Server) modelFromRequest(w http.ResponseWriter, r *http.Request, pathID string) (store.Model, bool) {
@@ -5335,16 +5708,19 @@ func valueOr(value, fallback string) string {
 	return value
 }
 
-func providerAuditDetails(p store.Provider, directSecretUpdated bool) map[string]any {
+func providerAuditDetails(p store.Provider, secrets store.ProviderSecretUpdate) map[string]any {
 	return map[string]any{
-		"id":                    p.ID,
-		"name":                  p.Name,
-		"type":                  p.Type,
-		"base_url":              p.BaseURL,
-		"api_key_env":           p.APIKeyEnv,
-		"direct_secret_updated": directSecretUpdated,
-		"aws_region":            p.AWSRegion,
-		"enabled":               p.Enabled,
+		"id":                      p.ID,
+		"name":                    p.Name,
+		"type":                    p.Type,
+		"base_url":                p.BaseURL,
+		"api_key_env":             p.APIKeyEnv,
+		"direct_secret_updated":   secrets.APIKey,
+		"aws_region":              p.AWSRegion,
+		"aws_auth_method":         p.AWSAuthMethod,
+		"aws_credentials_updated": secrets.AWSCredentials,
+		"bedrock_api_key_updated": secrets.BedrockAPIKey,
+		"enabled":                 p.Enabled,
 	}
 }
 

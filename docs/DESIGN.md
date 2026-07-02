@@ -118,8 +118,11 @@ Provider adapters are deliberately thin:
   OpenRouter, LiteLLM, vLLM, LM Studio, and similar endpoints.
 - `anthropic`: forwards to `{base_url}/v1/messages`, preserves Anthropic headers, and
   streams SSE responses through while capturing usage from compatible stream events.
-- `bedrock`: uses the AWS SDK default credential chain and the provider `aws_region` to
-  call Bedrock Converse and ConverseStream. Bedrock models are exposed through the
+- `bedrock`: calls Bedrock Converse and ConverseStream in the provider `aws_region` using
+  one of three per-provider auth methods: the AWS SDK default credential chain (env vars,
+  shared config profiles, or an attached IAM role — the default), explicit access keys
+  (access key id, secret access key, and optional session token stored on the provider
+  row), or a Bedrock API key sent as a Bearer token. Bedrock models are exposed through the
   OpenAI-compatible `/v1/chat/completions` surface and the Anthropic-compatible
   `/anthropic/v1/messages` surface for text, streaming text, and function tool-call round
   trips where the selected Bedrock model supports those features. OpenAI-compatible

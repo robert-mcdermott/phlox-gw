@@ -39,6 +39,7 @@ const state = {
   budgetBurnDown: [],
   oidcConfig: { enabled: false, display_name: 'Entra ID' },
   adminTab: 'operations',
+  playground: { route: '', system: '', draft: '', maxTokens: 1024, busy: false, messages: [] },
   secret: '',
   error: '',
   notice: ''
@@ -54,6 +55,7 @@ const ADMIN_SECTIONS = [
   { id: 'config', label: 'Configuration', icon: 'file', description: 'Export signed, sanitized admin configuration for review or migration.' },
   { id: 'providers', label: 'Providers', icon: 'server', description: 'Configure upstream providers and health state.' },
   { id: 'models', label: 'Models', icon: 'cpu', description: 'Expose model routes, prices, context metadata, and health tests.' },
+  { id: 'playground', label: 'Playground', icon: 'chat', description: 'Send test chat messages through a model route to validate providers and models.' },
   { id: 'users', label: 'Users', icon: 'users', description: 'Manage local users, departments, roles, and passwords.' },
   { id: 'keys', label: 'API Keys', icon: 'key', description: 'Govern user-owned API keys, allowlists, budgets, and per-key limits.' },
   { id: 'limits', label: 'Rate Limits', icon: 'gauge', description: 'Set RPM and TPM controls by user, department, provider, or model.' },
@@ -466,17 +468,37 @@ function adminContentView(usage) {
   }
   if (state.adminTab === 'providers') {
     return `
-      ${adminPanel('Add provider', 'server', 'OpenAI-compatible covers Ollama, vLLM, LM Studio, OpenRouter, and LiteLLM. Bedrock uses AWS region and the AWS credential chain.', `
-        <div class="form-grid">
-          <input id="provider-id" placeholder="provider id, e.g. local-vllm" />
-          <input id="provider-name" placeholder="Display name" />
-          <select id="provider-type"><option value="openai">OpenAI-compatible</option><option value="anthropic">Anthropic-compatible</option><option value="bedrock">AWS Bedrock</option></select>
-          <input id="provider-base-url" placeholder="Base URL, e.g. http://localhost:8000/v1" />
-          <input id="provider-api-key-env" placeholder="API key env var, e.g. OPENAI_API_KEY" />
-          <input id="provider-api-key" placeholder="Direct API key (optional)" type="password" />
-          <input id="provider-aws-region" placeholder="AWS region for Bedrock, e.g. us-east-1" />
-          <label class="check"><input id="provider-enabled" type="checkbox" checked /> Enabled</label>
-          <button class="btn primary" id="create-provider">${icon('plus', 'btn-icon')}Add provider</button>
+      ${adminPanel('Add provider', 'server', 'OpenAI-compatible covers Ollama, vLLM, LM Studio, OpenRouter, and LiteLLM. Fields below adapt to the provider type.', `
+        <div id="add-provider-form" class="form-stack">
+          <div class="form-grid">
+            <label class="form-field"><span>Provider id</span><input id="provider-id" placeholder="e.g. local-vllm" /></label>
+            <label class="form-field"><span>Display name</span><input id="provider-name" placeholder="e.g. Local vLLM" /></label>
+            <label class="form-field"><span>Type</span><select id="provider-type"><option value="openai">OpenAI-compatible</option><option value="anthropic">Anthropic-compatible</option><option value="bedrock">AWS Bedrock</option></select></label>
+            <label class="form-field"><span>Status</span><label class="check"><input id="provider-enabled" type="checkbox" checked /> Enabled</label></label>
+          </div>
+          <div class="form-grid" data-provider-group="api">
+            <label class="form-field"><span>Base URL</span><input id="provider-base-url" placeholder="e.g. http://localhost:8000/v1" /></label>
+            <label class="form-field"><span>API key env var</span><input id="provider-api-key-env" placeholder="e.g. OPENAI_API_KEY" /></label>
+            <label class="form-field"><span>Direct API key (optional)</span><input id="provider-api-key" placeholder="used when the env var is unset" type="password" /></label>
+          </div>
+          <div class="form-grid" data-provider-group="bedrock">
+            <label class="form-field"><span>Authentication</span><select id="provider-aws-auth">
+              <option value="chain">AWS credential chain (env / IAM role)</option>
+              <option value="keys">Access key &amp; secret</option>
+              <option value="api_key">Bedrock API key</option>
+            </select></label>
+            <label class="form-field"><span>AWS region</span><input id="provider-aws-region" placeholder="e.g. us-east-1 (blank uses AWS_REGION)" /></label>
+          </div>
+          <p class="field-help" data-provider-group="bedrock-chain">Uses the standard AWS credential chain: AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_SESSION_TOKEN environment variables, shared config profiles, or an attached IAM role (EC2, ECS, EKS). An AWS_BEARER_TOKEN_BEDROCK environment variable is honored as well.</p>
+          <div class="form-grid" data-provider-group="bedrock-keys">
+            <label class="form-field"><span>Access key id</span><input id="provider-aws-access-key" placeholder="AKIA..." /></label>
+            <label class="form-field"><span>Secret access key</span><input id="provider-aws-secret-key" type="password" /></label>
+            <label class="form-field"><span>Session token (optional)</span><input id="provider-aws-session-token" type="password" placeholder="for temporary credentials" /></label>
+          </div>
+          <div class="form-grid" data-provider-group="bedrock-api-key">
+            <label class="form-field"><span>Bedrock API key</span><input id="provider-bedrock-api-key" type="password" placeholder="sent as a Bearer token" /></label>
+          </div>
+          <div><button class="btn primary" id="create-provider">${icon('plus', 'btn-icon')}Add provider</button></div>
         </div>
       `)}
       ${adminPanel('Providers', 'server', '', providerRows())}
@@ -505,6 +527,9 @@ function adminContentView(usage) {
       `)}
       ${adminPanel('Models and pricing', 'cpu', '', modelRows())}
     `;
+  }
+  if (state.adminTab === 'playground') {
+    return playgroundView();
   }
   if (state.adminTab === 'users') {
     return `
@@ -765,30 +790,125 @@ function providerRows() {
   return `
     <div class="table-scroll">
       <table>
-        <thead><tr><th>ID</th><th>Name</th><th>Type</th><th>Base URL</th><th>Key env</th><th>Direct key</th><th>AWS region</th><th>Enabled</th><th>Health</th><th>Failures</th><th>Last check</th><th>Circuit open</th><th>Last error</th><th>Actions</th></tr></thead>
+        <thead><tr><th>ID</th><th>Name</th><th>Type</th><th>Connection &amp; credentials</th><th>Enabled</th><th>Health</th><th>Failures</th><th>Last check</th><th>Circuit open</th><th>Last error</th><th>Actions</th></tr></thead>
         <tbody>
-          ${state.providers.map(p => `
-            <tr data-provider-row="${esc(p.id)}">
-              <td class="mono">${esc(p.id)}</td>
-              <td><input data-provider-field="name" value="${attr(p.name)}" /></td>
-              <td><select data-provider-field="type">${option('openai', 'OpenAI-compatible', p.type)}${option('anthropic', 'Anthropic-compatible', p.type)}${option('bedrock', 'AWS Bedrock', p.type)}</select></td>
-              <td><input data-provider-field="base_url" value="${attr(p.base_url)}" /></td>
-              <td><input data-provider-field="api_key_env" value="${attr((p.api_key_env || '').replace(' (secret set)', ''))}" /></td>
-              <td><input data-provider-field="api_key" type="password" placeholder="leave blank to keep" /></td>
-              <td><input data-provider-field="aws_region" value="${attr(p.aws_region)}" /></td>
-              <td><input data-provider-field="enabled" type="checkbox" ${p.enabled ? 'checked' : ''} /></td>
-              <td>${statusPill(p.health_status || 'unknown')}</td>
-              <td>${Number(p.consecutive_failures || 0)}</td>
-              <td>${fmt(p.last_health_check_at)}</td>
-              <td>${fmt(p.circuit_open_until)}</td>
-              <td class="wrap">${esc(p.last_error || '')}</td>
-              <td><div class="actions"><button class="btn" data-save-provider="${esc(p.id)}">Save</button><button class="btn danger" data-delete-provider="${esc(p.id)}">Delete</button></div></td>
-            </tr>
-          `).join('')}
+          ${state.providers.map(p => providerRow(p)).join('')}
         </tbody>
       </table>
     </div>
   `;
+}
+
+function providerRow(p) {
+  const auth = p.aws_auth_method || 'chain';
+  return `
+    <tr data-provider-row="${esc(p.id)}">
+      <td class="mono">${esc(p.id)}</td>
+      <td><input data-provider-field="name" value="${attr(p.name)}" /></td>
+      <td><select data-provider-field="type">${option('openai', 'OpenAI-compatible', p.type)}${option('anthropic', 'Anthropic-compatible', p.type)}${option('bedrock', 'AWS Bedrock', p.type)}</select></td>
+      <td class="connection-cell">
+        <div class="cell-stack" data-provider-group="api">
+          <label class="mini-field"><span>Base URL</span><input data-provider-field="base_url" value="${attr(p.base_url)}" /></label>
+          <label class="mini-field"><span>Key env var</span><input data-provider-field="api_key_env" value="${attr((p.api_key_env || '').replace(' (secret set)', ''))}" /></label>
+          <label class="mini-field"><span>Direct key</span><input data-provider-field="api_key" type="password" placeholder="leave blank to keep" /></label>
+        </div>
+        <div class="cell-stack" data-provider-group="bedrock">
+          <label class="mini-field"><span>Auth</span><select data-provider-field="aws_auth_method">${option('chain', 'AWS credential chain', auth)}${option('keys', 'Access key & secret', auth)}${option('api_key', 'Bedrock API key', auth)}</select></label>
+          <label class="mini-field"><span>Region</span><input data-provider-field="aws_region" value="${attr(p.aws_region)}" placeholder="blank uses AWS_REGION" /></label>
+        </div>
+        <div class="cell-stack" data-provider-group="bedrock-keys">
+          <label class="mini-field"><span>Access key id</span><input data-provider-field="aws_access_key_id" value="${attr(p.aws_access_key_id)}" /></label>
+          <label class="mini-field"><span>Secret key</span><input data-provider-field="aws_secret_access_key" type="password" placeholder="${p.has_aws_secret ? 'leave blank to keep' : 'not set'}" /></label>
+          <label class="mini-field"><span>Session token</span><input data-provider-field="aws_session_token" type="password" placeholder="${p.has_aws_secret ? 'kept with secret key' : 'optional'}" /></label>
+        </div>
+        <div class="cell-stack" data-provider-group="bedrock-api-key">
+          <label class="mini-field"><span>API key</span><input data-provider-field="bedrock_api_key" type="password" placeholder="${p.has_bedrock_api_key ? 'leave blank to keep' : 'not set'}" /></label>
+        </div>
+      </td>
+      <td><input data-provider-field="enabled" type="checkbox" ${p.enabled ? 'checked' : ''} /></td>
+      <td>${statusPill(p.health_status || 'unknown')}</td>
+      <td>${Number(p.consecutive_failures || 0)}</td>
+      <td>${fmt(p.last_health_check_at)}</td>
+      <td>${fmt(p.circuit_open_until)}</td>
+      <td class="wrap">${esc(p.last_error || '')}</td>
+      <td><div class="actions"><button class="btn" data-save-provider="${esc(p.id)}">Save</button><button class="btn danger" data-delete-provider="${esc(p.id)}">Delete</button></div></td>
+    </tr>
+  `;
+}
+
+function playgroundView() {
+  const pg = state.playground;
+  const models = state.adminModels.filter(m => m.enabled);
+  const providerEnabled = new Set(state.providers.filter(p => p.enabled).map(p => p.id));
+  const routes = models.filter(m => providerEnabled.has(m.provider_id));
+  if (!routes.length) {
+    return adminPanel('Playground', 'chat', '', '<p>No usable model routes. Enable a provider and a model first, then come back to send test messages.</p>');
+  }
+  if (!pg.route || !routes.some(m => m.route === pg.route)) pg.route = routes[0].route;
+  return adminPanel('Playground', 'chat', 'Send test chat messages through a model route to validate provider credentials, routing, and responses. Playground traffic bypasses API keys, budgets, rate limits, and guardrails, is not recorded in usage, and is audit-logged.', `
+    <div class="form-grid">
+      <label class="form-field"><span>Model route</span><select id="playground-route">${routes.map(m => option(m.route, `${m.route} · ${m.display_name}`, pg.route)).join('')}</select></label>
+      <label class="form-field playground-system"><span>System prompt (optional)</span><input id="playground-system" value="${attr(pg.system)}" placeholder="e.g. You are a helpful assistant." /></label>
+      <label class="form-field"><span>Max tokens</span><input id="playground-max-tokens" type="number" min="1" max="8192" step="1" value="${attr(pg.maxTokens)}" /></label>
+    </div>
+    <div class="playground-transcript" id="playground-transcript">
+      ${pg.messages.length ? pg.messages.map(playgroundMessageHTML).join('') : '<p class="playground-empty">No messages yet. Pick a model route and send a message to test it.</p>'}
+      ${pg.busy ? '<div class="chat-row assistant"><div class="chat-bubble pending">Waiting for response&hellip;</div></div>' : ''}
+    </div>
+    <div class="playground-composer">
+      <textarea id="playground-input" rows="2" placeholder="Type a message. Enter sends, Shift+Enter adds a line.">${esc(pg.draft)}</textarea>
+      <div class="playground-actions">
+        <button class="btn primary" id="playground-send" ${pg.busy ? 'disabled' : ''}>Send</button>
+        <button class="btn" id="playground-clear" ${pg.messages.length || pg.draft ? '' : 'disabled'}>Clear</button>
+      </div>
+    </div>
+  `);
+}
+
+function playgroundMessageHTML(m) {
+  if (m.role === 'user') {
+    return `<div class="chat-row user"><div class="chat-bubble user${m.failed ? ' failed' : ''}">${esc(m.content)}</div></div>`;
+  }
+  let meta = '';
+  if (m.meta) {
+    const parts = [`${esc(m.meta.provider_id)} · ${esc(m.meta.upstream_model)}`];
+    if (m.meta.status_code) parts.push(`HTTP ${m.meta.status_code}`);
+    parts.push(`${Number(m.meta.latency_ms || 0)} ms`);
+    if (m.meta.total_tokens) parts.push(`${m.meta.input_tokens} in / ${m.meta.output_tokens} out tokens`);
+    meta = `<div class="chat-meta">${parts.join(' · ')}</div>`;
+  }
+  return `<div class="chat-row assistant"><div class="chat-bubble assistant${m.error ? ' error' : ''}">${esc(m.content)}</div>${meta}</div>`;
+}
+
+async function sendPlaygroundMessage() {
+  const pg = state.playground;
+  const text = (pg.draft || '').trim();
+  if (!text || pg.busy || !pg.route) return;
+  const userMessage = { role: 'user', content: text };
+  pg.messages.push(userMessage);
+  pg.draft = '';
+  pg.busy = true;
+  render();
+  try {
+    const history = pg.messages.filter(m => !m.error && !m.failed).map(m => ({ role: m.role, content: m.content }));
+    const result = await api('/api/admin/playground/chat', { method: 'POST', body: JSON.stringify({
+      route: pg.route,
+      system: pg.system.trim(),
+      max_tokens: Number(pg.maxTokens) || 1024,
+      messages: history
+    })});
+    if (result.ok) {
+      pg.messages.push({ role: 'assistant', content: result.content || '(empty response)', meta: result });
+    } else {
+      userMessage.failed = true;
+      pg.messages.push({ role: 'assistant', content: result.error || 'Request failed.', meta: result, error: true });
+    }
+  } catch (err) {
+    userMessage.failed = true;
+    pg.messages.push({ role: 'assistant', content: err.message, error: true });
+  }
+  pg.busy = false;
+  render();
 }
 
 function modelRows() {
@@ -1227,6 +1347,52 @@ function afterRender() {
       await refresh();
     };
   });
+  const playgroundSend = document.getElementById('playground-send');
+  if (playgroundSend) {
+    const pg = state.playground;
+    const routeSelect = document.getElementById('playground-route');
+    const systemInput = document.getElementById('playground-system');
+    const maxTokensInput = document.getElementById('playground-max-tokens');
+    const input = document.getElementById('playground-input');
+    routeSelect.onchange = () => { pg.route = routeSelect.value; };
+    systemInput.oninput = () => { pg.system = systemInput.value; };
+    maxTokensInput.oninput = () => { pg.maxTokens = maxTokensInput.value; };
+    input.oninput = () => { pg.draft = input.value; };
+    input.onkeydown = (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendPlaygroundMessage();
+      }
+    };
+    playgroundSend.onclick = sendPlaygroundMessage;
+    document.getElementById('playground-clear').onclick = () => {
+      pg.messages = [];
+      pg.draft = '';
+      render();
+    };
+    const transcript = document.getElementById('playground-transcript');
+    if (transcript) transcript.scrollTop = transcript.scrollHeight;
+    if (!pg.busy) input.focus({ preventScroll: true });
+  }
+  const addProviderForm = document.getElementById('add-provider-form');
+  if (addProviderForm) {
+    const syncAddProviderForm = () => {
+      syncProviderGroups(addProviderForm, val('provider-type'), val('provider-aws-auth') || 'chain');
+    };
+    document.getElementById('provider-type').onchange = syncAddProviderForm;
+    document.getElementById('provider-aws-auth').onchange = syncAddProviderForm;
+    syncAddProviderForm();
+  }
+  document.querySelectorAll('[data-provider-row]').forEach((row) => {
+    const typeSelect = row.querySelector('[data-provider-field="type"]');
+    const authSelect = row.querySelector('[data-provider-field="aws_auth_method"]');
+    const syncRow = () => {
+      syncProviderGroups(row, typeSelect?.value, authSelect?.value || 'chain');
+    };
+    if (typeSelect) typeSelect.onchange = syncRow;
+    if (authSelect) authSelect.onchange = syncRow;
+    syncRow();
+  });
   const createProvider = document.getElementById('create-provider');
   if (createProvider) {
     createProvider.onclick = async () => {
@@ -1238,6 +1404,11 @@ function afterRender() {
         api_key_env: val('provider-api-key-env'),
         api_key: val('provider-api-key'),
         aws_region: val('provider-aws-region'),
+        aws_auth_method: val('provider-aws-auth') || 'chain',
+        aws_access_key_id: val('provider-aws-access-key'),
+        aws_secret_access_key: val('provider-aws-secret-key'),
+        aws_session_token: val('provider-aws-session-token'),
+        bedrock_api_key: val('provider-bedrock-api-key'),
         enabled: checked('provider-enabled')
       })});
       state.notice = 'Provider added.';
@@ -1631,7 +1802,8 @@ function icon(name, className = 'icon') {
     plus: '<path d="M12 5v14M5 12h14"/>',
     palette: '<circle cx="13.5" cy="6.5" r=".5"/><circle cx="17.5" cy="10.5" r=".5"/><circle cx="8.5" cy="7.5" r=".5"/><circle cx="6.5" cy="12.5" r=".5"/><path d="M12 2a10 10 0 0 0 0 20h1.5a2.5 2.5 0 0 0 0-5H12a1.5 1.5 0 0 1 0-3h2a8 8 0 0 0 0-16h-2Z"/>',
     info: '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>',
-    check: '<path d="M20 6 9 17l-5-5"/>'
+    check: '<path d="M20 6 9 17l-5-5"/>',
+    chat: '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2Z"/><path d="M8 9h8M8 13h5"/>'
   };
   return `<svg class="${className}" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${paths[name] || paths.grid}</svg>`;
 }
@@ -1715,6 +1887,16 @@ function num(id) {
 
 function intNum(id) {
   return Number.parseInt(val(id) || '0', 10);
+}
+
+function syncProviderGroups(scope, type, auth) {
+  const show = (name, on) => scope.querySelectorAll(`[data-provider-group="${name}"]`).forEach((el) => el.classList.toggle('hidden', !on));
+  const bedrock = type === 'bedrock';
+  show('api', !bedrock);
+  show('bedrock', bedrock);
+  show('bedrock-chain', bedrock && auth === 'chain');
+  show('bedrock-keys', bedrock && auth === 'keys');
+  show('bedrock-api-key', bedrock && auth === 'api_key');
 }
 
 function collectFields(row, prefix) {
