@@ -24,6 +24,8 @@ Phlox-GW provides:
 - AWS Bedrock access through OpenAI-compatible and Anthropic-compatible endpoints using
   Bedrock Converse and ConverseStream.
 - Provider and model catalog management from the admin UI.
+- Admin playground for sending test chat messages through any model route to validate
+  providers and models without minting an API key.
 - Public model routes that can be stable aliases instead of provider-specific names.
 - Per-model input and output prices in USD per 1 million tokens.
 - Per-user and per-department monthly chargeback from an append-only usage ledger.
@@ -197,11 +199,12 @@ scripts\run-local.ps1
 3. Go to `Admin -> Providers` and enable or create provider profiles.
 4. Go to `Admin -> Models` and create routes for upstream models.
 5. Set input and output prices in USD per 1 million tokens.
-6. Go to `Admin -> Budgets` and configure user or department monthly limits.
-7. Go to `Admin -> Rate Limits` for user, department, provider, or model RPM/TPM limits.
-8. Go to `Admin -> Guardrails` if you want PII redaction or blocking.
-9. Go to `API Keys` as a user, or `Admin -> API Keys` as an admin, and mint a key.
-10. Test the key with `/v1/models` or `/v1/chat/completions`.
+6. Go to `Admin -> Playground` and send a test chat message to validate each route.
+7. Go to `Admin -> Budgets` and configure user or department monthly limits.
+8. Go to `Admin -> Rate Limits` for user, department, provider, or model RPM/TPM limits.
+9. Go to `Admin -> Guardrails` if you want PII redaction or blocking.
+10. Go to `API Keys` as a user, or `Admin -> API Keys` as an admin, and mint a key.
+11. Test the key with `/v1/models` or `/v1/chat/completions`.
 
 ## Providers
 

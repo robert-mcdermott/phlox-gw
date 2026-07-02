@@ -39,6 +39,7 @@ const state = {
   budgetBurnDown: [],
   oidcConfig: { enabled: false, display_name: 'Entra ID' },
   adminTab: 'operations',
+  playground: { route: '', system: '', draft: '', maxTokens: 1024, busy: false, messages: [] },
   secret: '',
   error: '',
   notice: ''
@@ -54,6 +55,7 @@ const ADMIN_SECTIONS = [
   { id: 'config', label: 'Configuration', icon: 'file', description: 'Export signed, sanitized admin configuration for review or migration.' },
   { id: 'providers', label: 'Providers', icon: 'server', description: 'Configure upstream providers and health state.' },
   { id: 'models', label: 'Models', icon: 'cpu', description: 'Expose model routes, prices, context metadata, and health tests.' },
+  { id: 'playground', label: 'Playground', icon: 'chat', description: 'Send test chat messages through a model route to validate providers and models.' },
   { id: 'users', label: 'Users', icon: 'users', description: 'Manage local users, departments, roles, and passwords.' },
   { id: 'keys', label: 'API Keys', icon: 'key', description: 'Govern user-owned API keys, allowlists, budgets, and per-key limits.' },
   { id: 'limits', label: 'Rate Limits', icon: 'gauge', description: 'Set RPM and TPM controls by user, department, provider, or model.' },
@@ -526,6 +528,9 @@ function adminContentView(usage) {
       ${adminPanel('Models and pricing', 'cpu', '', modelRows())}
     `;
   }
+  if (state.adminTab === 'playground') {
+    return playgroundView();
+  }
   if (state.adminTab === 'users') {
     return `
       ${adminPanel('Add user', 'users', 'Local users can mint their own API keys after signing in.', `
@@ -829,6 +834,81 @@ function providerRow(p) {
       <td><div class="actions"><button class="btn" data-save-provider="${esc(p.id)}">Save</button><button class="btn danger" data-delete-provider="${esc(p.id)}">Delete</button></div></td>
     </tr>
   `;
+}
+
+function playgroundView() {
+  const pg = state.playground;
+  const models = state.adminModels.filter(m => m.enabled);
+  const providerEnabled = new Set(state.providers.filter(p => p.enabled).map(p => p.id));
+  const routes = models.filter(m => providerEnabled.has(m.provider_id));
+  if (!routes.length) {
+    return adminPanel('Playground', 'chat', '', '<p>No usable model routes. Enable a provider and a model first, then come back to send test messages.</p>');
+  }
+  if (!pg.route || !routes.some(m => m.route === pg.route)) pg.route = routes[0].route;
+  return adminPanel('Playground', 'chat', 'Send test chat messages through a model route to validate provider credentials, routing, and responses. Playground traffic bypasses API keys, budgets, rate limits, and guardrails, is not recorded in usage, and is audit-logged.', `
+    <div class="form-grid">
+      <label class="form-field"><span>Model route</span><select id="playground-route">${routes.map(m => option(m.route, `${m.route} · ${m.display_name}`, pg.route)).join('')}</select></label>
+      <label class="form-field playground-system"><span>System prompt (optional)</span><input id="playground-system" value="${attr(pg.system)}" placeholder="e.g. You are a helpful assistant." /></label>
+      <label class="form-field"><span>Max tokens</span><input id="playground-max-tokens" type="number" min="1" max="8192" step="1" value="${attr(pg.maxTokens)}" /></label>
+    </div>
+    <div class="playground-transcript" id="playground-transcript">
+      ${pg.messages.length ? pg.messages.map(playgroundMessageHTML).join('') : '<p class="playground-empty">No messages yet. Pick a model route and send a message to test it.</p>'}
+      ${pg.busy ? '<div class="chat-row assistant"><div class="chat-bubble pending">Waiting for response&hellip;</div></div>' : ''}
+    </div>
+    <div class="playground-composer">
+      <textarea id="playground-input" rows="2" placeholder="Type a message. Enter sends, Shift+Enter adds a line.">${esc(pg.draft)}</textarea>
+      <div class="playground-actions">
+        <button class="btn primary" id="playground-send" ${pg.busy ? 'disabled' : ''}>Send</button>
+        <button class="btn" id="playground-clear" ${pg.messages.length || pg.draft ? '' : 'disabled'}>Clear</button>
+      </div>
+    </div>
+  `);
+}
+
+function playgroundMessageHTML(m) {
+  if (m.role === 'user') {
+    return `<div class="chat-row user"><div class="chat-bubble user${m.failed ? ' failed' : ''}">${esc(m.content)}</div></div>`;
+  }
+  let meta = '';
+  if (m.meta) {
+    const parts = [`${esc(m.meta.provider_id)} · ${esc(m.meta.upstream_model)}`];
+    if (m.meta.status_code) parts.push(`HTTP ${m.meta.status_code}`);
+    parts.push(`${Number(m.meta.latency_ms || 0)} ms`);
+    if (m.meta.total_tokens) parts.push(`${m.meta.input_tokens} in / ${m.meta.output_tokens} out tokens`);
+    meta = `<div class="chat-meta">${parts.join(' · ')}</div>`;
+  }
+  return `<div class="chat-row assistant"><div class="chat-bubble assistant${m.error ? ' error' : ''}">${esc(m.content)}</div>${meta}</div>`;
+}
+
+async function sendPlaygroundMessage() {
+  const pg = state.playground;
+  const text = (pg.draft || '').trim();
+  if (!text || pg.busy || !pg.route) return;
+  const userMessage = { role: 'user', content: text };
+  pg.messages.push(userMessage);
+  pg.draft = '';
+  pg.busy = true;
+  render();
+  try {
+    const history = pg.messages.filter(m => !m.error && !m.failed).map(m => ({ role: m.role, content: m.content }));
+    const result = await api('/api/admin/playground/chat', { method: 'POST', body: JSON.stringify({
+      route: pg.route,
+      system: pg.system.trim(),
+      max_tokens: Number(pg.maxTokens) || 1024,
+      messages: history
+    })});
+    if (result.ok) {
+      pg.messages.push({ role: 'assistant', content: result.content || '(empty response)', meta: result });
+    } else {
+      userMessage.failed = true;
+      pg.messages.push({ role: 'assistant', content: result.error || 'Request failed.', meta: result, error: true });
+    }
+  } catch (err) {
+    userMessage.failed = true;
+    pg.messages.push({ role: 'assistant', content: err.message, error: true });
+  }
+  pg.busy = false;
+  render();
 }
 
 function modelRows() {
@@ -1267,6 +1347,33 @@ function afterRender() {
       await refresh();
     };
   });
+  const playgroundSend = document.getElementById('playground-send');
+  if (playgroundSend) {
+    const pg = state.playground;
+    const routeSelect = document.getElementById('playground-route');
+    const systemInput = document.getElementById('playground-system');
+    const maxTokensInput = document.getElementById('playground-max-tokens');
+    const input = document.getElementById('playground-input');
+    routeSelect.onchange = () => { pg.route = routeSelect.value; };
+    systemInput.oninput = () => { pg.system = systemInput.value; };
+    maxTokensInput.oninput = () => { pg.maxTokens = maxTokensInput.value; };
+    input.oninput = () => { pg.draft = input.value; };
+    input.onkeydown = (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendPlaygroundMessage();
+      }
+    };
+    playgroundSend.onclick = sendPlaygroundMessage;
+    document.getElementById('playground-clear').onclick = () => {
+      pg.messages = [];
+      pg.draft = '';
+      render();
+    };
+    const transcript = document.getElementById('playground-transcript');
+    if (transcript) transcript.scrollTop = transcript.scrollHeight;
+    if (!pg.busy) input.focus({ preventScroll: true });
+  }
   const addProviderForm = document.getElementById('add-provider-form');
   if (addProviderForm) {
     const syncAddProviderForm = () => {
@@ -1695,7 +1802,8 @@ function icon(name, className = 'icon') {
     plus: '<path d="M12 5v14M5 12h14"/>',
     palette: '<circle cx="13.5" cy="6.5" r=".5"/><circle cx="17.5" cy="10.5" r=".5"/><circle cx="8.5" cy="7.5" r=".5"/><circle cx="6.5" cy="12.5" r=".5"/><path d="M12 2a10 10 0 0 0 0 20h1.5a2.5 2.5 0 0 0 0-5H12a1.5 1.5 0 0 1 0-3h2a8 8 0 0 0 0-16h-2Z"/>',
     info: '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>',
-    check: '<path d="M20 6 9 17l-5-5"/>'
+    check: '<path d="M20 6 9 17l-5-5"/>',
+    chat: '<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2Z"/><path d="M8 9h8M8 13h5"/>'
   };
   return `<svg class="${className}" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${paths[name] || paths.grid}</svg>`;
 }

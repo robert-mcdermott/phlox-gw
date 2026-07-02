@@ -557,6 +557,96 @@ button {
   font-size: 11px;
 }
 
+.playground-system {
+  grid-column: span 2;
+}
+
+.playground-transcript {
+  margin-top: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--input);
+  padding: 14px;
+  max-height: 440px;
+  min-height: 120px;
+  overflow-y: auto;
+  display: grid;
+  gap: 10px;
+  align-content: start;
+}
+
+.playground-empty {
+  color: var(--muted);
+  margin: 0;
+}
+
+.chat-row {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.chat-row.user {
+  align-items: flex-end;
+}
+
+.chat-bubble {
+  max-width: 82%;
+  padding: 9px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.chat-bubble.user {
+  background: var(--surface-3);
+  border-color: var(--accent);
+}
+
+.chat-bubble.user.failed {
+  opacity: 0.55;
+  border-style: dashed;
+}
+
+.chat-bubble.error {
+  border-color: var(--red);
+  color: var(--red);
+}
+
+.chat-bubble.pending {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.chat-meta {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.playground-composer {
+  margin-top: 10px;
+  display: flex;
+  gap: 10px;
+  align-items: flex-end;
+}
+
+.playground-composer textarea {
+  flex: 1;
+  resize: vertical;
+  min-height: 44px;
+}
+
+.playground-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
 .admin-subnav {
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -1256,6 +1346,19 @@ th {
 
   .form-grid {
     grid-template-columns: 1fr;
+  }
+
+  .playground-system {
+    grid-column: auto;
+  }
+
+  .playground-composer {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .playground-actions {
+    flex-direction: row;
   }
 
   .theme-grid {

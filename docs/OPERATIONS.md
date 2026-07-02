@@ -670,6 +670,22 @@ Recommended fields:
 
 Pricing can be set to zero for free local models. Budgets only block priced models.
 
+## Playground
+
+`Admin -> Playground` sends test chat messages through any enabled model route so
+providers and models can be validated end to end from the dashboard, without minting an
+API key. Pick a model route, optionally set a system prompt and max tokens, and send
+messages. Responses show the provider, upstream model, HTTP status, latency, and token
+counts. Failed exchanges stay visible in the transcript but are excluded from the
+conversation history sent on later turns.
+
+Playground requests use the same provider credentials and adapters as gateway traffic
+(including Bedrock authentication methods), so a successful reply confirms the provider,
+credentials, and route are working. Playground traffic bypasses API keys, budgets, rate
+limits, and guardrails, and is not recorded in the usage ledger or request log. Each
+playground call is recorded in the audit log as `playground.chat` with the model route,
+status, and latency, but never message contents.
+
 ## Users, Keys, Budgets, And Limits
 
 Users can mint and manage their own API keys from `API Keys`.
