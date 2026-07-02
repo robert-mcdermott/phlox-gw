@@ -2521,6 +2521,142 @@ func TestAdminActionCreatesAuditLog(t *testing.T) {
 	}
 }
 
+func TestAdminBedrockProviderAuthMethods(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer st.Close()
+	hash, err := auth.HashPassword("admin")
+	if err != nil {
+		t.Fatalf("HashPassword: %v", err)
+	}
+	if err := st.EnsureSeedData(hash); err != nil {
+		t.Fatalf("EnsureSeedData: %v", err)
+	}
+	handler, err := New(Options{
+		Config: config.Config{SessionSecret: "test-secret"},
+		Store:  st,
+		Frontend: fstest.MapFS{
+			"frontend/dist/index.html": &fstest.MapFile{Data: []byte("<html></html>")},
+		},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	loginResp := jsonRequest(t, handler, http.MethodPost, "/api/auth/login", "", map[string]any{"username": "admin", "password": "admin"})
+	var login struct {
+		Token string `json:"token"`
+	}
+	decodeRecorder(t, loginResp, &login)
+
+	// Create with explicit access keys.
+	createResp := jsonRequest(t, handler, http.MethodPost, "/api/admin/providers", login.Token, map[string]any{
+		"id":                    "bedrock-keys",
+		"name":                  "Bedrock Keys",
+		"type":                  "bedrock",
+		"aws_region":            "us-west-2",
+		"aws_auth_method":       "keys",
+		"aws_access_key_id":     "AKIAEXAMPLE",
+		"aws_secret_access_key": "secret-1",
+		"aws_session_token":     "session-1",
+		"enabled":               true,
+	})
+	if createResp.Code != http.StatusCreated {
+		t.Fatalf("create provider status = %d body = %s", createResp.Code, createResp.Body.String())
+	}
+	if body := createResp.Body.String(); strings.Contains(body, "secret-1") || strings.Contains(body, "session-1") {
+		t.Fatalf("create response leaked AWS secrets: %s", body)
+	}
+
+	// Missing secret key on create is rejected.
+	badResp := jsonRequest(t, handler, http.MethodPost, "/api/admin/providers", login.Token, map[string]any{
+		"id":                "bedrock-bad",
+		"name":              "Bedrock Bad",
+		"type":              "bedrock",
+		"aws_auth_method":   "keys",
+		"aws_access_key_id": "AKIAEXAMPLE",
+	})
+	if badResp.Code != http.StatusBadRequest {
+		t.Fatalf("create without secret status = %d body = %s", badResp.Code, badResp.Body.String())
+	}
+
+	// List exposes secret presence flags without values.
+	listResp := jsonRequest(t, handler, http.MethodGet, "/api/admin/providers", login.Token, nil)
+	if listResp.Code != http.StatusOK {
+		t.Fatalf("list providers status = %d body = %s", listResp.Code, listResp.Body.String())
+	}
+	if body := listResp.Body.String(); strings.Contains(body, "secret-1") {
+		t.Fatalf("provider list leaked AWS secret: %s", body)
+	}
+	var listed []store.Provider
+	decodeRecorder(t, listResp, &listed)
+	var created store.Provider
+	for _, p := range listed {
+		if p.ID == "bedrock-keys" {
+			created = p
+		}
+	}
+	if created.ID == "" || !created.HasAWSSecret || created.AWSAccessKeyID != "AKIAEXAMPLE" || created.AWSAuthMethod != "keys" {
+		t.Fatalf("unexpected listed provider: %#v", created)
+	}
+
+	// Update with a blank secret keeps the stored one.
+	updateResp := jsonRequest(t, handler, http.MethodPut, "/api/admin/providers/bedrock-keys", login.Token, map[string]any{
+		"name":              "Bedrock Keys Renamed",
+		"type":              "bedrock",
+		"aws_region":        "us-east-1",
+		"aws_auth_method":   "keys",
+		"aws_access_key_id": "AKIAEXAMPLE",
+		"enabled":           true,
+	})
+	if updateResp.Code != http.StatusOK {
+		t.Fatalf("update provider status = %d body = %s", updateResp.Code, updateResp.Body.String())
+	}
+	stored, err := st.GetProvider(context.Background(), "bedrock-keys")
+	if err != nil {
+		t.Fatalf("GetProvider: %v", err)
+	}
+	if stored.AWSSecretAccessKey != "secret-1" || stored.AWSSessionToken != "session-1" || stored.AWSRegion != "us-east-1" {
+		t.Fatalf("update should keep stored secrets: %#v", stored)
+	}
+
+	// Switching to the Bedrock API key method clears AWS access keys.
+	switchResp := jsonRequest(t, handler, http.MethodPut, "/api/admin/providers/bedrock-keys", login.Token, map[string]any{
+		"name":            "Bedrock API Key",
+		"type":            "bedrock",
+		"aws_region":      "us-east-1",
+		"aws_auth_method": "api_key",
+		"bedrock_api_key": "bedrock-token-1",
+		"enabled":         true,
+	})
+	if switchResp.Code != http.StatusOK {
+		t.Fatalf("switch auth status = %d body = %s", switchResp.Code, switchResp.Body.String())
+	}
+	stored, err = st.GetProvider(context.Background(), "bedrock-keys")
+	if err != nil {
+		t.Fatalf("GetProvider after switch: %v", err)
+	}
+	if stored.AWSAuthMethod != "api_key" || stored.BedrockAPIKey != "bedrock-token-1" {
+		t.Fatalf("bedrock api key was not stored: %#v", stored)
+	}
+	if stored.AWSAccessKeyID != "" || stored.AWSSecretAccessKey != "" || stored.AWSSessionToken != "" {
+		t.Fatalf("aws access keys should be cleared after switching auth method: %#v", stored)
+	}
+
+	// Invalid auth method is rejected.
+	invalidResp := jsonRequest(t, handler, http.MethodPut, "/api/admin/providers/bedrock-keys", login.Token, map[string]any{
+		"name":            "Bedrock API Key",
+		"type":            "bedrock",
+		"aws_auth_method": "magic",
+		"enabled":         true,
+	})
+	if invalidResp.Code != http.StatusBadRequest {
+		t.Fatalf("invalid auth method status = %d body = %s", invalidResp.Code, invalidResp.Body.String())
+	}
+}
+
 func TestAdminRequestLogSearchAndCSV(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))

@@ -90,6 +90,13 @@ type Provider struct {
 	APIKey              string     `json:"-"`
 	APIKeyEnv           string     `json:"api_key_env"`
 	AWSRegion           string     `json:"aws_region"`
+	AWSAuthMethod       string     `json:"aws_auth_method"`
+	AWSAccessKeyID      string     `json:"aws_access_key_id"`
+	AWSSecretAccessKey  string     `json:"-"`
+	AWSSessionToken     string     `json:"-"`
+	BedrockAPIKey       string     `json:"-"`
+	HasAWSSecret        bool       `json:"has_aws_secret"`
+	HasBedrockAPIKey    bool       `json:"has_bedrock_api_key"`
 	Enabled             bool       `json:"enabled"`
 	HealthStatus        string     `json:"health_status"`
 	ConsecutiveFailures int        `json:"consecutive_failures"`
@@ -644,6 +651,11 @@ var columnMigrations = []columnMigration{
 	{table: "providers", column: "last_health_check_at", spec: "TEXT"},
 	{table: "providers", column: "last_error", spec: "TEXT NOT NULL DEFAULT ''"},
 	{table: "providers", column: "circuit_open_until", spec: "TEXT"},
+	{table: "providers", column: "aws_auth_method", spec: "TEXT NOT NULL DEFAULT ''"},
+	{table: "providers", column: "aws_access_key_id", spec: "TEXT NOT NULL DEFAULT ''"},
+	{table: "providers", column: "aws_secret_access_key", spec: "TEXT NOT NULL DEFAULT ''"},
+	{table: "providers", column: "aws_session_token", spec: "TEXT NOT NULL DEFAULT ''"},
+	{table: "providers", column: "bedrock_api_key", spec: "TEXT NOT NULL DEFAULT ''"},
 	{table: "models", column: "fallback_routes", spec: "TEXT NOT NULL DEFAULT ''"},
 	{table: "models", column: "weighted_routes", spec: "TEXT NOT NULL DEFAULT ''"},
 	{table: "models", column: "retry_attempts", spec: "INTEGER NOT NULL DEFAULT 0"},
@@ -752,14 +764,14 @@ func (s *Store) EnsureSeedData(adminPasswordHash string) error {
 		{ID: "local-ollama", Name: "Ollama (local)", Type: "openai", BaseURL: "http://localhost:11434/v1", Enabled: true},
 		{ID: "openai", Name: "OpenAI", Type: "openai", BaseURL: "https://api.openai.com/v1", APIKeyEnv: "OPENAI_API_KEY", Enabled: false},
 		{ID: "anthropic", Name: "Anthropic", Type: "anthropic", BaseURL: "https://api.anthropic.com", APIKeyEnv: "ANTHROPIC_API_KEY", Enabled: false},
-		{ID: "bedrock", Name: "AWS Bedrock", Type: "bedrock", BaseURL: "", AWSRegion: "us-east-1", Enabled: false},
+		{ID: "bedrock", Name: "AWS Bedrock", Type: "bedrock", BaseURL: "", AWSRegion: "us-east-1", AWSAuthMethod: "chain", Enabled: false},
 	}
 	for _, p := range seeds {
 		if _, err := s.exec(ctx, `
-			INSERT INTO providers (id, name, type, base_url, api_key, api_key_env, aws_region, enabled, created_at, updated_at)
-			VALUES (?, ?, ?, ?, '', ?, ?, ?, ?, ?)
+			INSERT INTO providers (id, name, type, base_url, api_key, api_key_env, aws_region, aws_auth_method, enabled, created_at, updated_at)
+			VALUES (?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?)
 			ON CONFLICT DO NOTHING`,
-			p.ID, p.Name, p.Type, p.BaseURL, p.APIKeyEnv, p.AWSRegion, boolInt(p.Enabled), formatTime(now), formatTime(now)); err != nil {
+			p.ID, p.Name, p.Type, p.BaseURL, p.APIKeyEnv, p.AWSRegion, p.AWSAuthMethod, boolInt(p.Enabled), formatTime(now), formatTime(now)); err != nil {
 			return err
 		}
 	}
@@ -1113,32 +1125,41 @@ func (s *Store) GetProvider(ctx context.Context, id string) (Provider, error) {
 func (s *Store) CreateProvider(ctx context.Context, p Provider) error {
 	now := time.Now().UTC()
 	_, err := s.exec(ctx, `
-		INSERT INTO providers (id, name, type, base_url, api_key, api_key_env, aws_region, enabled, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		p.ID, p.Name, p.Type, p.BaseURL, p.APIKey, p.APIKeyEnv, p.AWSRegion, boolInt(p.Enabled), formatTime(now), formatTime(now))
+		INSERT INTO providers (id, name, type, base_url, api_key, api_key_env, aws_region, aws_auth_method, aws_access_key_id, aws_secret_access_key, aws_session_token, bedrock_api_key, enabled, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		p.ID, p.Name, p.Type, p.BaseURL, p.APIKey, p.APIKeyEnv, p.AWSRegion, p.AWSAuthMethod, p.AWSAccessKeyID, p.AWSSecretAccessKey, p.AWSSessionToken, p.BedrockAPIKey, boolInt(p.Enabled), formatTime(now), formatTime(now))
 	if isUniqueErr(err) {
 		return ErrConflict
 	}
 	return err
 }
 
-func (s *Store) UpdateProvider(ctx context.Context, p Provider, updateAPIKey bool) error {
+// ProviderSecretUpdate marks which write-only provider secrets an update
+// should overwrite; unset fields keep their stored value.
+type ProviderSecretUpdate struct {
+	APIKey         bool
+	AWSCredentials bool
+	BedrockAPIKey  bool
+}
+
+func (s *Store) UpdateProvider(ctx context.Context, p Provider, secrets ProviderSecretUpdate) error {
 	now := time.Now().UTC()
-	var res sql.Result
-	var err error
-	if updateAPIKey {
-		res, err = s.exec(ctx, `
-			UPDATE providers
-			SET name = ?, type = ?, base_url = ?, api_key = ?, api_key_env = ?, aws_region = ?, enabled = ?, updated_at = ?
-			WHERE id = ?`,
-			p.Name, p.Type, p.BaseURL, p.APIKey, p.APIKeyEnv, p.AWSRegion, boolInt(p.Enabled), formatTime(now), p.ID)
-	} else {
-		res, err = s.exec(ctx, `
-			UPDATE providers
-			SET name = ?, type = ?, base_url = ?, api_key_env = ?, aws_region = ?, enabled = ?, updated_at = ?
-			WHERE id = ?`,
-			p.Name, p.Type, p.BaseURL, p.APIKeyEnv, p.AWSRegion, boolInt(p.Enabled), formatTime(now), p.ID)
+	set := []string{"name = ?", "type = ?", "base_url = ?", "api_key_env = ?", "aws_region = ?", "aws_auth_method = ?", "aws_access_key_id = ?", "enabled = ?", "updated_at = ?"}
+	args := []any{p.Name, p.Type, p.BaseURL, p.APIKeyEnv, p.AWSRegion, p.AWSAuthMethod, p.AWSAccessKeyID, boolInt(p.Enabled), formatTime(now)}
+	if secrets.APIKey {
+		set = append(set, "api_key = ?")
+		args = append(args, p.APIKey)
 	}
+	if secrets.AWSCredentials {
+		set = append(set, "aws_secret_access_key = ?", "aws_session_token = ?")
+		args = append(args, p.AWSSecretAccessKey, p.AWSSessionToken)
+	}
+	if secrets.BedrockAPIKey {
+		set = append(set, "bedrock_api_key = ?")
+		args = append(args, p.BedrockAPIKey)
+	}
+	args = append(args, p.ID)
+	res, err := s.exec(ctx, `UPDATE providers SET `+strings.Join(set, ", ")+` WHERE id = ?`, args...)
 	if err != nil {
 		return err
 	}
@@ -2344,9 +2365,9 @@ const apiKeyColumns = `id, user_id, name, prefix, key_hash, is_active, expires_a
 
 const apiKeyColumnsAliased = `k.id, k.user_id, k.name, k.prefix, k.key_hash, k.is_active, k.expires_at, k.last_used_at, k.created_at, k.budget_usd, k.rpm_limit, k.tpm_limit, k.model_allowlist`
 
-const providerColumns = `id, name, type, base_url, api_key, api_key_env, aws_region, enabled, health_status, consecutive_failures, last_health_check_at, last_error, circuit_open_until, created_at, updated_at`
+const providerColumns = `id, name, type, base_url, api_key, api_key_env, aws_region, aws_auth_method, aws_access_key_id, aws_secret_access_key, aws_session_token, bedrock_api_key, enabled, health_status, consecutive_failures, last_health_check_at, last_error, circuit_open_until, created_at, updated_at`
 
-const providerColumnsAliased = `p.id, p.name, p.type, p.base_url, p.api_key, p.api_key_env, p.aws_region, p.enabled, p.health_status, p.consecutive_failures, p.last_health_check_at, p.last_error, p.circuit_open_until, p.created_at, p.updated_at`
+const providerColumnsAliased = `p.id, p.name, p.type, p.base_url, p.api_key, p.api_key_env, p.aws_region, p.aws_auth_method, p.aws_access_key_id, p.aws_secret_access_key, p.aws_session_token, p.bedrock_api_key, p.enabled, p.health_status, p.consecutive_failures, p.last_health_check_at, p.last_error, p.circuit_open_until, p.created_at, p.updated_at`
 
 const modelColumns = `id, provider_id, model_id, route, display_name, input_cost_per_million, output_cost_per_million, context_window, supports_streaming, enabled, fallback_routes, weighted_routes, retry_attempts, request_timeout_ms, health_routing_enabled, created_at, updated_at`
 
@@ -2357,7 +2378,7 @@ func scanProvider(row scanner) (Provider, error) {
 	var enabled int
 	var lastCheck, circuitOpen sql.NullString
 	var created, updated string
-	err := row.Scan(&p.ID, &p.Name, &p.Type, &p.BaseURL, &p.APIKey, &p.APIKeyEnv, &p.AWSRegion, &enabled, &p.HealthStatus, &p.ConsecutiveFailures, &lastCheck, &p.LastError, &circuitOpen, &created, &updated)
+	err := row.Scan(&p.ID, &p.Name, &p.Type, &p.BaseURL, &p.APIKey, &p.APIKeyEnv, &p.AWSRegion, &p.AWSAuthMethod, &p.AWSAccessKeyID, &p.AWSSecretAccessKey, &p.AWSSessionToken, &p.BedrockAPIKey, &enabled, &p.HealthStatus, &p.ConsecutiveFailures, &lastCheck, &p.LastError, &circuitOpen, &created, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Provider{}, ErrNotFound
 	}
@@ -2415,7 +2436,7 @@ func scanRoutedModel(row scanner) (RoutedModel, error) {
 	var mCreated, mUpdated, pCreated, pUpdated string
 	err := row.Scan(&m.ID, &m.ProviderID, &m.ModelID, &m.Route, &m.DisplayName, &m.InputCostPerMillion, &m.OutputCostPerMillion, &m.ContextWindow,
 		&mStreaming, &mEnabled, &m.FallbackRoutes, &m.WeightedRoutes, &m.RetryAttempts, &m.RequestTimeoutMS, &mHealthRouting, &mCreated, &mUpdated,
-		&p.ID, &p.Name, &p.Type, &p.BaseURL, &p.APIKey, &p.APIKeyEnv, &p.AWSRegion, &pEnabled, &p.HealthStatus, &p.ConsecutiveFailures, &pLastCheck, &p.LastError, &pCircuitOpen, &pCreated, &pUpdated)
+		&p.ID, &p.Name, &p.Type, &p.BaseURL, &p.APIKey, &p.APIKeyEnv, &p.AWSRegion, &p.AWSAuthMethod, &p.AWSAccessKeyID, &p.AWSSecretAccessKey, &p.AWSSessionToken, &p.BedrockAPIKey, &pEnabled, &p.HealthStatus, &p.ConsecutiveFailures, &pLastCheck, &p.LastError, &pCircuitOpen, &pCreated, &pUpdated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return RoutedModel{}, ErrNotFound
 	}
@@ -2747,6 +2768,11 @@ var schema = []string{
 		api_key TEXT NOT NULL DEFAULT '',
 		api_key_env TEXT NOT NULL DEFAULT '',
 		aws_region TEXT NOT NULL DEFAULT '',
+		aws_auth_method TEXT NOT NULL DEFAULT '',
+		aws_access_key_id TEXT NOT NULL DEFAULT '',
+		aws_secret_access_key TEXT NOT NULL DEFAULT '',
+		aws_session_token TEXT NOT NULL DEFAULT '',
+		bedrock_api_key TEXT NOT NULL DEFAULT '',
 		enabled INTEGER NOT NULL DEFAULT 1,
 		health_status TEXT NOT NULL DEFAULT 'unknown',
 		consecutive_failures INTEGER NOT NULL DEFAULT 0,

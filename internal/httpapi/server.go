@@ -30,10 +30,12 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	awscredentials "github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime"
 	bedrockdocument "github.com/aws/aws-sdk-go-v2/service/bedrockruntime/document"
 	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime/types"
 	smithy "github.com/aws/smithy-go"
+	smithybearer "github.com/aws/smithy-go/auth/bearer"
 	oidc "github.com/coreos/go-oidc/v3/oidc"
 	"github.com/robert-mcdermott/phlox-gw/internal/auth"
 	"github.com/robert-mcdermott/phlox-gw/internal/config"
@@ -1129,16 +1131,18 @@ func (s *Server) providers(w http.ResponseWriter, r *http.Request, _ store.User)
 		if providers[i].APIKey != "" {
 			providers[i].APIKeyEnv = providers[i].APIKeyEnv + secretMarker(providers[i].APIKeyEnv)
 		}
+		providers[i].HasAWSSecret = providers[i].AWSSecretAccessKey != ""
+		providers[i].HasBedrockAPIKey = providers[i].BedrockAPIKey != ""
 	}
 	respondJSON(w, http.StatusOK, providers)
 }
 
 func (s *Server) createProvider(w http.ResponseWriter, r *http.Request, admin store.User) {
-	p, updateSecret, ok := s.providerFromRequest(w, r, "")
+	p, secrets, ok := s.providerFromRequest(w, r, "")
 	if !ok {
 		return
 	}
-	if !updateSecret {
+	if !secrets.APIKey {
 		p.APIKey = ""
 	}
 	if err := s.store.CreateProvider(r.Context(), p); err != nil {
@@ -1149,16 +1153,16 @@ func (s *Server) createProvider(w http.ResponseWriter, r *http.Request, admin st
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.audit(r, admin, "provider.create", "provider", p.ID, p.Name, providerAuditDetails(p, updateSecret))
+	s.audit(r, admin, "provider.create", "provider", p.ID, p.Name, providerAuditDetails(p, secrets))
 	respondJSON(w, http.StatusCreated, p)
 }
 
 func (s *Server) updateProvider(w http.ResponseWriter, r *http.Request, admin store.User) {
-	p, updateSecret, ok := s.providerFromRequest(w, r, r.PathValue("id"))
+	p, secrets, ok := s.providerFromRequest(w, r, r.PathValue("id"))
 	if !ok {
 		return
 	}
-	if err := s.store.UpdateProvider(r.Context(), p, updateSecret); err != nil {
+	if err := s.store.UpdateProvider(r.Context(), p, secrets); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			respondError(w, http.StatusNotFound, "provider not found")
 			return
@@ -1166,7 +1170,7 @@ func (s *Server) updateProvider(w http.ResponseWriter, r *http.Request, admin st
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.audit(r, admin, "provider.update", "provider", p.ID, p.Name, providerAuditDetails(p, updateSecret))
+	s.audit(r, admin, "provider.update", "provider", p.ID, p.Name, providerAuditDetails(p, secrets))
 	respondJSON(w, http.StatusOK, p)
 }
 
@@ -4393,11 +4397,32 @@ func (s *Server) bedrockClient(ctx context.Context, p store.Provider) (BedrockCo
 	if strings.TrimSpace(p.AWSRegion) != "" {
 		opts = append(opts, awsconfig.WithRegion(strings.TrimSpace(p.AWSRegion)))
 	}
+	var clientOpts []func(*bedrockruntime.Options)
+	switch p.AWSAuthMethod {
+	case "keys":
+		access := strings.TrimSpace(p.AWSAccessKeyID)
+		secret := strings.TrimSpace(p.AWSSecretAccessKey)
+		if access == "" || secret == "" {
+			return nil, errors.New("bedrock provider uses access-key auth but the access key or secret key is not configured")
+		}
+		opts = append(opts, awsconfig.WithCredentialsProvider(awscredentials.NewStaticCredentialsProvider(access, secret, strings.TrimSpace(p.AWSSessionToken))))
+	case "api_key":
+		key := strings.TrimSpace(p.BedrockAPIKey)
+		if key == "" {
+			return nil, errors.New("bedrock provider uses API-key auth but no API key is configured")
+		}
+		clientOpts = append(clientOpts, func(o *bedrockruntime.Options) {
+			o.BearerAuthTokenProvider = smithybearer.TokenProviderFunc(func(context.Context) (smithybearer.Token, error) {
+				return smithybearer.Token{Value: key}, nil
+			})
+			o.AuthSchemePreference = []string{"httpBearerAuth"}
+		})
+	}
 	cfg, err := awsconfig.LoadDefaultConfig(ctx, opts...)
 	if err != nil {
 		return nil, err
 	}
-	return awsBedrockConverseClient{client: bedrockruntime.NewFromConfig(cfg)}, nil
+	return awsBedrockConverseClient{client: bedrockruntime.NewFromConfig(cfg, clientOpts...)}, nil
 }
 
 func (s *Server) recordUsage(ctx context.Context, requestID string, user store.User, key store.APIKey, route store.RoutedModel, protocol string, usage tokenUsage, latencyMS int64, status int, errText string, eventMeta requestEventMeta) {
@@ -5152,46 +5177,114 @@ func (s *Server) runBedrockHealthCheck(parent context.Context, route store.Route
 	return result
 }
 
-func (s *Server) providerFromRequest(w http.ResponseWriter, r *http.Request, pathID string) (store.Provider, bool, bool) {
+func (s *Server) providerFromRequest(w http.ResponseWriter, r *http.Request, pathID string) (store.Provider, store.ProviderSecretUpdate, bool) {
 	var req struct {
-		ID        string `json:"id"`
-		Name      string `json:"name"`
-		Type      string `json:"type"`
-		BaseURL   string `json:"base_url"`
-		APIKey    string `json:"api_key"`
-		APIKeyEnv string `json:"api_key_env"`
-		AWSRegion string `json:"aws_region"`
-		Enabled   bool   `json:"enabled"`
+		ID                 string `json:"id"`
+		Name               string `json:"name"`
+		Type               string `json:"type"`
+		BaseURL            string `json:"base_url"`
+		APIKey             string `json:"api_key"`
+		APIKeyEnv          string `json:"api_key_env"`
+		AWSRegion          string `json:"aws_region"`
+		AWSAuthMethod      string `json:"aws_auth_method"`
+		AWSAccessKeyID     string `json:"aws_access_key_id"`
+		AWSSecretAccessKey string `json:"aws_secret_access_key"`
+		AWSSessionToken    string `json:"aws_session_token"`
+		BedrockAPIKey      string `json:"bedrock_api_key"`
+		Enabled            bool   `json:"enabled"`
 	}
 	if !decodeJSON(w, r, &req) {
-		return store.Provider{}, false, false
+		return store.Provider{}, store.ProviderSecretUpdate{}, false
 	}
+	isCreate := pathID == ""
 	id := strings.TrimSpace(req.ID)
 	if pathID != "" {
 		id = pathID
 	}
 	if id == "" || strings.TrimSpace(req.Name) == "" {
 		respondError(w, http.StatusBadRequest, "provider id and name are required")
-		return store.Provider{}, false, false
+		return store.Provider{}, store.ProviderSecretUpdate{}, false
 	}
 	if req.Type != "openai" && req.Type != "anthropic" && req.Type != "bedrock" {
 		respondError(w, http.StatusBadRequest, "provider type must be openai, anthropic, or bedrock")
-		return store.Provider{}, false, false
+		return store.Provider{}, store.ProviderSecretUpdate{}, false
 	}
 	if req.Type != "bedrock" && strings.TrimSpace(req.BaseURL) == "" {
 		respondError(w, http.StatusBadRequest, "base_url is required for OpenAI and Anthropic-compatible providers")
-		return store.Provider{}, false, false
+		return store.Provider{}, store.ProviderSecretUpdate{}, false
 	}
-	return store.Provider{
-		ID:        id,
-		Name:      strings.TrimSpace(req.Name),
-		Type:      req.Type,
-		BaseURL:   strings.TrimRight(strings.TrimSpace(req.BaseURL), "/"),
-		APIKey:    req.APIKey,
-		APIKeyEnv: strings.TrimSpace(req.APIKeyEnv),
-		AWSRegion: strings.TrimSpace(req.AWSRegion),
-		Enabled:   req.Enabled,
-	}, strings.TrimSpace(req.APIKey) != "", true
+	p := store.Provider{
+		ID:                 id,
+		Name:               strings.TrimSpace(req.Name),
+		Type:               req.Type,
+		BaseURL:            strings.TrimRight(strings.TrimSpace(req.BaseURL), "/"),
+		APIKey:             req.APIKey,
+		APIKeyEnv:          strings.TrimSpace(req.APIKeyEnv),
+		AWSRegion:          strings.TrimSpace(req.AWSRegion),
+		AWSAuthMethod:      strings.TrimSpace(req.AWSAuthMethod),
+		AWSAccessKeyID:     strings.TrimSpace(req.AWSAccessKeyID),
+		AWSSecretAccessKey: strings.TrimSpace(req.AWSSecretAccessKey),
+		AWSSessionToken:    strings.TrimSpace(req.AWSSessionToken),
+		BedrockAPIKey:      strings.TrimSpace(req.BedrockAPIKey),
+		Enabled:            req.Enabled,
+	}
+	secrets := store.ProviderSecretUpdate{APIKey: strings.TrimSpace(req.APIKey) != ""}
+	if p.Type != "bedrock" {
+		// Wipe Bedrock-only settings so stale credentials do not linger
+		// after a provider changes type.
+		p.AWSRegion = ""
+		p.AWSAuthMethod = ""
+		p.AWSAccessKeyID = ""
+		p.AWSSecretAccessKey = ""
+		p.AWSSessionToken = ""
+		p.BedrockAPIKey = ""
+		secrets.AWSCredentials = true
+		secrets.BedrockAPIKey = true
+		return p, secrets, true
+	}
+	// Bedrock providers authenticate via AWS, not a base URL or bearer env var.
+	p.BaseURL = ""
+	p.APIKey = ""
+	p.APIKeyEnv = ""
+	secrets.APIKey = true
+	if p.AWSAuthMethod == "" {
+		p.AWSAuthMethod = "chain"
+	}
+	switch p.AWSAuthMethod {
+	case "chain":
+		p.AWSAccessKeyID = ""
+		p.AWSSecretAccessKey = ""
+		p.AWSSessionToken = ""
+		p.BedrockAPIKey = ""
+		secrets.AWSCredentials = true
+		secrets.BedrockAPIKey = true
+	case "keys":
+		if p.AWSAccessKeyID == "" {
+			respondError(w, http.StatusBadRequest, "aws_access_key_id is required for access-key auth")
+			return store.Provider{}, store.ProviderSecretUpdate{}, false
+		}
+		if isCreate && p.AWSSecretAccessKey == "" {
+			respondError(w, http.StatusBadRequest, "aws_secret_access_key is required for access-key auth")
+			return store.Provider{}, store.ProviderSecretUpdate{}, false
+		}
+		secrets.AWSCredentials = p.AWSSecretAccessKey != ""
+		p.BedrockAPIKey = ""
+		secrets.BedrockAPIKey = true
+	case "api_key":
+		if isCreate && p.BedrockAPIKey == "" {
+			respondError(w, http.StatusBadRequest, "bedrock_api_key is required for API-key auth")
+			return store.Provider{}, store.ProviderSecretUpdate{}, false
+		}
+		secrets.BedrockAPIKey = p.BedrockAPIKey != ""
+		p.AWSAccessKeyID = ""
+		p.AWSSecretAccessKey = ""
+		p.AWSSessionToken = ""
+		secrets.AWSCredentials = true
+	default:
+		respondError(w, http.StatusBadRequest, "aws_auth_method must be chain, keys, or api_key")
+		return store.Provider{}, store.ProviderSecretUpdate{}, false
+	}
+	return p, secrets, true
 }
 
 func (s *Server) modelFromRequest(w http.ResponseWriter, r *http.Request, pathID string) (store.Model, bool) {
@@ -5335,16 +5428,19 @@ func valueOr(value, fallback string) string {
 	return value
 }
 
-func providerAuditDetails(p store.Provider, directSecretUpdated bool) map[string]any {
+func providerAuditDetails(p store.Provider, secrets store.ProviderSecretUpdate) map[string]any {
 	return map[string]any{
-		"id":                    p.ID,
-		"name":                  p.Name,
-		"type":                  p.Type,
-		"base_url":              p.BaseURL,
-		"api_key_env":           p.APIKeyEnv,
-		"direct_secret_updated": directSecretUpdated,
-		"aws_region":            p.AWSRegion,
-		"enabled":               p.Enabled,
+		"id":                      p.ID,
+		"name":                    p.Name,
+		"type":                    p.Type,
+		"base_url":                p.BaseURL,
+		"api_key_env":             p.APIKeyEnv,
+		"direct_secret_updated":   secrets.APIKey,
+		"aws_region":              p.AWSRegion,
+		"aws_auth_method":         p.AWSAuthMethod,
+		"aws_credentials_updated": secrets.AWSCredentials,
+		"bedrock_api_key_updated": secrets.BedrockAPIKey,
+		"enabled":                 p.Enabled,
 	}
 }
 

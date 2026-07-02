@@ -466,17 +466,37 @@ function adminContentView(usage) {
   }
   if (state.adminTab === 'providers') {
     return `
-      ${adminPanel('Add provider', 'server', 'OpenAI-compatible covers Ollama, vLLM, LM Studio, OpenRouter, and LiteLLM. Bedrock uses AWS region and the AWS credential chain.', `
-        <div class="form-grid">
-          <input id="provider-id" placeholder="provider id, e.g. local-vllm" />
-          <input id="provider-name" placeholder="Display name" />
-          <select id="provider-type"><option value="openai">OpenAI-compatible</option><option value="anthropic">Anthropic-compatible</option><option value="bedrock">AWS Bedrock</option></select>
-          <input id="provider-base-url" placeholder="Base URL, e.g. http://localhost:8000/v1" />
-          <input id="provider-api-key-env" placeholder="API key env var, e.g. OPENAI_API_KEY" />
-          <input id="provider-api-key" placeholder="Direct API key (optional)" type="password" />
-          <input id="provider-aws-region" placeholder="AWS region for Bedrock, e.g. us-east-1" />
-          <label class="check"><input id="provider-enabled" type="checkbox" checked /> Enabled</label>
-          <button class="btn primary" id="create-provider">${icon('plus', 'btn-icon')}Add provider</button>
+      ${adminPanel('Add provider', 'server', 'OpenAI-compatible covers Ollama, vLLM, LM Studio, OpenRouter, and LiteLLM. Fields below adapt to the provider type.', `
+        <div id="add-provider-form" class="form-stack">
+          <div class="form-grid">
+            <label class="form-field"><span>Provider id</span><input id="provider-id" placeholder="e.g. local-vllm" /></label>
+            <label class="form-field"><span>Display name</span><input id="provider-name" placeholder="e.g. Local vLLM" /></label>
+            <label class="form-field"><span>Type</span><select id="provider-type"><option value="openai">OpenAI-compatible</option><option value="anthropic">Anthropic-compatible</option><option value="bedrock">AWS Bedrock</option></select></label>
+            <label class="form-field"><span>Status</span><label class="check"><input id="provider-enabled" type="checkbox" checked /> Enabled</label></label>
+          </div>
+          <div class="form-grid" data-provider-group="api">
+            <label class="form-field"><span>Base URL</span><input id="provider-base-url" placeholder="e.g. http://localhost:8000/v1" /></label>
+            <label class="form-field"><span>API key env var</span><input id="provider-api-key-env" placeholder="e.g. OPENAI_API_KEY" /></label>
+            <label class="form-field"><span>Direct API key (optional)</span><input id="provider-api-key" placeholder="used when the env var is unset" type="password" /></label>
+          </div>
+          <div class="form-grid" data-provider-group="bedrock">
+            <label class="form-field"><span>Authentication</span><select id="provider-aws-auth">
+              <option value="chain">AWS credential chain (env / IAM role)</option>
+              <option value="keys">Access key &amp; secret</option>
+              <option value="api_key">Bedrock API key</option>
+            </select></label>
+            <label class="form-field"><span>AWS region</span><input id="provider-aws-region" placeholder="e.g. us-east-1 (blank uses AWS_REGION)" /></label>
+          </div>
+          <p class="field-help" data-provider-group="bedrock-chain">Uses the standard AWS credential chain: AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_SESSION_TOKEN environment variables, shared config profiles, or an attached IAM role (EC2, ECS, EKS). An AWS_BEARER_TOKEN_BEDROCK environment variable is honored as well.</p>
+          <div class="form-grid" data-provider-group="bedrock-keys">
+            <label class="form-field"><span>Access key id</span><input id="provider-aws-access-key" placeholder="AKIA..." /></label>
+            <label class="form-field"><span>Secret access key</span><input id="provider-aws-secret-key" type="password" /></label>
+            <label class="form-field"><span>Session token (optional)</span><input id="provider-aws-session-token" type="password" placeholder="for temporary credentials" /></label>
+          </div>
+          <div class="form-grid" data-provider-group="bedrock-api-key">
+            <label class="form-field"><span>Bedrock API key</span><input id="provider-bedrock-api-key" type="password" placeholder="sent as a Bearer token" /></label>
+          </div>
+          <div><button class="btn primary" id="create-provider">${icon('plus', 'btn-icon')}Add provider</button></div>
         </div>
       `)}
       ${adminPanel('Providers', 'server', '', providerRows())}
@@ -765,29 +785,49 @@ function providerRows() {
   return `
     <div class="table-scroll">
       <table>
-        <thead><tr><th>ID</th><th>Name</th><th>Type</th><th>Base URL</th><th>Key env</th><th>Direct key</th><th>AWS region</th><th>Enabled</th><th>Health</th><th>Failures</th><th>Last check</th><th>Circuit open</th><th>Last error</th><th>Actions</th></tr></thead>
+        <thead><tr><th>ID</th><th>Name</th><th>Type</th><th>Connection &amp; credentials</th><th>Enabled</th><th>Health</th><th>Failures</th><th>Last check</th><th>Circuit open</th><th>Last error</th><th>Actions</th></tr></thead>
         <tbody>
-          ${state.providers.map(p => `
-            <tr data-provider-row="${esc(p.id)}">
-              <td class="mono">${esc(p.id)}</td>
-              <td><input data-provider-field="name" value="${attr(p.name)}" /></td>
-              <td><select data-provider-field="type">${option('openai', 'OpenAI-compatible', p.type)}${option('anthropic', 'Anthropic-compatible', p.type)}${option('bedrock', 'AWS Bedrock', p.type)}</select></td>
-              <td><input data-provider-field="base_url" value="${attr(p.base_url)}" /></td>
-              <td><input data-provider-field="api_key_env" value="${attr((p.api_key_env || '').replace(' (secret set)', ''))}" /></td>
-              <td><input data-provider-field="api_key" type="password" placeholder="leave blank to keep" /></td>
-              <td><input data-provider-field="aws_region" value="${attr(p.aws_region)}" /></td>
-              <td><input data-provider-field="enabled" type="checkbox" ${p.enabled ? 'checked' : ''} /></td>
-              <td>${statusPill(p.health_status || 'unknown')}</td>
-              <td>${Number(p.consecutive_failures || 0)}</td>
-              <td>${fmt(p.last_health_check_at)}</td>
-              <td>${fmt(p.circuit_open_until)}</td>
-              <td class="wrap">${esc(p.last_error || '')}</td>
-              <td><div class="actions"><button class="btn" data-save-provider="${esc(p.id)}">Save</button><button class="btn danger" data-delete-provider="${esc(p.id)}">Delete</button></div></td>
-            </tr>
-          `).join('')}
+          ${state.providers.map(p => providerRow(p)).join('')}
         </tbody>
       </table>
     </div>
+  `;
+}
+
+function providerRow(p) {
+  const auth = p.aws_auth_method || 'chain';
+  return `
+    <tr data-provider-row="${esc(p.id)}">
+      <td class="mono">${esc(p.id)}</td>
+      <td><input data-provider-field="name" value="${attr(p.name)}" /></td>
+      <td><select data-provider-field="type">${option('openai', 'OpenAI-compatible', p.type)}${option('anthropic', 'Anthropic-compatible', p.type)}${option('bedrock', 'AWS Bedrock', p.type)}</select></td>
+      <td class="connection-cell">
+        <div class="cell-stack" data-provider-group="api">
+          <label class="mini-field"><span>Base URL</span><input data-provider-field="base_url" value="${attr(p.base_url)}" /></label>
+          <label class="mini-field"><span>Key env var</span><input data-provider-field="api_key_env" value="${attr((p.api_key_env || '').replace(' (secret set)', ''))}" /></label>
+          <label class="mini-field"><span>Direct key</span><input data-provider-field="api_key" type="password" placeholder="leave blank to keep" /></label>
+        </div>
+        <div class="cell-stack" data-provider-group="bedrock">
+          <label class="mini-field"><span>Auth</span><select data-provider-field="aws_auth_method">${option('chain', 'AWS credential chain', auth)}${option('keys', 'Access key & secret', auth)}${option('api_key', 'Bedrock API key', auth)}</select></label>
+          <label class="mini-field"><span>Region</span><input data-provider-field="aws_region" value="${attr(p.aws_region)}" placeholder="blank uses AWS_REGION" /></label>
+        </div>
+        <div class="cell-stack" data-provider-group="bedrock-keys">
+          <label class="mini-field"><span>Access key id</span><input data-provider-field="aws_access_key_id" value="${attr(p.aws_access_key_id)}" /></label>
+          <label class="mini-field"><span>Secret key</span><input data-provider-field="aws_secret_access_key" type="password" placeholder="${p.has_aws_secret ? 'leave blank to keep' : 'not set'}" /></label>
+          <label class="mini-field"><span>Session token</span><input data-provider-field="aws_session_token" type="password" placeholder="${p.has_aws_secret ? 'kept with secret key' : 'optional'}" /></label>
+        </div>
+        <div class="cell-stack" data-provider-group="bedrock-api-key">
+          <label class="mini-field"><span>API key</span><input data-provider-field="bedrock_api_key" type="password" placeholder="${p.has_bedrock_api_key ? 'leave blank to keep' : 'not set'}" /></label>
+        </div>
+      </td>
+      <td><input data-provider-field="enabled" type="checkbox" ${p.enabled ? 'checked' : ''} /></td>
+      <td>${statusPill(p.health_status || 'unknown')}</td>
+      <td>${Number(p.consecutive_failures || 0)}</td>
+      <td>${fmt(p.last_health_check_at)}</td>
+      <td>${fmt(p.circuit_open_until)}</td>
+      <td class="wrap">${esc(p.last_error || '')}</td>
+      <td><div class="actions"><button class="btn" data-save-provider="${esc(p.id)}">Save</button><button class="btn danger" data-delete-provider="${esc(p.id)}">Delete</button></div></td>
+    </tr>
   `;
 }
 
@@ -1227,6 +1267,25 @@ function afterRender() {
       await refresh();
     };
   });
+  const addProviderForm = document.getElementById('add-provider-form');
+  if (addProviderForm) {
+    const syncAddProviderForm = () => {
+      syncProviderGroups(addProviderForm, val('provider-type'), val('provider-aws-auth') || 'chain');
+    };
+    document.getElementById('provider-type').onchange = syncAddProviderForm;
+    document.getElementById('provider-aws-auth').onchange = syncAddProviderForm;
+    syncAddProviderForm();
+  }
+  document.querySelectorAll('[data-provider-row]').forEach((row) => {
+    const typeSelect = row.querySelector('[data-provider-field="type"]');
+    const authSelect = row.querySelector('[data-provider-field="aws_auth_method"]');
+    const syncRow = () => {
+      syncProviderGroups(row, typeSelect?.value, authSelect?.value || 'chain');
+    };
+    if (typeSelect) typeSelect.onchange = syncRow;
+    if (authSelect) authSelect.onchange = syncRow;
+    syncRow();
+  });
   const createProvider = document.getElementById('create-provider');
   if (createProvider) {
     createProvider.onclick = async () => {
@@ -1238,6 +1297,11 @@ function afterRender() {
         api_key_env: val('provider-api-key-env'),
         api_key: val('provider-api-key'),
         aws_region: val('provider-aws-region'),
+        aws_auth_method: val('provider-aws-auth') || 'chain',
+        aws_access_key_id: val('provider-aws-access-key'),
+        aws_secret_access_key: val('provider-aws-secret-key'),
+        aws_session_token: val('provider-aws-session-token'),
+        bedrock_api_key: val('provider-bedrock-api-key'),
         enabled: checked('provider-enabled')
       })});
       state.notice = 'Provider added.';
@@ -1715,6 +1779,16 @@ function num(id) {
 
 function intNum(id) {
   return Number.parseInt(val(id) || '0', 10);
+}
+
+function syncProviderGroups(scope, type, auth) {
+  const show = (name, on) => scope.querySelectorAll(`[data-provider-group="${name}"]`).forEach((el) => el.classList.toggle('hidden', !on));
+  const bedrock = type === 'bedrock';
+  show('api', !bedrock);
+  show('bedrock', bedrock);
+  show('bedrock-chain', bedrock && auth === 'chain');
+  show('bedrock-keys', bedrock && auth === 'keys');
+  show('bedrock-api-key', bedrock && auth === 'api_key');
 }
 
 function collectFields(row, prefix) {

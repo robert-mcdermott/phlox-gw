@@ -523,6 +523,40 @@ button {
   line-height: 1.35;
 }
 
+.form-stack {
+  display: grid;
+  gap: 10px;
+}
+
+.hidden {
+  display: none !important;
+}
+
+.connection-cell {
+  min-width: 300px;
+}
+
+.cell-stack {
+  display: grid;
+  gap: 6px;
+}
+
+.cell-stack + .cell-stack {
+  margin-top: 6px;
+}
+
+.mini-field {
+  display: grid;
+  grid-template-columns: 96px 1fr;
+  gap: 6px;
+  align-items: center;
+}
+
+.mini-field span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
 .admin-subnav {
   border: 1px solid var(--border);
   border-radius: 8px;

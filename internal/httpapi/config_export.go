@@ -59,14 +59,15 @@ type adminConfigExportPayload struct {
 }
 
 type adminProviderConfigExport struct {
-	ID           string `json:"id"`
-	Name         string `json:"name"`
-	Type         string `json:"type"`
-	BaseURL      string `json:"base_url"`
-	APIKeyEnv    string `json:"api_key_env,omitempty"`
-	AWSRegion    string `json:"aws_region,omitempty"`
-	Enabled      bool   `json:"enabled"`
-	SecretSource string `json:"secret_source"`
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	Type          string `json:"type"`
+	BaseURL       string `json:"base_url"`
+	APIKeyEnv     string `json:"api_key_env,omitempty"`
+	AWSRegion     string `json:"aws_region,omitempty"`
+	AWSAuthMethod string `json:"aws_auth_method,omitempty"`
+	Enabled       bool   `json:"enabled"`
+	SecretSource  string `json:"secret_source"`
 }
 
 type adminModelConfigExport struct {
@@ -250,14 +251,15 @@ func exportProviders(providers []store.Provider) []adminProviderConfigExport {
 	out := make([]adminProviderConfigExport, 0, len(providers))
 	for _, p := range providers {
 		out = append(out, adminProviderConfigExport{
-			ID:           p.ID,
-			Name:         p.Name,
-			Type:         p.Type,
-			BaseURL:      p.BaseURL,
-			APIKeyEnv:    p.APIKeyEnv,
-			AWSRegion:    p.AWSRegion,
-			Enabled:      p.Enabled,
-			SecretSource: providerSecretSource(p),
+			ID:            p.ID,
+			Name:          p.Name,
+			Type:          p.Type,
+			BaseURL:       p.BaseURL,
+			APIKeyEnv:     p.APIKeyEnv,
+			AWSRegion:     p.AWSRegion,
+			AWSAuthMethod: p.AWSAuthMethod,
+			Enabled:       p.Enabled,
+			SecretSource:  providerSecretSource(p),
 		})
 	}
 	return out
@@ -265,7 +267,14 @@ func exportProviders(providers []store.Provider) []adminProviderConfigExport {
 
 func providerSecretSource(p store.Provider) string {
 	if p.Type == "bedrock" {
-		return "aws-credential-chain"
+		switch p.AWSAuthMethod {
+		case "keys":
+			return "aws-access-keys-redacted"
+		case "api_key":
+			return "bedrock-api-key-redacted"
+		default:
+			return "aws-credential-chain"
+		}
 	}
 	if strings.TrimSpace(p.APIKeyEnv) != "" {
 		return "environment"
