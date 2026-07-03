@@ -3253,3 +3253,543 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
 	return f(r)
 }
+
+func TestOpenAIChatCompletionsRoutesToAzureOpenAI(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer st.Close()
+	user := store.User{
+		ID:           "user_azure",
+		Username:     "azure-user",
+		Department:   "AI",
+		Role:         "user",
+		PasswordHash: "unused",
+		AuthProvider: "local",
+		IsActive:     true,
+	}
+	if err := st.CreateUser(ctx, user); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	plain, prefix, keyHash, err := auth.NewAPIKey()
+	if err != nil {
+		t.Fatalf("NewAPIKey: %v", err)
+	}
+	if err := st.CreateAPIKey(ctx, store.APIKey{ID: "key_azure", UserID: user.ID, Name: "Azure key", Prefix: prefix, KeyHash: keyHash}); err != nil {
+		t.Fatalf("CreateAPIKey: %v", err)
+	}
+	provider := store.Provider{
+		ID:      "azure-east",
+		Name:    "Azure OpenAI East",
+		Type:    "azure-openai",
+		BaseURL: "https://myres.openai.azure.com",
+		APIKey:  "azure-secret",
+		Enabled: true,
+	}
+	if err := st.CreateProvider(ctx, provider); err != nil {
+		t.Fatalf("CreateProvider: %v", err)
+	}
+	model := store.Model{
+		ID:                   "model_azure_gpt",
+		ProviderID:           provider.ID,
+		ModelID:              "gpt-4o-deploy",
+		Route:                "azure-east/gpt-4o",
+		DisplayName:          "Azure GPT-4o",
+		InputCostPerMillion:  1,
+		OutputCostPerMillion: 2,
+		SupportsStreaming:    true,
+		Enabled:              true,
+	}
+	if err := st.CreateModel(ctx, model); err != nil {
+		t.Fatalf("CreateModel: %v", err)
+	}
+	upstreamHits := 0
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		upstreamHits++
+		if r.URL.Host != "myres.openai.azure.com" {
+			t.Fatalf("unexpected upstream host: %s", r.URL.String())
+		}
+		if r.URL.Path != "/openai/deployments/gpt-4o-deploy/chat/completions" {
+			t.Fatalf("unexpected upstream path: %s", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("api-version"); got != "2024-10-21" {
+			t.Fatalf("api-version = %q", got)
+		}
+		if got := r.Header.Get("api-key"); got != "azure-secret" {
+			t.Fatalf("api-key header = %q", got)
+		}
+		if got := r.Header.Get("Authorization"); got != "" {
+			t.Fatalf("Authorization header should be empty for Azure, got %q", got)
+		}
+		var req map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("upstream decode: %v", err)
+		}
+		if req["model"] != "gpt-4o-deploy" {
+			t.Fatalf("unexpected upstream model: %#v", req["model"])
+		}
+		body := `{"id":"chatcmpl-1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":10}}`
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Request:    r,
+		}, nil
+	})
+	handler, err := New(Options{
+		Config: config.Config{SessionSecret: "test-secret"},
+		Store:  st,
+		Frontend: fstest.MapFS{
+			"frontend/dist/index.html": &fstest.MapFile{Data: []byte("<html></html>")},
+		},
+		HTTPClient: &http.Client{Transport: transport},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	resp := jsonRequest(t, handler, http.MethodPost, "/v1/chat/completions", plain, map[string]any{
+		"model":    model.Route,
+		"messages": []map[string]string{{"role": "user", "content": "Hello"}},
+	})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", resp.Code, resp.Body.String())
+	}
+	if upstreamHits != 1 {
+		t.Fatalf("upstream hits = %d", upstreamHits)
+	}
+	usage, err := st.UsageForUser(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("UsageForUser: %v", err)
+	}
+	if usage.Requests != 1 || usage.InputTokens != 7 || usage.OutputTokens != 3 {
+		t.Fatalf("unexpected stored usage: %#v", usage)
+	}
+}
+
+func TestAnthropicMessagesRoutesToAzureAnthropic(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer st.Close()
+	user := store.User{
+		ID:           "user_azure_claude",
+		Username:     "azure-claude-user",
+		Department:   "AI",
+		Role:         "user",
+		PasswordHash: "unused",
+		AuthProvider: "local",
+		IsActive:     true,
+	}
+	if err := st.CreateUser(ctx, user); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	plain, prefix, keyHash, err := auth.NewAPIKey()
+	if err != nil {
+		t.Fatalf("NewAPIKey: %v", err)
+	}
+	if err := st.CreateAPIKey(ctx, store.APIKey{ID: "key_azure_claude", UserID: user.ID, Name: "Azure Claude key", Prefix: prefix, KeyHash: keyHash}); err != nil {
+		t.Fatalf("CreateAPIKey: %v", err)
+	}
+	provider := store.Provider{
+		ID:      "azure-claude",
+		Name:    "Azure Claude",
+		Type:    "azure-anthropic",
+		BaseURL: "https://myres.services.ai.azure.com/anthropic",
+		APIKey:  "foundry-secret",
+		Enabled: true,
+	}
+	if err := st.CreateProvider(ctx, provider); err != nil {
+		t.Fatalf("CreateProvider: %v", err)
+	}
+	model := store.Model{
+		ID:                   "model_azure_claude",
+		ProviderID:           provider.ID,
+		ModelID:              "claude-sonnet-deploy",
+		Route:                "azure-claude/sonnet",
+		DisplayName:          "Azure Claude Sonnet",
+		InputCostPerMillion:  3,
+		OutputCostPerMillion: 15,
+		SupportsStreaming:    true,
+		Enabled:              true,
+	}
+	if err := st.CreateModel(ctx, model); err != nil {
+		t.Fatalf("CreateModel: %v", err)
+	}
+	upstreamHits := 0
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		upstreamHits++
+		if r.URL.Host != "myres.services.ai.azure.com" || r.URL.Path != "/anthropic/v1/messages" {
+			t.Fatalf("unexpected upstream target: %s", r.URL.String())
+		}
+		if got := r.Header.Get("x-api-key"); got != "foundry-secret" {
+			t.Fatalf("x-api-key header = %q", got)
+		}
+		if got := r.Header.Get("api-key"); got != "foundry-secret" {
+			t.Fatalf("api-key header = %q", got)
+		}
+		if got := r.Header.Get("anthropic-version"); got != "2023-06-01" {
+			t.Fatalf("anthropic-version = %q", got)
+		}
+		var req map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("upstream decode: %v", err)
+		}
+		if req["model"] != "claude-sonnet-deploy" {
+			t.Fatalf("unexpected upstream model: %#v", req["model"])
+		}
+		body := `{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":9,"output_tokens":4}}`
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Request:    r,
+		}, nil
+	})
+	handler, err := New(Options{
+		Config: config.Config{SessionSecret: "test-secret"},
+		Store:  st,
+		Frontend: fstest.MapFS{
+			"frontend/dist/index.html": &fstest.MapFile{Data: []byte("<html></html>")},
+		},
+		HTTPClient: &http.Client{Transport: transport},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	resp := jsonRequest(t, handler, http.MethodPost, "/anthropic/v1/messages", plain, map[string]any{
+		"model":      model.Route,
+		"max_tokens": 32,
+		"messages":   []map[string]string{{"role": "user", "content": "Hello"}},
+	})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", resp.Code, resp.Body.String())
+	}
+	if upstreamHits != 1 {
+		t.Fatalf("upstream hits = %d", upstreamHits)
+	}
+	usage, err := st.UsageForUser(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("UsageForUser: %v", err)
+	}
+	if usage.Requests != 1 || usage.InputTokens != 9 || usage.OutputTokens != 4 {
+		t.Fatalf("unexpected stored usage: %#v", usage)
+	}
+}
+
+func TestOpenAIChatEndpointAzure(t *testing.T) {
+	p := store.Provider{Type: "azure-openai", BaseURL: "https://myres.openai.azure.com/"}
+	got := openAIChatEndpoint(p, "gpt 4o/deploy")
+	want := "https://myres.openai.azure.com/openai/deployments/gpt%204o%2Fdeploy/chat/completions?api-version=2024-10-21"
+	if got != want {
+		t.Fatalf("openAIChatEndpoint = %q, want %q", got, want)
+	}
+	p.AzureAPIVersion = "2025-04-01-preview"
+	if got := openAIChatEndpoint(p, "gpt4o"); !strings.HasSuffix(got, "api-version=2025-04-01-preview") {
+		t.Fatalf("pinned api-version not used: %q", got)
+	}
+	generic := store.Provider{Type: "openai", BaseURL: "http://localhost:8000/v1"}
+	if got := openAIChatEndpoint(generic, "anything"); got != "http://localhost:8000/v1/chat/completions" {
+		t.Fatalf("generic endpoint changed: %q", got)
+	}
+}
+
+func TestAdminAzureProviderValidation(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer st.Close()
+	hash, err := auth.HashPassword("admin")
+	if err != nil {
+		t.Fatalf("HashPassword: %v", err)
+	}
+	if err := st.EnsureSeedData(hash); err != nil {
+		t.Fatalf("EnsureSeedData: %v", err)
+	}
+	handler, err := New(Options{
+		Config: config.Config{SessionSecret: "test-secret"},
+		Store:  st,
+		Frontend: fstest.MapFS{
+			"frontend/dist/index.html": &fstest.MapFile{Data: []byte("<html></html>")},
+		},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	loginResp := jsonRequest(t, handler, http.MethodPost, "/api/auth/login", "", map[string]any{"username": "admin", "password": "admin"})
+	var login struct {
+		Token string `json:"token"`
+	}
+	decodeRecorder(t, loginResp, &login)
+
+	// Azure providers require a base URL.
+	badResp := jsonRequest(t, handler, http.MethodPost, "/api/admin/providers", login.Token, map[string]any{
+		"id":   "azure-missing-url",
+		"name": "Azure Missing URL",
+		"type": "azure-openai",
+	})
+	if badResp.Code != http.StatusBadRequest {
+		t.Fatalf("create without base_url status = %d body = %s", badResp.Code, badResp.Body.String())
+	}
+
+	createResp := jsonRequest(t, handler, http.MethodPost, "/api/admin/providers", login.Token, map[string]any{
+		"id":                "azure-east",
+		"name":              "Azure East",
+		"type":              "azure-openai",
+		"base_url":          "https://myres.openai.azure.com/",
+		"api_key":           "azure-secret",
+		"azure_api_version": "2024-10-21",
+		"enabled":           true,
+	})
+	if createResp.Code != http.StatusCreated {
+		t.Fatalf("create azure provider status = %d body = %s", createResp.Code, createResp.Body.String())
+	}
+	stored, err := st.GetProvider(context.Background(), "azure-east")
+	if err != nil {
+		t.Fatalf("GetProvider: %v", err)
+	}
+	if stored.Type != "azure-openai" || stored.AzureAPIVersion != "2024-10-21" || stored.BaseURL != "https://myres.openai.azure.com" {
+		t.Fatalf("unexpected stored provider: %#v", stored)
+	}
+
+	// Switching away from azure-openai clears the api-version.
+	updateResp := jsonRequest(t, handler, http.MethodPut, "/api/admin/providers/azure-east", login.Token, map[string]any{
+		"name":              "Now Generic",
+		"type":              "openai",
+		"base_url":          "https://myres.openai.azure.com/openai/v1",
+		"azure_api_version": "2024-10-21",
+		"enabled":           true,
+	})
+	if updateResp.Code != http.StatusOK {
+		t.Fatalf("update provider status = %d body = %s", updateResp.Code, updateResp.Body.String())
+	}
+	stored, err = st.GetProvider(context.Background(), "azure-east")
+	if err != nil {
+		t.Fatalf("GetProvider after update: %v", err)
+	}
+	if stored.Type != "openai" || stored.AzureAPIVersion != "" {
+		t.Fatalf("api version should be cleared on type change: %#v", stored)
+	}
+}
+
+func TestOpenAIPayloadForUnsupportedParams(t *testing.T) {
+	payload := map[string]any{"model": "gpt-5.5", "max_tokens": 8, "temperature": 0}
+	maxTokensErr := `{"error":{"message":"Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.","type":"invalid_request_error","param":"max_tokens","code":"unsupported_parameter"}}`
+	adjusted, ok := openAIPayloadForUnsupportedParams(payload, http.StatusBadRequest, maxTokensErr)
+	if !ok {
+		t.Fatal("expected adjustment for max_tokens rejection")
+	}
+	if _, has := adjusted["max_tokens"]; has {
+		t.Fatalf("max_tokens should be removed: %#v", adjusted)
+	}
+	if adjusted["max_completion_tokens"] != 8 {
+		t.Fatalf("max_completion_tokens = %#v", adjusted["max_completion_tokens"])
+	}
+	if payload["max_tokens"] != 8 {
+		t.Fatal("original payload must not be mutated")
+	}
+
+	temperatureErr := `{"error":{"message":"Unsupported value: 'temperature' does not support 0 with this model. Only the default (1) value is supported.","type":"invalid_request_error","param":"temperature","code":"unsupported_value"}}`
+	adjusted, ok = openAIPayloadForUnsupportedParams(adjusted, http.StatusBadRequest, temperatureErr)
+	if !ok {
+		t.Fatal("expected adjustment for temperature rejection")
+	}
+	if _, has := adjusted["temperature"]; has {
+		t.Fatalf("temperature should be removed: %#v", adjusted)
+	}
+
+	if _, ok := openAIPayloadForUnsupportedParams(payload, http.StatusInternalServerError, maxTokensErr); ok {
+		t.Fatal("non-400 status must not trigger adjustment")
+	}
+	if _, ok := openAIPayloadForUnsupportedParams(map[string]any{"model": "m"}, http.StatusBadRequest, maxTokensErr); ok {
+		t.Fatal("payload without offending params must not trigger adjustment")
+	}
+	if _, ok := openAIPayloadForUnsupportedParams(payload, http.StatusBadRequest, `{"error":{"message":"invalid role"}}`); ok {
+		t.Fatal("unrelated 400 must not trigger adjustment")
+	}
+}
+
+func TestModelHealthCheckRetriesReasoningModelParams(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer st.Close()
+	hash, err := auth.HashPassword("admin")
+	if err != nil {
+		t.Fatalf("HashPassword: %v", err)
+	}
+	if err := st.EnsureSeedData(hash); err != nil {
+		t.Fatalf("EnsureSeedData: %v", err)
+	}
+	provider := store.Provider{
+		ID:      "azure-reasoning",
+		Name:    "Azure Reasoning",
+		Type:    "azure-openai",
+		BaseURL: "https://myres.openai.azure.com",
+		APIKey:  "azure-secret",
+		Enabled: true,
+	}
+	if err := st.CreateProvider(ctx, provider); err != nil {
+		t.Fatalf("CreateProvider: %v", err)
+	}
+	model := store.Model{
+		ID:         "model_gpt55",
+		ProviderID: provider.ID,
+		ModelID:    "gpt-5.5",
+		Route:      "azure/gpt-5.5",
+		Enabled:    true,
+	}
+	if err := st.CreateModel(ctx, model); err != nil {
+		t.Fatalf("CreateModel: %v", err)
+	}
+	upstreamHits := 0
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		upstreamHits++
+		var req map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("upstream decode: %v", err)
+		}
+		if _, has := req["max_tokens"]; has {
+			body := `{"error":{"message":"Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.","param":"max_tokens","code":"unsupported_parameter"}}`
+			return &http.Response{StatusCode: http.StatusBadRequest, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
+		}
+		if _, has := req["temperature"]; has {
+			body := `{"error":{"message":"Unsupported value: 'temperature' does not support 0 with this model. Only the default (1) value is supported.","param":"temperature","code":"unsupported_value"}}`
+			return &http.Response{StatusCode: http.StatusBadRequest, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
+		}
+		if req["max_completion_tokens"] != float64(8) {
+			t.Fatalf("expected max_completion_tokens 8, got %#v", req)
+		}
+		body := `{"id":"chatcmpl-1","choices":[{"message":{"role":"assistant","content":"OK"}}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}`
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
+	})
+	handler, err := New(Options{
+		Config: config.Config{SessionSecret: "test-secret"},
+		Store:  st,
+		Frontend: fstest.MapFS{
+			"frontend/dist/index.html": &fstest.MapFile{Data: []byte("<html></html>")},
+		},
+		HTTPClient: &http.Client{Transport: transport},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	loginResp := jsonRequest(t, handler, http.MethodPost, "/api/auth/login", "", map[string]any{"username": "admin", "password": "admin"})
+	var login struct {
+		Token string `json:"token"`
+	}
+	decodeRecorder(t, loginResp, &login)
+	resp := jsonRequest(t, handler, http.MethodPost, "/api/admin/models/model_gpt55/test", login.Token, nil)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("test endpoint status = %d body = %s", resp.Code, resp.Body.String())
+	}
+	var result struct {
+		OK         bool   `json:"ok"`
+		StatusCode int    `json:"status_code"`
+		Error      string `json:"error"`
+	}
+	decodeRecorder(t, resp, &result)
+	if !result.OK || result.StatusCode != http.StatusOK {
+		t.Fatalf("health check should pass after retries: %+v body=%s", result, resp.Body.String())
+	}
+	if upstreamHits != 3 {
+		t.Fatalf("expected 3 upstream attempts (max_tokens, temperature, success), got %d", upstreamHits)
+	}
+}
+
+func TestAnthropicMessagesTranslationRetriesReasoningModelParams(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer st.Close()
+	user := store.User{
+		ID:           "user_translate_retry",
+		Username:     "translate-retry-user",
+		Department:   "AI",
+		Role:         "user",
+		PasswordHash: "unused",
+		AuthProvider: "local",
+		IsActive:     true,
+	}
+	if err := st.CreateUser(ctx, user); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	plain, prefix, keyHash, err := auth.NewAPIKey()
+	if err != nil {
+		t.Fatalf("NewAPIKey: %v", err)
+	}
+	if err := st.CreateAPIKey(ctx, store.APIKey{ID: "key_translate_retry", UserID: user.ID, Name: "Translate retry key", Prefix: prefix, KeyHash: keyHash}); err != nil {
+		t.Fatalf("CreateAPIKey: %v", err)
+	}
+	provider := store.Provider{
+		ID:      "azure-reasoning-2",
+		Name:    "Azure Reasoning 2",
+		Type:    "azure-openai",
+		BaseURL: "https://myres.openai.azure.com",
+		APIKey:  "azure-secret",
+		Enabled: true,
+	}
+	if err := st.CreateProvider(ctx, provider); err != nil {
+		t.Fatalf("CreateProvider: %v", err)
+	}
+	model := store.Model{
+		ID:         "model_gpt55_translate",
+		ProviderID: provider.ID,
+		ModelID:    "gpt-5.5",
+		Route:      "azure/gpt-5.5-translate",
+		Enabled:    true,
+	}
+	if err := st.CreateModel(ctx, model); err != nil {
+		t.Fatalf("CreateModel: %v", err)
+	}
+	upstreamHits := 0
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		upstreamHits++
+		var req map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("upstream decode: %v", err)
+		}
+		if _, has := req["max_tokens"]; has {
+			body := `{"error":{"message":"Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.","param":"max_tokens","code":"unsupported_parameter"}}`
+			return &http.Response{StatusCode: http.StatusBadRequest, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
+		}
+		if req["max_completion_tokens"] != float64(32) {
+			t.Fatalf("expected max_completion_tokens 32, got %#v", req)
+		}
+		body := `{"id":"chatcmpl-1","choices":[{"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}`
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
+	})
+	handler, err := New(Options{
+		Config: config.Config{SessionSecret: "test-secret"},
+		Store:  st,
+		Frontend: fstest.MapFS{
+			"frontend/dist/index.html": &fstest.MapFile{Data: []byte("<html></html>")},
+		},
+		HTTPClient: &http.Client{Transport: transport},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	resp := jsonRequest(t, handler, http.MethodPost, "/anthropic/v1/messages", plain, map[string]any{
+		"model":      model.Route,
+		"max_tokens": 32,
+		"messages":   []map[string]string{{"role": "user", "content": "Hello"}},
+	})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", resp.Code, resp.Body.String())
+	}
+	if upstreamHits != 2 {
+		t.Fatalf("expected 2 upstream attempts, got %d", upstreamHits)
+	}
+	if !strings.Contains(resp.Body.String(), `"text":"hi"`) {
+		t.Fatalf("unexpected translated body: %s", resp.Body.String())
+	}
+}

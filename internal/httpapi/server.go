@@ -1415,11 +1415,12 @@ func (s *Server) runPlaygroundChat(parent context.Context, route store.RoutedMod
 		return s.runBedrockPlaygroundChat(ctx, route, system, messages, maxTokens, result)
 	}
 
+	protocol := providerProtocol(route.Provider)
 	var endpoint string
 	var payload map[string]any
-	switch route.Provider.Type {
+	switch protocol {
 	case "openai":
-		endpoint = strings.TrimRight(route.Provider.BaseURL, "/") + "/chat/completions"
+		endpoint = openAIChatEndpoint(route.Provider, route.Model.ModelID)
 		withSystem := messages
 		if system != "" {
 			withSystem = append([]map[string]any{{"role": "system", "content": system}}, messages...)
@@ -1431,7 +1432,7 @@ func (s *Server) runPlaygroundChat(parent context.Context, route store.RoutedMod
 			"stream":     false,
 		}
 	case "anthropic":
-		endpoint = strings.TrimRight(route.Provider.BaseURL, "/") + "/v1/messages"
+		endpoint = anthropicMessagesEndpoint(route.Provider)
 		payload = map[string]any{
 			"model":      route.Model.ModelID,
 			"max_tokens": maxTokens,
@@ -1444,58 +1445,66 @@ func (s *Server) runPlaygroundChat(parent context.Context, route store.RoutedMod
 		result.Error = "unsupported provider type"
 		return result
 	}
-	body, err := json.Marshal(payload)
-	if err != nil {
-		result.Error = err.Error()
-		return result
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
-	if err != nil {
-		result.Error = err.Error()
-		return result
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if route.Provider.Type == "anthropic" {
-		req.Header.Set("anthropic-version", "2023-06-01")
-		if apiKey := providerAPIKey(route.Provider); apiKey != "" {
-			req.Header.Set("x-api-key", apiKey)
+	// Reasoning-family models reject max_tokens and pinned temperature;
+	// retry with adjusted parameters when the upstream names the offender.
+	for attempt := 0; ; attempt++ {
+		body, err := json.Marshal(payload)
+		if err != nil {
+			result.Error = err.Error()
+			return result
 		}
-	} else if apiKey := providerAPIKey(route.Provider); apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+apiKey)
-	}
-	req.Header.Set("User-Agent", "Phlox-GW/0.1")
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+		if err != nil {
+			result.Error = err.Error()
+			return result
+		}
+		req.Header.Set("Content-Type", "application/json")
+		if protocol == "anthropic" {
+			req.Header.Set("anthropic-version", "2023-06-01")
+			setAnthropicAuthHeader(req, route.Provider)
+		} else {
+			setOpenAIAuthHeader(req, route.Provider)
+		}
+		req.Header.Set("User-Agent", "Phlox-GW/0.1")
 
-	start := time.Now()
-	resp, err := s.httpClient.Do(req)
-	result.LatencyMS = time.Since(start).Milliseconds()
-	if err != nil {
-		result.Error = err.Error()
+		start := time.Now()
+		resp, err := s.httpClient.Do(req)
+		result.LatencyMS = time.Since(start).Milliseconds()
+		if err != nil {
+			result.Error = err.Error()
+			return result
+		}
+		result.StatusCode = resp.StatusCode
+		responseBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		resp.Body.Close()
+		if err != nil {
+			result.Error = err.Error()
+			return result
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			if protocol == "openai" && attempt < 2 {
+				if adjusted, ok := openAIPayloadForUnsupportedParams(payload, resp.StatusCode, string(responseBody)); ok {
+					payload = adjusted
+					continue
+				}
+			}
+			result.Error = limitString(string(responseBody), 2000)
+			return result
+		}
+		var usage tokenUsage
+		if protocol == "anthropic" {
+			result.Content = anthropicResponseText(responseBody)
+			usage = parseAnthropicUsage(responseBody)
+		} else {
+			result.Content = openAIResponseText(responseBody)
+			usage = parseOpenAIUsage(responseBody)
+		}
+		result.InputTokens = usage.Input
+		result.OutputTokens = usage.Output
+		result.TotalTokens = usage.Total
+		result.OK = true
 		return result
 	}
-	defer resp.Body.Close()
-	result.StatusCode = resp.StatusCode
-	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil {
-		result.Error = err.Error()
-		return result
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		result.Error = limitString(string(responseBody), 2000)
-		return result
-	}
-	var usage tokenUsage
-	if route.Provider.Type == "anthropic" {
-		result.Content = anthropicResponseText(responseBody)
-		usage = parseAnthropicUsage(responseBody)
-	} else {
-		result.Content = openAIResponseText(responseBody)
-		usage = parseOpenAIUsage(responseBody)
-	}
-	result.InputTokens = usage.Input
-	result.OutputTokens = usage.Output
-	result.TotalTokens = usage.Total
-	result.OK = true
-	return result
 }
 
 func (s *Server) runBedrockPlaygroundChat(ctx context.Context, route store.RoutedModel, system string, messages []map[string]any, maxTokens int, result playgroundChatResult) playgroundChatResult {
@@ -2223,7 +2232,7 @@ func (s *Server) openAIChatCompletions(w http.ResponseWriter, r *http.Request, u
 	}
 	candidates := plan.Candidates
 	route := candidates[0]
-	if route.Provider.Type != "openai" && route.Provider.Type != "bedrock" {
+	if protocol := providerProtocol(route.Provider); protocol != "openai" && protocol != "bedrock" {
 		openAIError(w, http.StatusNotImplemented, "model is not on an OpenAI-compatible or Bedrock provider", "unsupported_provider")
 		return
 	}
@@ -2263,7 +2272,7 @@ func (s *Server) openAIChatCompletions(w http.ResponseWriter, r *http.Request, u
 		latency := time.Since(start).Milliseconds()
 		usage := parseOpenAIUsage(responseBody)
 		s.recordProviderOutcome(r.Context(), selected.Provider.ID, statusCode, errText)
-		s.recordUsage(r.Context(), requestID, user, key, selected, selected.Provider.Type, usage, latency, statusCode, errText, eventMeta)
+		s.recordUsage(r.Context(), requestID, user, key, selected, providerProtocol(selected.Provider), usage, latency, statusCode, errText, eventMeta)
 		return
 	}
 	result := s.executeOpenAIPlan(r.Context(), candidates, raw, user, key, requestID, policy, requestEventFromHTTP(r, false), guardrails)
@@ -2297,7 +2306,7 @@ func (s *Server) anthropicMessages(w http.ResponseWriter, r *http.Request, user 
 	}
 	candidates := plan.Candidates
 	route := candidates[0]
-	if route.Provider.Type != "anthropic" && route.Provider.Type != "openai" && route.Provider.Type != "bedrock" {
+	if protocol := providerProtocol(route.Provider); protocol != "anthropic" && protocol != "openai" && protocol != "bedrock" {
 		anthropicError(w, http.StatusNotImplemented, "model is not on a supported provider")
 		return
 	}
@@ -2326,7 +2335,7 @@ func (s *Server) anthropicMessages(w http.ResponseWriter, r *http.Request, user 
 		var statusCode int
 		var responseBody []byte
 		var errText string
-		if selected.Provider.Type == "anthropic" {
+		if providerProtocol(selected.Provider) == "anthropic" {
 			attemptRaw := cloneJSONMap(raw)
 			attemptRaw["model"] = selected.Model.ModelID
 			body, err := json.Marshal(attemptRaw)
@@ -2335,7 +2344,7 @@ func (s *Server) anthropicMessages(w http.ResponseWriter, r *http.Request, user 
 				return
 			}
 			statusCode, responseBody, errText = s.proxyAnthropicStream(w, r, selected, body, guardrails)
-		} else if selected.Provider.Type == "openai" {
+		} else if providerProtocol(selected.Provider) == "openai" {
 			statusCode, responseBody, errText = s.proxyAnthropicViaOpenAIStream(w, r, selected, raw, guardrails)
 		} else {
 			statusCode, responseBody, errText = s.proxyAnthropicViaBedrockStream(w, r, selected, raw, guardrails)
@@ -2417,7 +2426,7 @@ func (s *Server) executeOpenAIPlan(ctx context.Context, candidates []store.Route
 	var last upstreamResult
 	attemptSeq := 0
 	for idx, route := range candidates {
-		if route.Provider.Type != "openai" && route.Provider.Type != "bedrock" {
+		if protocol := providerProtocol(route.Provider); protocol != "openai" && protocol != "bedrock" {
 			continue
 		}
 		if policy.HealthRoutingEnabled {
@@ -2466,7 +2475,7 @@ func (s *Server) executeAnthropicPlan(ctx context.Context, candidates []store.Ro
 	var last upstreamResult
 	attemptSeq := 0
 	for idx, route := range candidates {
-		if route.Provider.Type != "anthropic" && route.Provider.Type != "openai" && route.Provider.Type != "bedrock" {
+		if protocol := providerProtocol(route.Provider); protocol != "anthropic" && protocol != "openai" && protocol != "bedrock" {
 			continue
 		}
 		if policy.HealthRoutingEnabled {
@@ -2485,7 +2494,7 @@ func (s *Server) executeAnthropicPlan(ctx context.Context, candidates []store.Ro
 		for attempt := 0; attempt < attempts; attempt++ {
 			attemptSeq++
 			var result upstreamResult
-			if route.Provider.Type == "anthropic" {
+			if providerProtocol(route.Provider) == "anthropic" {
 				result = s.callAnthropicNonStreaming(ctx, route, raw, inbound, policy.RequestTimeout)
 			} else {
 				result = s.callAnthropicViaOpenAINonStreaming(ctx, route, raw, policy.RequestTimeout)
@@ -2512,7 +2521,7 @@ func (s *Server) executeAnthropicPlan(ctx context.Context, candidates []store.Ro
 
 func (s *Server) selectOpenAIStreamCandidate(ctx context.Context, candidates []store.RoutedModel, user store.User, key store.APIKey, policy routeReliabilityPolicy) (store.RoutedModel, int, string, string, bool) {
 	for idx, route := range candidates {
-		if route.Provider.Type != "openai" && route.Provider.Type != "bedrock" {
+		if protocol := providerProtocol(route.Provider); protocol != "openai" && protocol != "bedrock" {
 			continue
 		}
 		if policy.HealthRoutingEnabled {
@@ -2538,7 +2547,7 @@ func (s *Server) selectOpenAIStreamCandidate(ctx context.Context, candidates []s
 
 func (s *Server) selectAnthropicStreamCandidate(ctx context.Context, candidates []store.RoutedModel, user store.User, key store.APIKey, policy routeReliabilityPolicy) (store.RoutedModel, int, string, bool) {
 	for idx, route := range candidates {
-		if route.Provider.Type != "anthropic" && route.Provider.Type != "openai" && route.Provider.Type != "bedrock" {
+		if protocol := providerProtocol(route.Provider); protocol != "anthropic" && protocol != "openai" && protocol != "bedrock" {
 			continue
 		}
 		if policy.HealthRoutingEnabled {
@@ -2588,16 +2597,14 @@ func (s *Server) callOpenAINonStreaming(parent context.Context, route store.Rout
 	ctx, cancel := contextWithOptionalTimeout(parent, timeout)
 	defer cancel()
 	ctx, finishTrace := s.upstreamTrace(ctx, route, "openai", "chat.completions")
-	endpoint := strings.TrimRight(route.Provider.BaseURL, "/") + "/chat/completions"
+	endpoint := openAIChatEndpoint(route.Provider, route.Model.ModelID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		finishTrace(http.StatusInternalServerError, err.Error(), 0)
 		return upstreamResult{Route: route, Protocol: "openai", Status: http.StatusInternalServerError, ErrorText: err.Error()}
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if apiKey := providerAPIKey(route.Provider); apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+apiKey)
-	}
+	setOpenAIAuthHeader(req, route.Provider)
 	req.Header.Set("User-Agent", "Phlox-GW/0.1")
 	start := time.Now()
 	resp, err := s.httpClient.Do(req)
@@ -2635,7 +2642,7 @@ func (s *Server) callAnthropicNonStreaming(parent context.Context, route store.R
 	ctx, cancel := contextWithOptionalTimeout(parent, timeout)
 	defer cancel()
 	ctx, finishTrace := s.upstreamTrace(ctx, route, "anthropic", "messages")
-	endpoint := strings.TrimRight(route.Provider.BaseURL, "/") + "/v1/messages"
+	endpoint := anthropicMessagesEndpoint(route.Provider)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		finishTrace(http.StatusInternalServerError, err.Error(), 0)
@@ -2651,9 +2658,7 @@ func (s *Server) callAnthropicNonStreaming(parent context.Context, route store.R
 	if beta := inbound.Get("anthropic-beta"); beta != "" {
 		req.Header.Set("anthropic-beta", beta)
 	}
-	if apiKey := providerAPIKey(route.Provider); apiKey != "" {
-		req.Header.Set("x-api-key", apiKey)
-	}
+	setAnthropicAuthHeader(req, route.Provider)
 	start := time.Now()
 	resp, err := s.httpClient.Do(req)
 	latencyDuration := time.Since(start)
@@ -2686,6 +2691,17 @@ func (s *Server) callAnthropicViaOpenAINonStreaming(parent context.Context, rout
 		return upstreamResult{Route: route, Protocol: "anthropic", Status: http.StatusBadRequest, ErrorText: err.Error()}
 	}
 	result := s.callOpenAINonStreaming(parent, route, openAIRaw, timeout)
+	// Anthropic requests always carry max_tokens, which reasoning-family
+	// models reject in favor of max_completion_tokens; retry the authored
+	// payload with adjusted parameters.
+	for attempt := 0; attempt < 2; attempt++ {
+		adjusted, ok := openAIPayloadForUnsupportedParams(openAIRaw, result.Status, string(result.Body))
+		if !ok {
+			break
+		}
+		openAIRaw = adjusted
+		result = s.callOpenAINonStreaming(parent, route, openAIRaw, timeout)
+	}
 	if result.Status < 200 || result.Status >= 300 {
 		return upstreamResult{
 			Route:     route,
@@ -3373,7 +3389,7 @@ func resultStatus(result upstreamResult) int {
 }
 
 func openAIPlanError(route store.RoutedModel, status int, reason string) upstreamResult {
-	return upstreamResult{Route: route, Protocol: route.Provider.Type, Status: status, ErrorText: reason}
+	return upstreamResult{Route: route, Protocol: providerProtocol(route.Provider), Status: status, ErrorText: reason}
 }
 
 func attemptRequestID(requestID string, attempt int) string {
@@ -3497,7 +3513,7 @@ func fallbackString(v, fallback string) string {
 }
 
 func (s *Server) proxyOpenAI(w http.ResponseWriter, r *http.Request, route store.RoutedModel, body []byte, raw map[string]any, guardrails store.GuardrailPolicy) (int, []byte, string) {
-	endpoint := strings.TrimRight(route.Provider.BaseURL, "/") + "/chat/completions"
+	endpoint := openAIChatEndpoint(route.Provider, route.Model.ModelID)
 	ctx, finishTrace := s.upstreamTrace(r.Context(), route, "openai", "chat.completions")
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
@@ -3506,9 +3522,7 @@ func (s *Server) proxyOpenAI(w http.ResponseWriter, r *http.Request, route store
 		return http.StatusInternalServerError, nil, err.Error()
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if apiKey := providerAPIKey(route.Provider); apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+apiKey)
-	}
+	setOpenAIAuthHeader(req, route.Provider)
 	req.Header.Set("User-Agent", "Phlox-GW/0.1")
 
 	start := time.Now()
@@ -3929,7 +3943,7 @@ func bedrockConversationRole(role types.ConversationRole) string {
 }
 
 func (s *Server) proxyAnthropic(w http.ResponseWriter, r *http.Request, route store.RoutedModel, body []byte) (int, []byte, string) {
-	endpoint := strings.TrimRight(route.Provider.BaseURL, "/") + "/v1/messages"
+	endpoint := anthropicMessagesEndpoint(route.Provider)
 	ctx, finishTrace := s.upstreamTrace(r.Context(), route, "anthropic", "messages")
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
@@ -3947,9 +3961,7 @@ func (s *Server) proxyAnthropic(w http.ResponseWriter, r *http.Request, route st
 	if beta := r.Header.Get("anthropic-beta"); beta != "" {
 		req.Header.Set("anthropic-beta", beta)
 	}
-	if apiKey := providerAPIKey(route.Provider); apiKey != "" {
-		req.Header.Set("x-api-key", apiKey)
-	}
+	setAnthropicAuthHeader(req, route.Provider)
 
 	start := time.Now()
 	resp, err := s.httpClient.Do(req)
@@ -3982,7 +3994,7 @@ func (s *Server) proxyAnthropic(w http.ResponseWriter, r *http.Request, route st
 }
 
 func (s *Server) proxyAnthropicStream(w http.ResponseWriter, r *http.Request, route store.RoutedModel, body []byte, guardrails store.GuardrailPolicy) (int, []byte, string) {
-	endpoint := strings.TrimRight(route.Provider.BaseURL, "/") + "/v1/messages"
+	endpoint := anthropicMessagesEndpoint(route.Provider)
 	ctx, finishTrace := s.upstreamTrace(r.Context(), route, "anthropic", "messages.stream")
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
@@ -4000,9 +4012,7 @@ func (s *Server) proxyAnthropicStream(w http.ResponseWriter, r *http.Request, ro
 	if beta := r.Header.Get("anthropic-beta"); beta != "" {
 		req.Header.Set("anthropic-beta", beta)
 	}
-	if apiKey := providerAPIKey(route.Provider); apiKey != "" {
-		req.Header.Set("x-api-key", apiKey)
-	}
+	setAnthropicAuthHeader(req, route.Provider)
 
 	start := time.Now()
 	resp, err := s.httpClient.Do(req)
@@ -4083,44 +4093,56 @@ func (s *Server) proxyAnthropicViaOpenAIStream(w http.ResponseWriter, r *http.Re
 	}
 	openAIRaw["stream"] = true
 	openAIRaw["model"] = route.Model.ModelID
-	body, err := json.Marshal(openAIRaw)
-	if err != nil {
-		anthropicError(w, http.StatusInternalServerError, err.Error())
-		return http.StatusInternalServerError, nil, err.Error()
-	}
-	endpoint := strings.TrimRight(route.Provider.BaseURL, "/") + "/chat/completions"
+	endpoint := openAIChatEndpoint(route.Provider, route.Model.ModelID)
 	ctx, finishTrace := s.upstreamTrace(r.Context(), route, "anthropic", "messages.stream.translate_openai")
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
-	if err != nil {
-		finishTrace(http.StatusInternalServerError, err.Error(), 0)
-		anthropicError(w, http.StatusInternalServerError, err.Error())
-		return http.StatusInternalServerError, nil, err.Error()
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "Phlox-GW/0.1")
-	if apiKey := providerAPIKey(route.Provider); apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+apiKey)
-	}
 	start := time.Now()
-	resp, err := s.httpClient.Do(req)
-	if err != nil {
-		finishTrace(http.StatusBadGateway, err.Error(), time.Since(start))
-		anthropicError(w, http.StatusBadGateway, err.Error())
-		return http.StatusBadGateway, nil, err.Error()
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
+	var resp *http.Response
+	// The translated payload always carries max_tokens, which
+	// reasoning-family models reject; retry with adjusted parameters before
+	// anything is written to the client.
+	for attempt := 0; ; attempt++ {
+		body, err := json.Marshal(openAIRaw)
+		if err != nil {
+			anthropicError(w, http.StatusInternalServerError, err.Error())
+			return http.StatusInternalServerError, nil, err.Error()
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+		if err != nil {
+			finishTrace(http.StatusInternalServerError, err.Error(), 0)
+			anthropicError(w, http.StatusInternalServerError, err.Error())
+			return http.StatusInternalServerError, nil, err.Error()
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("User-Agent", "Phlox-GW/0.1")
+		setOpenAIAuthHeader(req, route.Provider)
+		resp, err = s.httpClient.Do(req)
+		if err != nil {
+			finishTrace(http.StatusBadGateway, err.Error(), time.Since(start))
+			anthropicError(w, http.StatusBadGateway, err.Error())
+			return http.StatusBadGateway, nil, err.Error()
+		}
+		if resp.StatusCode < 400 {
+			break
+		}
 		responseBody, readErr := io.ReadAll(resp.Body)
+		resp.Body.Close()
 		if readErr != nil {
 			finishTrace(resp.StatusCode, readErr.Error(), time.Since(start))
 			anthropicError(w, resp.StatusCode, readErr.Error())
 			return resp.StatusCode, nil, readErr.Error()
+		}
+		if attempt < 2 {
+			if adjusted, ok := openAIPayloadForUnsupportedParams(openAIRaw, resp.StatusCode, string(responseBody)); ok {
+				openAIRaw = adjusted
+				continue
+			}
 		}
 		message := providerErrorText(responseBody, string(responseBody))
 		finishTrace(resp.StatusCode, message, time.Since(start))
 		anthropicError(w, resp.StatusCode, message)
 		return resp.StatusCode, responseBody, message
 	}
+	defer resp.Body.Close()
 	for k, values := range resp.Header {
 		if shouldProxyHeader(k) && !strings.EqualFold(k, "Content-Type") {
 			for _, v := range values {
@@ -5421,7 +5443,7 @@ func (s *Server) runModelHealthCheck(parent context.Context, route store.RoutedM
 	result := modelHealthResult{
 		ProviderID: route.Provider.ID,
 		Model:      route.Model.Route,
-		Protocol:   route.Provider.Type,
+		Protocol:   providerProtocol(route.Provider),
 	}
 	if route.Provider.Type == "bedrock" {
 		return s.runBedrockHealthCheck(parent, route, result)
@@ -5430,80 +5452,81 @@ func (s *Server) runModelHealthCheck(parent context.Context, route store.RoutedM
 	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
 	defer cancel()
 
+	protocol := providerProtocol(route.Provider)
 	var endpoint string
-	var body []byte
-	var err error
-	var req *http.Request
-	switch route.Provider.Type {
+	var payload map[string]any
+	switch protocol {
 	case "openai":
-		endpoint = strings.TrimRight(route.Provider.BaseURL, "/") + "/chat/completions"
-		body, err = json.Marshal(map[string]any{
+		endpoint = openAIChatEndpoint(route.Provider, route.Model.ModelID)
+		payload = map[string]any{
 			"model":       route.Model.ModelID,
 			"messages":    []map[string]string{{"role": "user", "content": "Reply with exactly: OK"}},
 			"temperature": 0,
 			"max_tokens":  8,
 			"stream":      false,
-		})
-		if err != nil {
-			result.Error = err.Error()
-			return result
-		}
-		req, err = http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
-		if err == nil {
-			req.Header.Set("Content-Type", "application/json")
-			if apiKey := providerAPIKey(route.Provider); apiKey != "" {
-				req.Header.Set("Authorization", "Bearer "+apiKey)
-			}
 		}
 	case "anthropic":
-		endpoint = strings.TrimRight(route.Provider.BaseURL, "/") + "/v1/messages"
-		body, err = json.Marshal(map[string]any{
+		endpoint = anthropicMessagesEndpoint(route.Provider)
+		payload = map[string]any{
 			"model":      route.Model.ModelID,
 			"max_tokens": 8,
 			"messages":   []map[string]string{{"role": "user", "content": "Reply with exactly: OK"}},
-		})
-		if err != nil {
-			result.Error = err.Error()
-			return result
-		}
-		req, err = http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
-		if err == nil {
-			req.Header.Set("Content-Type", "application/json")
-			req.Header.Set("anthropic-version", "2023-06-01")
-			if apiKey := providerAPIKey(route.Provider); apiKey != "" {
-				req.Header.Set("x-api-key", apiKey)
-			}
 		}
 	default:
 		result.Error = "unsupported provider type"
 		return result
 	}
-	if err != nil {
-		result.Error = err.Error()
-		return result
-	}
-	req.Header.Set("User-Agent", "Phlox-GW/0.1")
 
-	start := time.Now()
-	resp, err := s.httpClient.Do(req)
-	result.LatencyMS = time.Since(start).Milliseconds()
-	if err != nil {
-		result.Error = err.Error()
+	// Reasoning-family models reject max_tokens and pinned temperature, and
+	// report one bad parameter per response, so allow a couple of retries
+	// with adjusted parameters before treating the failure as real.
+	for attempt := 0; ; attempt++ {
+		body, err := json.Marshal(payload)
+		if err != nil {
+			result.Error = err.Error()
+			return result
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+		if err != nil {
+			result.Error = err.Error()
+			return result
+		}
+		req.Header.Set("Content-Type", "application/json")
+		if protocol == "anthropic" {
+			req.Header.Set("anthropic-version", "2023-06-01")
+			setAnthropicAuthHeader(req, route.Provider)
+		} else {
+			setOpenAIAuthHeader(req, route.Provider)
+		}
+		req.Header.Set("User-Agent", "Phlox-GW/0.1")
+
+		start := time.Now()
+		resp, err := s.httpClient.Do(req)
+		result.LatencyMS = time.Since(start).Milliseconds()
+		if err != nil {
+			result.Error = err.Error()
+			return result
+		}
+		result.StatusCode = resp.StatusCode
+		responseBody, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		resp.Body.Close()
+		if err != nil {
+			result.Error = err.Error()
+			return result
+		}
+		if protocol == "openai" && attempt < 2 {
+			if adjusted, ok := openAIPayloadForUnsupportedParams(payload, resp.StatusCode, string(responseBody)); ok {
+				payload = adjusted
+				continue
+			}
+		}
+		result.Snippet = limitString(string(responseBody), 800)
+		result.OK = resp.StatusCode >= 200 && resp.StatusCode < 300
+		if !result.OK && result.Error == "" {
+			result.Error = result.Snippet
+		}
 		return result
 	}
-	defer resp.Body.Close()
-	result.StatusCode = resp.StatusCode
-	responseBody, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
-	if err != nil {
-		result.Error = err.Error()
-		return result
-	}
-	result.Snippet = limitString(string(responseBody), 800)
-	result.OK = resp.StatusCode >= 200 && resp.StatusCode < 300
-	if !result.OK && result.Error == "" {
-		result.Error = result.Snippet
-	}
-	return result
 }
 
 func (s *Server) runBedrockHealthCheck(parent context.Context, route store.RoutedModel, result modelHealthResult) modelHealthResult {
@@ -5547,6 +5570,7 @@ func (s *Server) providerFromRequest(w http.ResponseWriter, r *http.Request, pat
 		BaseURL            string `json:"base_url"`
 		APIKey             string `json:"api_key"`
 		APIKeyEnv          string `json:"api_key_env"`
+		AzureAPIVersion    string `json:"azure_api_version"`
 		AWSRegion          string `json:"aws_region"`
 		AWSAuthMethod      string `json:"aws_auth_method"`
 		AWSAccessKeyID     string `json:"aws_access_key_id"`
@@ -5567,12 +5591,14 @@ func (s *Server) providerFromRequest(w http.ResponseWriter, r *http.Request, pat
 		respondError(w, http.StatusBadRequest, "provider id and name are required")
 		return store.Provider{}, store.ProviderSecretUpdate{}, false
 	}
-	if req.Type != "openai" && req.Type != "anthropic" && req.Type != "bedrock" {
-		respondError(w, http.StatusBadRequest, "provider type must be openai, anthropic, or bedrock")
+	switch req.Type {
+	case "openai", "anthropic", "azure-openai", "azure-anthropic", "bedrock":
+	default:
+		respondError(w, http.StatusBadRequest, "provider type must be openai, anthropic, azure-openai, azure-anthropic, or bedrock")
 		return store.Provider{}, store.ProviderSecretUpdate{}, false
 	}
 	if req.Type != "bedrock" && strings.TrimSpace(req.BaseURL) == "" {
-		respondError(w, http.StatusBadRequest, "base_url is required for OpenAI and Anthropic-compatible providers")
+		respondError(w, http.StatusBadRequest, "base_url is required for non-Bedrock providers")
 		return store.Provider{}, store.ProviderSecretUpdate{}, false
 	}
 	p := store.Provider{
@@ -5582,6 +5608,7 @@ func (s *Server) providerFromRequest(w http.ResponseWriter, r *http.Request, pat
 		BaseURL:            strings.TrimRight(strings.TrimSpace(req.BaseURL), "/"),
 		APIKey:             req.APIKey,
 		APIKeyEnv:          strings.TrimSpace(req.APIKeyEnv),
+		AzureAPIVersion:    strings.TrimSpace(req.AzureAPIVersion),
 		AWSRegion:          strings.TrimSpace(req.AWSRegion),
 		AWSAuthMethod:      strings.TrimSpace(req.AWSAuthMethod),
 		AWSAccessKeyID:     strings.TrimSpace(req.AWSAccessKeyID),
@@ -5589,6 +5616,10 @@ func (s *Server) providerFromRequest(w http.ResponseWriter, r *http.Request, pat
 		AWSSessionToken:    strings.TrimSpace(req.AWSSessionToken),
 		BedrockAPIKey:      strings.TrimSpace(req.BedrockAPIKey),
 		Enabled:            req.Enabled,
+	}
+	if p.Type != "azure-openai" {
+		// api-version only applies to Azure OpenAI deployment endpoints.
+		p.AzureAPIVersion = ""
 	}
 	secrets := store.ProviderSecretUpdate{APIKey: strings.TrimSpace(req.APIKey) != ""}
 	if p.Type != "bedrock" {
@@ -5797,6 +5828,7 @@ func providerAuditDetails(p store.Provider, secrets store.ProviderSecretUpdate) 
 		"type":                    p.Type,
 		"base_url":                p.BaseURL,
 		"api_key_env":             p.APIKeyEnv,
+		"azure_api_version":       p.AzureAPIVersion,
 		"direct_secret_updated":   secrets.APIKey,
 		"aws_region":              p.AWSRegion,
 		"aws_auth_method":         p.AWSAuthMethod,
@@ -6651,6 +6683,104 @@ func parseAnthropicUsage(body []byte) tokenUsage {
 	_ = json.Unmarshal(body, &resp)
 	total := resp.Usage.InputTokens + resp.Usage.OutputTokens
 	return tokenUsage{Input: resp.Usage.InputTokens, Output: resp.Usage.OutputTokens, Total: total}
+}
+
+// defaultAzureAPIVersion is the Azure OpenAI data-plane api-version used when
+// a provider does not pin one. 2024-10-21 is the latest GA version.
+const defaultAzureAPIVersion = "2024-10-21"
+
+// providerProtocol maps a provider type to the wire protocol it speaks.
+// Azure OpenAI deployments speak the OpenAI chat-completions protocol and
+// Claude deployments in Azure AI Foundry speak the Anthropic Messages
+// protocol; they differ only in endpoint shape and auth headers.
+func providerProtocol(p store.Provider) string {
+	switch p.Type {
+	case "azure-openai":
+		return "openai"
+	case "azure-anthropic":
+		return "anthropic"
+	default:
+		return p.Type
+	}
+}
+
+func azureAPIVersion(p store.Provider) string {
+	if v := strings.TrimSpace(p.AzureAPIVersion); v != "" {
+		return v
+	}
+	return defaultAzureAPIVersion
+}
+
+// openAIChatEndpoint returns the upstream chat-completions URL for an
+// OpenAI-protocol provider. Azure OpenAI routes through per-deployment paths
+// (the upstream model id is the deployment name) with a required api-version
+// query parameter.
+func openAIChatEndpoint(p store.Provider, upstreamModel string) string {
+	base := strings.TrimRight(p.BaseURL, "/")
+	if p.Type == "azure-openai" {
+		return base + "/openai/deployments/" + urlpkg.PathEscape(upstreamModel) + "/chat/completions?api-version=" + urlpkg.QueryEscape(azureAPIVersion(p))
+	}
+	return base + "/chat/completions"
+}
+
+func anthropicMessagesEndpoint(p store.Provider) string {
+	return strings.TrimRight(p.BaseURL, "/") + "/v1/messages"
+}
+
+// openAIPayloadForUnsupportedParams returns a copy of an OpenAI-protocol
+// chat-completions payload adjusted after an upstream 400 that rejects legacy
+// sampling parameters. Reasoning-family models (o-series, GPT-5) accept only
+// max_completion_tokens and the default temperature; the upstream error names
+// the offending parameter. ok is false when no adjustment applies.
+func openAIPayloadForUnsupportedParams(payload map[string]any, status int, responseBody string) (map[string]any, bool) {
+	if status != http.StatusBadRequest {
+		return nil, false
+	}
+	adjusted := cloneJSONMap(payload)
+	changed := false
+	if strings.Contains(responseBody, "max_completion_tokens") {
+		if v, ok := adjusted["max_tokens"]; ok {
+			delete(adjusted, "max_tokens")
+			adjusted["max_completion_tokens"] = v
+			changed = true
+		}
+	}
+	if strings.Contains(responseBody, "'temperature'") {
+		if _, ok := adjusted["temperature"]; ok {
+			delete(adjusted, "temperature")
+			changed = true
+		}
+	}
+	if !changed {
+		return nil, false
+	}
+	return adjusted, true
+}
+
+func setOpenAIAuthHeader(req *http.Request, p store.Provider) {
+	apiKey := providerAPIKey(p)
+	if apiKey == "" {
+		return
+	}
+	if p.Type == "azure-openai" {
+		req.Header.Set("api-key", apiKey)
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+}
+
+func setAnthropicAuthHeader(req *http.Request, p store.Provider) {
+	apiKey := providerAPIKey(p)
+	if apiKey == "" {
+		return
+	}
+	req.Header.Set("x-api-key", apiKey)
+	if p.Type == "azure-anthropic" {
+		// Azure AI Foundry accepts the Anthropic-style x-api-key header, but
+		// some gateway configurations only honor Azure's api-key header, so
+		// send both.
+		req.Header.Set("api-key", apiKey)
+	}
 }
 
 func providerAPIKey(p store.Provider) string {

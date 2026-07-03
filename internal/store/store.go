@@ -90,6 +90,7 @@ type Provider struct {
 	BaseURL             string     `json:"base_url"`
 	APIKey              string     `json:"-"`
 	APIKeyEnv           string     `json:"api_key_env"`
+	AzureAPIVersion     string     `json:"azure_api_version"`
 	AWSRegion           string     `json:"aws_region"`
 	AWSAuthMethod       string     `json:"aws_auth_method"`
 	AWSAccessKeyID      string     `json:"aws_access_key_id"`
@@ -657,6 +658,7 @@ var columnMigrations = []columnMigration{
 	{table: "providers", column: "aws_secret_access_key", spec: "TEXT NOT NULL DEFAULT ''"},
 	{table: "providers", column: "aws_session_token", spec: "TEXT NOT NULL DEFAULT ''"},
 	{table: "providers", column: "bedrock_api_key", spec: "TEXT NOT NULL DEFAULT ''"},
+	{table: "providers", column: "azure_api_version", spec: "TEXT NOT NULL DEFAULT ''"},
 	{table: "models", column: "fallback_routes", spec: "TEXT NOT NULL DEFAULT ''"},
 	{table: "models", column: "weighted_routes", spec: "TEXT NOT NULL DEFAULT ''"},
 	{table: "models", column: "retry_attempts", spec: "INTEGER NOT NULL DEFAULT 0"},
@@ -671,7 +673,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			return err
 		}
 	}
-	return nil
+	return s.migrateProviderTypeCheckSQLite(ctx)
 }
 
 func (s *Store) migrateTx(ctx context.Context, tx *sql.Tx) error {
@@ -680,7 +682,57 @@ func (s *Store) migrateTx(ctx context.Context, tx *sql.Tx) error {
 			return err
 		}
 	}
-	return nil
+	return migrateProviderTypeCheckPostgres(ctx, tx)
+}
+
+// migrateProviderTypeCheckSQLite rebuilds the providers table when its DDL
+// still carries a CHECK constraint that predates the Azure provider types.
+// SQLite cannot alter CHECK constraints in place, so the table is copied.
+func (s *Store) migrateProviderTypeCheckSQLite(ctx context.Context) error {
+	var ddl sql.NullString
+	err := s.queryRow(ctx, `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'providers'`).Scan(&ddl)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !strings.Contains(ddl.String, "CHECK") || strings.Contains(ddl.String, "'azure-openai'") {
+		return nil
+	}
+	if _, err := s.exec(ctx, "PRAGMA foreign_keys = OFF"); err != nil {
+		return err
+	}
+	defer s.exec(ctx, "PRAGMA foreign_keys = ON")
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	stmts := []string{
+		`DROP TABLE IF EXISTS providers_new`,
+		providersTableDDL("providers_new"),
+		`INSERT INTO providers_new (` + providerColumns + `) SELECT ` + providerColumns + ` FROM providers`,
+		`DROP TABLE providers`,
+		`ALTER TABLE providers_new RENAME TO providers`,
+	}
+	for _, stmt := range stmts {
+		if _, err := tx.ExecContext(ctx, stmt); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// migrateProviderTypeCheckPostgres swaps the providers type CHECK constraint
+// for the current type list. Postgres names inline column checks
+// {table}_{column}_check, so the drop targets that name.
+func migrateProviderTypeCheckPostgres(ctx context.Context, tx *sql.Tx) error {
+	if _, err := tx.ExecContext(ctx, `ALTER TABLE providers DROP CONSTRAINT IF EXISTS providers_type_check`); err != nil {
+		return err
+	}
+	_, err := tx.ExecContext(ctx, `ALTER TABLE providers ADD CONSTRAINT providers_type_check `+providerTypeCheck)
+	return err
 }
 
 func (s *Store) ensureColumnTx(ctx context.Context, tx *sql.Tx, table, column, spec string) error {
@@ -1126,9 +1178,9 @@ func (s *Store) GetProvider(ctx context.Context, id string) (Provider, error) {
 func (s *Store) CreateProvider(ctx context.Context, p Provider) error {
 	now := time.Now().UTC()
 	_, err := s.exec(ctx, `
-		INSERT INTO providers (id, name, type, base_url, api_key, api_key_env, aws_region, aws_auth_method, aws_access_key_id, aws_secret_access_key, aws_session_token, bedrock_api_key, enabled, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		p.ID, p.Name, p.Type, p.BaseURL, p.APIKey, p.APIKeyEnv, p.AWSRegion, p.AWSAuthMethod, p.AWSAccessKeyID, p.AWSSecretAccessKey, p.AWSSessionToken, p.BedrockAPIKey, boolInt(p.Enabled), formatTime(now), formatTime(now))
+		INSERT INTO providers (id, name, type, base_url, api_key, api_key_env, azure_api_version, aws_region, aws_auth_method, aws_access_key_id, aws_secret_access_key, aws_session_token, bedrock_api_key, enabled, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		p.ID, p.Name, p.Type, p.BaseURL, p.APIKey, p.APIKeyEnv, p.AzureAPIVersion, p.AWSRegion, p.AWSAuthMethod, p.AWSAccessKeyID, p.AWSSecretAccessKey, p.AWSSessionToken, p.BedrockAPIKey, boolInt(p.Enabled), formatTime(now), formatTime(now))
 	if isUniqueErr(err) {
 		return ErrConflict
 	}
@@ -1145,8 +1197,8 @@ type ProviderSecretUpdate struct {
 
 func (s *Store) UpdateProvider(ctx context.Context, p Provider, secrets ProviderSecretUpdate) error {
 	now := time.Now().UTC()
-	set := []string{"name = ?", "type = ?", "base_url = ?", "api_key_env = ?", "aws_region = ?", "aws_auth_method = ?", "aws_access_key_id = ?", "enabled = ?", "updated_at = ?"}
-	args := []any{p.Name, p.Type, p.BaseURL, p.APIKeyEnv, p.AWSRegion, p.AWSAuthMethod, p.AWSAccessKeyID, boolInt(p.Enabled), formatTime(now)}
+	set := []string{"name = ?", "type = ?", "base_url = ?", "api_key_env = ?", "azure_api_version = ?", "aws_region = ?", "aws_auth_method = ?", "aws_access_key_id = ?", "enabled = ?", "updated_at = ?"}
+	args := []any{p.Name, p.Type, p.BaseURL, p.APIKeyEnv, p.AzureAPIVersion, p.AWSRegion, p.AWSAuthMethod, p.AWSAccessKeyID, boolInt(p.Enabled), formatTime(now)}
 	if secrets.APIKey {
 		set = append(set, "api_key = ?")
 		args = append(args, p.APIKey)
@@ -2499,9 +2551,9 @@ const apiKeyColumns = `id, user_id, name, prefix, key_hash, is_active, expires_a
 
 const apiKeyColumnsAliased = `k.id, k.user_id, k.name, k.prefix, k.key_hash, k.is_active, k.expires_at, k.last_used_at, k.created_at, k.budget_usd, k.rpm_limit, k.tpm_limit, k.model_allowlist`
 
-const providerColumns = `id, name, type, base_url, api_key, api_key_env, aws_region, aws_auth_method, aws_access_key_id, aws_secret_access_key, aws_session_token, bedrock_api_key, enabled, health_status, consecutive_failures, last_health_check_at, last_error, circuit_open_until, created_at, updated_at`
+const providerColumns = `id, name, type, base_url, api_key, api_key_env, azure_api_version, aws_region, aws_auth_method, aws_access_key_id, aws_secret_access_key, aws_session_token, bedrock_api_key, enabled, health_status, consecutive_failures, last_health_check_at, last_error, circuit_open_until, created_at, updated_at`
 
-const providerColumnsAliased = `p.id, p.name, p.type, p.base_url, p.api_key, p.api_key_env, p.aws_region, p.aws_auth_method, p.aws_access_key_id, p.aws_secret_access_key, p.aws_session_token, p.bedrock_api_key, p.enabled, p.health_status, p.consecutive_failures, p.last_health_check_at, p.last_error, p.circuit_open_until, p.created_at, p.updated_at`
+const providerColumnsAliased = `p.id, p.name, p.type, p.base_url, p.api_key, p.api_key_env, p.azure_api_version, p.aws_region, p.aws_auth_method, p.aws_access_key_id, p.aws_secret_access_key, p.aws_session_token, p.bedrock_api_key, p.enabled, p.health_status, p.consecutive_failures, p.last_health_check_at, p.last_error, p.circuit_open_until, p.created_at, p.updated_at`
 
 const modelColumns = `id, provider_id, model_id, route, display_name, input_cost_per_million, output_cost_per_million, context_window, supports_streaming, enabled, fallback_routes, weighted_routes, retry_attempts, request_timeout_ms, health_routing_enabled, created_at, updated_at`
 
@@ -2512,7 +2564,7 @@ func scanProvider(row scanner) (Provider, error) {
 	var enabled int
 	var lastCheck, circuitOpen sql.NullString
 	var created, updated string
-	err := row.Scan(&p.ID, &p.Name, &p.Type, &p.BaseURL, &p.APIKey, &p.APIKeyEnv, &p.AWSRegion, &p.AWSAuthMethod, &p.AWSAccessKeyID, &p.AWSSecretAccessKey, &p.AWSSessionToken, &p.BedrockAPIKey, &enabled, &p.HealthStatus, &p.ConsecutiveFailures, &lastCheck, &p.LastError, &circuitOpen, &created, &updated)
+	err := row.Scan(&p.ID, &p.Name, &p.Type, &p.BaseURL, &p.APIKey, &p.APIKeyEnv, &p.AzureAPIVersion, &p.AWSRegion, &p.AWSAuthMethod, &p.AWSAccessKeyID, &p.AWSSecretAccessKey, &p.AWSSessionToken, &p.BedrockAPIKey, &enabled, &p.HealthStatus, &p.ConsecutiveFailures, &lastCheck, &p.LastError, &circuitOpen, &created, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Provider{}, ErrNotFound
 	}
@@ -2570,7 +2622,7 @@ func scanRoutedModel(row scanner) (RoutedModel, error) {
 	var mCreated, mUpdated, pCreated, pUpdated string
 	err := row.Scan(&m.ID, &m.ProviderID, &m.ModelID, &m.Route, &m.DisplayName, &m.InputCostPerMillion, &m.OutputCostPerMillion, &m.ContextWindow,
 		&mStreaming, &mEnabled, &m.FallbackRoutes, &m.WeightedRoutes, &m.RetryAttempts, &m.RequestTimeoutMS, &mHealthRouting, &mCreated, &mUpdated,
-		&p.ID, &p.Name, &p.Type, &p.BaseURL, &p.APIKey, &p.APIKeyEnv, &p.AWSRegion, &p.AWSAuthMethod, &p.AWSAccessKeyID, &p.AWSSecretAccessKey, &p.AWSSessionToken, &p.BedrockAPIKey, &pEnabled, &p.HealthStatus, &p.ConsecutiveFailures, &pLastCheck, &p.LastError, &pCircuitOpen, &pCreated, &pUpdated)
+		&p.ID, &p.Name, &p.Type, &p.BaseURL, &p.APIKey, &p.APIKeyEnv, &p.AzureAPIVersion, &p.AWSRegion, &p.AWSAuthMethod, &p.AWSAccessKeyID, &p.AWSSecretAccessKey, &p.AWSSessionToken, &p.BedrockAPIKey, &pEnabled, &p.HealthStatus, &p.ConsecutiveFailures, &pLastCheck, &p.LastError, &pCircuitOpen, &pCreated, &pUpdated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return RoutedModel{}, ErrNotFound
 	}
@@ -2863,6 +2915,34 @@ func isUniqueErr(err error) bool {
 	return err != nil && strings.Contains(strings.ToLower(err.Error()), "unique")
 }
 
+const providerTypeCheck = `CHECK (type IN ('openai', 'anthropic', 'azure-openai', 'azure-anthropic', 'bedrock'))`
+
+func providersTableDDL(name string) string {
+	return `CREATE TABLE IF NOT EXISTS ` + name + ` (
+		id TEXT PRIMARY KEY,
+		name TEXT NOT NULL,
+		type TEXT NOT NULL ` + providerTypeCheck + `,
+		base_url TEXT NOT NULL DEFAULT '',
+		api_key TEXT NOT NULL DEFAULT '',
+		api_key_env TEXT NOT NULL DEFAULT '',
+		azure_api_version TEXT NOT NULL DEFAULT '',
+		aws_region TEXT NOT NULL DEFAULT '',
+		aws_auth_method TEXT NOT NULL DEFAULT '',
+		aws_access_key_id TEXT NOT NULL DEFAULT '',
+		aws_secret_access_key TEXT NOT NULL DEFAULT '',
+		aws_session_token TEXT NOT NULL DEFAULT '',
+		bedrock_api_key TEXT NOT NULL DEFAULT '',
+		enabled INTEGER NOT NULL DEFAULT 1,
+		health_status TEXT NOT NULL DEFAULT 'unknown',
+		consecutive_failures INTEGER NOT NULL DEFAULT 0,
+		last_health_check_at TEXT,
+		last_error TEXT NOT NULL DEFAULT '',
+		circuit_open_until TEXT,
+		created_at TEXT NOT NULL,
+		updated_at TEXT NOT NULL
+	)`
+}
+
 var schema = []string{
 	`CREATE TABLE IF NOT EXISTS users (
 		id TEXT PRIMARY KEY,
@@ -2894,28 +2974,7 @@ var schema = []string{
 		model_allowlist TEXT NOT NULL DEFAULT ''
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_api_keys_user ON api_keys(user_id)`,
-	`CREATE TABLE IF NOT EXISTS providers (
-		id TEXT PRIMARY KEY,
-		name TEXT NOT NULL,
-		type TEXT NOT NULL CHECK (type IN ('openai', 'anthropic', 'bedrock')),
-		base_url TEXT NOT NULL DEFAULT '',
-		api_key TEXT NOT NULL DEFAULT '',
-		api_key_env TEXT NOT NULL DEFAULT '',
-		aws_region TEXT NOT NULL DEFAULT '',
-		aws_auth_method TEXT NOT NULL DEFAULT '',
-		aws_access_key_id TEXT NOT NULL DEFAULT '',
-		aws_secret_access_key TEXT NOT NULL DEFAULT '',
-		aws_session_token TEXT NOT NULL DEFAULT '',
-		bedrock_api_key TEXT NOT NULL DEFAULT '',
-		enabled INTEGER NOT NULL DEFAULT 1,
-		health_status TEXT NOT NULL DEFAULT 'unknown',
-		consecutive_failures INTEGER NOT NULL DEFAULT 0,
-		last_health_check_at TEXT,
-		last_error TEXT NOT NULL DEFAULT '',
-		circuit_open_until TEXT,
-		created_at TEXT NOT NULL,
-		updated_at TEXT NOT NULL
-	)`,
+	providersTableDDL("providers"),
 	`CREATE TABLE IF NOT EXISTS models (
 		id TEXT PRIMARY KEY,
 		provider_id TEXT NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
