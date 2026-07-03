@@ -1131,9 +1131,30 @@ button {
   margin-bottom: 12px;
 }
 
+.chargeback-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
 .chargeback-dept td {
   background: var(--surface-2);
   font-weight: 600;
+}
+
+.chargeback-dept {
+  cursor: pointer;
+  user-select: none;
+}
+
+.chargeback-dept:hover td {
+  background: var(--surface-3);
+}
+
+.chargeback-caret {
+  display: inline-block;
+  width: 16px;
+  color: var(--muted);
 }
 
 .chargeback-user-name {

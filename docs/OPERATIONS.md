@@ -715,7 +715,8 @@ Pick a billing month (current month is the default; every month with ledger data
 selectable) to see spend grouped by department, with a per-user breakdown inside each
 department. Department rows show requests, tokens, cost, the department budget with
 utilization, and share of total spend; user rows show each member's usage and share of
-their department.
+their department. Click a department row to collapse or expand its user breakdown, or
+use `Collapse all` for a department-level summary.
 
 Department and username are captured on each ledger row at request time, so historical
 months bill against the department a user belonged to when the spend happened, even if

@@ -40,7 +40,7 @@ const state = {
   oidcConfig: { enabled: false, display_name: 'Entra ID' },
   adminTab: 'operations',
   playground: { route: '', system: '', draft: '', maxTokens: 1024, busy: false, messages: [] },
-  chargeback: { month: '', report: null, loading: false, error: '' },
+  chargeback: { month: '', report: null, loading: false, error: '', collapsed: {} },
   secret: '',
   error: '',
   notice: ''
@@ -1163,10 +1163,14 @@ function chargebackView() {
   const report = cb.report;
   const months = [...new Set([currentMonthKey(), cb.month, ...(report.available_months || [])])].filter(Boolean).sort().reverse();
   const users = report.departments.reduce((sum, d) => sum + d.users.length, 0);
+  const allCollapsed = report.departments.length > 0 && report.departments.every(d => cb.collapsed[d.department]);
   return `
     <div class="chargeback-toolbar">
       <label class="form-field"><span>Billing month</span><select id="chargeback-month">${months.map(m => option(m, m, cb.month)).join('')}</select></label>
-      <button class="btn" id="chargeback-download">${icon('file', 'btn-icon')}Download CSV</button>
+      <div class="chargeback-actions">
+        <button class="btn" id="chargeback-toggle-all">${allCollapsed ? 'Expand all' : 'Collapse all'}</button>
+        <button class="btn" id="chargeback-download">${icon('file', 'btn-icon')}Download CSV</button>
+      </div>
     </div>
     <div class="metric-strip">
       ${miniMetric('Cost', money(report.cost_usd))}
@@ -1187,8 +1191,8 @@ function chargebackTable(report) {
         <thead><tr><th>Department / user</th><th>Requests</th><th>Input tokens</th><th>Output tokens</th><th>Total tokens</th><th>Cost</th><th>Budget</th><th>Share</th></tr></thead>
         <tbody>
           ${report.departments.map(dept => `
-            <tr class="chargeback-dept">
-              <td>${esc(dept.department || '(no department)')} <span class="muted">· ${dept.users.length} user${dept.users.length === 1 ? '' : 's'}</span></td>
+            <tr class="chargeback-dept" data-chargeback-dept="${attr(dept.department)}" title="Click to ${state.chargeback.collapsed[dept.department] ? 'show' : 'hide'} the user breakdown">
+              <td><span class="chargeback-caret">${state.chargeback.collapsed[dept.department] ? '&#9656;' : '&#9662;'}</span>${esc(dept.department || '(no department)')} <span class="muted">· ${dept.users.length} user${dept.users.length === 1 ? '' : 's'}</span></td>
               <td>${compact(dept.requests)}</td>
               <td>${compact(dept.input_tokens)}</td>
               <td>${compact(dept.output_tokens)}</td>
@@ -1197,7 +1201,7 @@ function chargebackTable(report) {
               <td>${dept.budget_usd > 0 ? `${money(dept.budget_usd)} <span class="muted">(${percent(dept.cost_usd / dept.budget_usd)} used)</span>` : '<span class="muted">—</span>'}</td>
               <td>${percent(report.cost_usd ? dept.cost_usd / report.cost_usd : 0)} <span class="muted">of total</span></td>
             </tr>
-            ${dept.users.map(user => `
+            ${state.chargeback.collapsed[dept.department] ? '' : dept.users.map(user => `
               <tr class="chargeback-user">
                 <td class="chargeback-user-name">${esc(user.username || user.user_id || '(unattributed)')}</td>
                 <td>${compact(user.requests)}</td>
@@ -2004,6 +2008,25 @@ function afterRender() {
   const chargebackRetry = document.getElementById('chargeback-retry');
   if (chargebackRetry) {
     chargebackRetry.onclick = () => loadChargeback(state.chargeback.month || currentMonthKey());
+  }
+  document.querySelectorAll('[data-chargeback-dept]').forEach((row) => {
+    row.onclick = () => {
+      const dept = row.dataset.chargebackDept;
+      state.chargeback.collapsed[dept] = !state.chargeback.collapsed[dept];
+      render();
+    };
+  });
+  const chargebackToggleAll = document.getElementById('chargeback-toggle-all');
+  if (chargebackToggleAll) {
+    chargebackToggleAll.onclick = () => {
+      const departments = state.chargeback.report?.departments || [];
+      const allCollapsed = departments.length > 0 && departments.every(d => state.chargeback.collapsed[d.department]);
+      state.chargeback.collapsed = {};
+      if (!allCollapsed) {
+        departments.forEach(d => { state.chargeback.collapsed[d.department] = true; });
+      }
+      render();
+    };
   }
   const csvExport = document.getElementById('csv-export');
   if (csvExport) {
