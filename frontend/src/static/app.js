@@ -709,22 +709,44 @@ function clusterStatusView() {
 function monitoringView() {
   const rows = state.usageSeries || [];
   if (!rows.length) return '<p>No usage data yet.</p>';
+  CHART_REGISTRY.clear();
   const totalRequests = rows.reduce((sum, row) => sum + Number(row.requests || 0), 0);
   const totalErrors = rows.reduce((sum, row) => sum + Number(row.errors || 0), 0);
+  const totalCost = rows.reduce((sum, row) => sum + Number(row.cost_usd || 0), 0);
+  const totalTokens = rows.reduce((sum, row) => sum + Number(row.total_tokens || 0), 0);
   const errorRate = totalRequests ? totalErrors / totalRequests : 0;
   const avgLatency = weightedAverage(rows, 'avg_latency_ms', 'requests');
   return `
     <div class="metric-strip">
-      ${miniMetric('30d requests', totalRequests)}
-      ${miniMetric('30d errors', totalErrors)}
+      ${miniMetric('30d cost', money(totalCost))}
+      ${miniMetric('30d tokens', compact(totalTokens))}
+      ${miniMetric('30d requests', compact(totalRequests))}
+      ${miniMetric('30d errors', compact(totalErrors))}
       ${miniMetric('Error rate', percent(errorRate))}
       ${miniMetric('Avg latency', `${Math.round(avgLatency)} ms`)}
     </div>
     <div class="chart-grid">
-      ${barChart('Daily cost', rows, 'cost_usd', money)}
-      ${barChart('Daily tokens', rows, 'total_tokens', compact)}
-      ${barChart('Daily requests', rows, 'requests', compact)}
-      ${barChart('Daily errors', rows, 'errors', compact)}
+      ${svgBarChart('Daily cost', rows, {
+        series: [{ field: 'cost_usd' }],
+        axis: (v) => `$${compact(v)}`,
+        total: money(totalCost)
+      })}
+      ${svgBarChart('Daily tokens', rows, {
+        series: [{ field: 'total_tokens' }],
+        axis: compact,
+        total: compact(totalTokens)
+      })}
+      ${svgBarChart('Daily requests & errors', rows, {
+        series: [{ field: 'requests' }, { field: 'errors', cls: 'bar-error' }],
+        axis: compact,
+        total: `${compact(totalRequests)} / ${compact(totalErrors)}`,
+        legend: [['requests', ''], ['errors', 'sw-error']]
+      })}
+      ${svgBarChart('Daily avg latency (ms)', rows, {
+        series: [{ field: 'avg_latency_ms' }],
+        axis: compact,
+        total: `${Math.round(avgLatency)} ms`
+      })}
     </div>
   `;
 }
@@ -733,21 +755,129 @@ function miniMetric(label, value) {
   return `<div class="mini-metric"><div class="label">${esc(label)}</div><strong>${esc(String(value))}</strong></div>`;
 }
 
-function barChart(title, rows, field, formatter) {
-  const max = Math.max(1, ...rows.map(row => Number(row[field] || 0)));
+const CHART_REGISTRY = new Map();
+const CHART_GEO = { w: 640, h: 200, left: 46, right: 6, top: 10, bottom: 24 };
+
+function niceStep(rawStep) {
+  const magnitude = Math.pow(10, Math.floor(Math.log10(rawStep)));
+  const norm = rawStep / magnitude;
+  if (norm <= 1) return magnitude;
+  if (norm <= 2) return 2 * magnitude;
+  if (norm <= 5) return 5 * magnitude;
+  return 10 * magnitude;
+}
+
+function svgBarChart(title, rows, config) {
+  const geo = CHART_GEO;
+  const plotW = geo.w - geo.left - geo.right;
+  const plotH = geo.h - geo.top - geo.bottom;
+  const baseline = geo.top + plotH;
+  const dataMax = Math.max(...rows.map(row => Math.max(...config.series.map(s => Number(row[s.field] || 0)))), 0);
+  const step = niceStep(Math.max(dataMax, 1e-9) / 4);
+  const axisMax = Math.max(step, Math.ceil(dataMax / step) * step);
+  const ticks = [];
+  for (let v = 0; v <= axisMax + step / 2; v += step) ticks.push(v);
+  const slot = plotW / rows.length;
+  const barW = Math.max(2, slot * 0.62);
+  const y = (v) => baseline - (Number(v || 0) / axisMax) * plotH;
+
+  const grid = ticks.map(v => {
+    const ty = y(v);
+    return `<line class="chart-grid-line" x1="${geo.left}" y1="${ty}" x2="${geo.w - geo.right}" y2="${ty}"/>` +
+      `<text class="chart-tick" x="${geo.left - 6}" y="${ty + 3}" text-anchor="end">${esc(config.axis(v))}</text>`;
+  }).join('');
+
+  const labelEvery = Math.max(1, Math.ceil(rows.length / 6));
+  const xLabels = rows.map((row, i) => {
+    if (i % labelEvery !== 0) return '';
+    const cx = geo.left + i * slot + slot / 2;
+    return `<text class="chart-tick" x="${cx}" y="${geo.h - 8}" text-anchor="middle">${esc(String(row.date || '').slice(5))}</text>`;
+  }).join('');
+
+  const bars = config.series.map((s, si) => rows.map((row, i) => {
+    const value = Number(row[s.field] || 0);
+    if (value <= 0) return '';
+    const shrink = si === 0 ? 0 : barW * 0.3;
+    const x = geo.left + i * slot + (slot - barW) / 2 + shrink / 2;
+    const top = Math.min(y(value), baseline - 1);
+    return `<rect class="chart-bar ${s.cls || ''}" x="${x}" y="${top}" width="${barW - shrink}" height="${baseline - top}" rx="1"/>`;
+  }).join('')).join('');
+
+  const key = `chart_${CHART_REGISTRY.size}`;
+  CHART_REGISTRY.set(key, { rows, geo, slot, primary: config.series.map(s => s.field) });
+  const legend = (config.legend || []).map(([label, cls]) =>
+    `<span class="chart-legend-item"><i class="chart-swatch ${cls}"></i>${esc(label)}</span>`).join('');
   return `
-    <div class="chart-card">
-      <div class="chart-title">${esc(title)}</div>
-      <div class="bars">
-        ${rows.map(row => {
-          const value = Number(row[field] || 0);
-          const height = Math.max(value > 0 ? 4 : 1, Math.round((value / max) * 88));
-          return `<div class="bar-wrap" title="${esc(row.date)} · ${esc(formatter(value))}"><div class="bar" style="height:${height}px"></div></div>`;
-        }).join('')}
-      </div>
-      <div class="chart-foot"><span>${esc(rows[0]?.date || '')}</span><span>${esc(rows[rows.length - 1]?.date || '')}</span></div>
+    <div class="chart-card" data-chart-key="${key}">
+      <div class="chart-title"><span>${esc(title)}</span><span class="chart-title-right">${legend}<span class="chart-total">${esc(config.total || '')}</span></span></div>
+      <svg class="chart-svg" viewBox="0 0 ${geo.w} ${geo.h}" role="img" aria-label="${esc(title)}">
+        <rect class="chart-hover-band" x="0" y="${geo.top}" width="0" height="${plotH}" style="display:none"/>
+        ${grid}
+        ${bars}
+        <line class="chart-axis" x1="${geo.left}" y1="${baseline}" x2="${geo.w - geo.right}" y2="${baseline}"/>
+        ${xLabels}
+      </svg>
     </div>
   `;
+}
+
+function chartTooltipHTML(row, primary) {
+  const requests = Number(row.requests || 0);
+  const errors = Number(row.errors || 0);
+  const line = (field, label, value) =>
+    `<div class="chart-tip-row ${primary.includes(field) ? 'primary' : ''}"><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`;
+  return `
+    <div class="chart-tip-date">${esc(row.date || '')}</div>
+    ${line('cost_usd', 'Cost', money(row.cost_usd))}
+    ${line('total_tokens', 'Tokens', `${compact(row.total_tokens)} (${compact(row.input_tokens)} in / ${compact(row.output_tokens)} out)`)}
+    ${line('requests', 'Requests', compact(requests))}
+    ${line('errors', 'Errors', requests ? `${compact(errors)} (${percent(errors / requests)})` : compact(errors))}
+    ${line('avg_latency_ms', 'Avg latency', `${Math.round(Number(row.avg_latency_ms || 0))} ms`)}
+  `;
+}
+
+function ensureChartTooltip() {
+  let tip = document.getElementById('chart-tooltip');
+  if (!tip) {
+    tip = document.createElement('div');
+    tip.id = 'chart-tooltip';
+    document.body.appendChild(tip);
+  }
+  tip.style.display = 'none';
+  return tip;
+}
+
+function wireCharts() {
+  const cards = document.querySelectorAll('[data-chart-key]');
+  if (!cards.length) return;
+  const tooltip = ensureChartTooltip();
+  cards.forEach((card) => {
+    const cfg = CHART_REGISTRY.get(card.dataset.chartKey);
+    const svg = card.querySelector('.chart-svg');
+    const band = svg?.querySelector('.chart-hover-band');
+    if (!cfg || !svg || !band) return;
+    svg.addEventListener('mousemove', (e) => {
+      const rect = svg.getBoundingClientRect();
+      const xView = ((e.clientX - rect.left) / rect.width) * cfg.geo.w;
+      let idx = Math.floor((xView - cfg.geo.left) / cfg.slot);
+      idx = Math.max(0, Math.min(cfg.rows.length - 1, idx));
+      band.setAttribute('x', cfg.geo.left + idx * cfg.slot);
+      band.setAttribute('width', cfg.slot);
+      band.style.display = 'block';
+      tooltip.innerHTML = chartTooltipHTML(cfg.rows[idx], cfg.primary);
+      tooltip.style.display = 'block';
+      const pad = 14;
+      let x = e.clientX + pad;
+      if (x + tooltip.offsetWidth > window.innerWidth - 8) x = e.clientX - tooltip.offsetWidth - pad;
+      const yPos = Math.max(8, Math.min(window.innerHeight - tooltip.offsetHeight - 8, e.clientY - tooltip.offsetHeight / 2));
+      tooltip.style.left = `${x}px`;
+      tooltip.style.top = `${yPos}px`;
+    });
+    svg.addEventListener('mouseleave', () => {
+      tooltip.style.display = 'none';
+      band.style.display = 'none';
+    });
+  });
 }
 
 function providerDrilldownRows() {
@@ -1301,6 +1431,7 @@ function auditLogRows() {
 }
 
 function afterRender() {
+  wireCharts();
   document.querySelectorAll('[data-theme-id]').forEach((btn) => {
     btn.onclick = () => {
       state.theme = applyTheme(btn.dataset.themeId);
