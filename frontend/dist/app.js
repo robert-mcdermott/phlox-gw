@@ -474,7 +474,7 @@ function adminContentView(usage) {
           <div class="form-grid">
             <label class="form-field"><span>Provider id</span><input id="provider-id" placeholder="e.g. local-vllm" /></label>
             <label class="form-field"><span>Display name</span><input id="provider-name" placeholder="e.g. Local vLLM" /></label>
-            <label class="form-field"><span>Type</span><select id="provider-type"><option value="openai">OpenAI-compatible</option><option value="anthropic">Anthropic-compatible</option><option value="bedrock">AWS Bedrock</option></select></label>
+            <label class="form-field"><span>Type</span><select id="provider-type"><option value="openai">OpenAI-compatible</option><option value="anthropic">Anthropic-compatible</option><option value="azure-openai">Azure OpenAI</option><option value="azure-anthropic">Azure Anthropic (Foundry)</option><option value="bedrock">AWS Bedrock</option></select></label>
             <label class="form-field"><span>Status</span><label class="check"><input id="provider-enabled" type="checkbox" checked /> Enabled</label></label>
           </div>
           <div class="form-grid" data-provider-group="api">
@@ -482,6 +482,11 @@ function adminContentView(usage) {
             <label class="form-field"><span>API key env var</span><input id="provider-api-key-env" placeholder="e.g. OPENAI_API_KEY" /></label>
             <label class="form-field"><span>Direct API key (optional)</span><input id="provider-api-key" placeholder="used when the env var is unset" type="password" /></label>
           </div>
+          <p class="field-help" data-provider-group="azure-openai-help">Base URL is the Azure OpenAI resource endpoint, e.g. https://myresource.openai.azure.com. Each model's upstream model id is the Azure deployment name. Requests are sent to /openai/deployments/{deployment}/chat/completions with the api-key header.</p>
+          <div class="form-grid" data-provider-group="azure-openai">
+            <label class="form-field"><span>API version</span><input id="provider-azure-api-version" placeholder="blank uses 2024-10-21" /></label>
+          </div>
+          <p class="field-help" data-provider-group="azure-anthropic-help">Base URL is the Foundry resource's Anthropic endpoint, e.g. https://myresource.services.ai.azure.com/anthropic. Claude deployments are called through the Anthropic Messages API (/v1/messages).</p>
           <div class="form-grid" data-provider-group="bedrock">
             <label class="form-field"><span>Authentication</span><select id="provider-aws-auth">
               <option value="chain">AWS credential chain (env / IAM role)</option>
@@ -937,12 +942,15 @@ function providerRow(p) {
     <tr data-provider-row="${esc(p.id)}">
       <td class="mono">${esc(p.id)}</td>
       <td><input data-provider-field="name" value="${attr(p.name)}" /></td>
-      <td><select data-provider-field="type">${option('openai', 'OpenAI-compatible', p.type)}${option('anthropic', 'Anthropic-compatible', p.type)}${option('bedrock', 'AWS Bedrock', p.type)}</select></td>
+      <td><select data-provider-field="type">${option('openai', 'OpenAI-compatible', p.type)}${option('anthropic', 'Anthropic-compatible', p.type)}${option('azure-openai', 'Azure OpenAI', p.type)}${option('azure-anthropic', 'Azure Anthropic (Foundry)', p.type)}${option('bedrock', 'AWS Bedrock', p.type)}</select></td>
       <td class="connection-cell">
         <div class="cell-stack" data-provider-group="api">
           <label class="mini-field"><span>Base URL</span><input data-provider-field="base_url" value="${attr(p.base_url)}" /></label>
           <label class="mini-field"><span>Key env var</span><input data-provider-field="api_key_env" value="${attr((p.api_key_env || '').replace(' (secret set)', ''))}" /></label>
           <label class="mini-field"><span>Direct key</span><input data-provider-field="api_key" type="password" placeholder="leave blank to keep" /></label>
+        </div>
+        <div class="cell-stack" data-provider-group="azure-openai">
+          <label class="mini-field"><span>API version</span><input data-provider-field="azure_api_version" value="${attr(p.azure_api_version)}" placeholder="blank uses 2024-10-21" /></label>
         </div>
         <div class="cell-stack" data-provider-group="bedrock">
           <label class="mini-field"><span>Auth</span><select data-provider-field="aws_auth_method">${option('chain', 'AWS credential chain', auth)}${option('keys', 'Access key & secret', auth)}${option('api_key', 'Bedrock API key', auth)}</select></label>
@@ -1624,6 +1632,7 @@ function afterRender() {
         base_url: val('provider-base-url'),
         api_key_env: val('provider-api-key-env'),
         api_key: val('provider-api-key'),
+        azure_api_version: val('provider-azure-api-version'),
         aws_region: val('provider-aws-region'),
         aws_auth_method: val('provider-aws-auth') || 'chain',
         aws_access_key_id: val('provider-aws-access-key'),
@@ -2159,6 +2168,9 @@ function syncProviderGroups(scope, type, auth) {
   const show = (name, on) => scope.querySelectorAll(`[data-provider-group="${name}"]`).forEach((el) => el.classList.toggle('hidden', !on));
   const bedrock = type === 'bedrock';
   show('api', !bedrock);
+  show('azure-openai', type === 'azure-openai');
+  show('azure-openai-help', type === 'azure-openai');
+  show('azure-anthropic-help', type === 'azure-anthropic');
   show('bedrock', bedrock);
   show('bedrock-chain', bedrock && auth === 'chain');
   show('bedrock-keys', bedrock && auth === 'keys');

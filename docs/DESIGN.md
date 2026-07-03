@@ -118,6 +118,13 @@ Provider adapters are deliberately thin:
   OpenRouter, LiteLLM, vLLM, LM Studio, and similar endpoints.
 - `anthropic`: forwards to `{base_url}/v1/messages`, preserves Anthropic headers, and
   streams SSE responses through while capturing usage from compatible stream events.
+- `azure-openai`: speaks the OpenAI protocol against Azure OpenAI's per-deployment
+  data-plane API: `{base_url}/openai/deployments/{model_id}/chat/completions` with a
+  per-provider `api-version` query parameter (default `2024-10-21`) and the `api-key`
+  auth header. The model row's upstream model ID is the Azure deployment name.
+- `azure-anthropic`: speaks the Anthropic Messages protocol against Claude deployments
+  in Azure AI Foundry. The base URL is the resource's `/anthropic` endpoint and requests
+  carry both `x-api-key` and `api-key` headers for compatibility.
 - `bedrock`: calls Bedrock Converse and ConverseStream in the provider `aws_region` using
   one of three per-provider auth methods: the AWS SDK default credential chain (env vars,
   shared config profiles, or an attached IAM role — the default), explicit access keys

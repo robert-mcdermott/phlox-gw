@@ -34,13 +34,14 @@
 - [x] Anthropic-compatible streaming translation to Bedrock ConverseStream.
 - [x] Optional Postgres database backend with SQLite still the default.
 - [x] Cluster deployment hardening with Postgres: explicit deployment modes, migration locking, node heartbeats, readiness checks, admin cluster UI, and single-host demo runbook.
+- [x] Azure provider types: Azure OpenAI deployments (api-key header and api-version handling) and Claude models in Azure AI Foundry via the Anthropic Messages API.
+- [x] Reasoning-model parameter handling: health tests, the playground, and Anthropic-to-OpenAI translation retry with `max_completion_tokens` when an upstream rejects legacy sampling parameters.
 
 ## Next
 
 - External secrets management (Vault and AWS Secrets Manager backends) with at-rest
   encryption for provider credentials stored in the database.
 - `/v1/embeddings` gateway endpoint with per-model pricing, budgets, and rate limits.
-- Azure OpenAI provider type (api-key header and api-version handling).
 - Official container image, Dockerfile, and Kubernetes/Helm deployment guidance.
 - Signed configuration import/restore workflow to complete environment promotion.
 - Internal refactor: split `internal/httpapi/server.go` and `internal/store/store.go`

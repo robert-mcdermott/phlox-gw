@@ -606,6 +606,49 @@ Anthropic Messages requests to OpenAI-compatible routes, including streaming tex
 tool-use events. Bedrock routes are supported through this endpoint for streaming and
 non-streaming requests through Bedrock Converse translation.
 
+### Azure OpenAI
+
+Provider:
+
+```text
+ID: azure-openai
+Type: azure-openai
+Base URL: https://myresource.openai.azure.com
+API version: 2024-12-01-preview (optional; blank uses 2024-10-21)
+API key: the Azure OpenAI resource's API key, or an env var reference
+Enabled: true
+```
+
+The base URL is the resource endpoint only — drop any path from the endpoint shown in
+the Azure portal. Phlox-GW sends requests to
+`/openai/deployments/{deployment}/chat/completions?api-version=...` with the `api-key`
+header. Each model row's upstream model ID must be the **deployment name** as created in
+the Azure portal or Foundry, not the underlying model name.
+
+Reasoning models (the GPT-5 family, o-series) reject the legacy `max_tokens` parameter
+and pinned temperatures. Model health tests, the playground, and Anthropic-to-OpenAI
+translation detect this and retry automatically with `max_completion_tokens`; clients
+calling `/v1/chat/completions` directly must send `max_completion_tokens` themselves,
+exactly as when calling Azure directly.
+
+### Claude in Azure AI Foundry
+
+Provider:
+
+```text
+ID: azure-foundry
+Type: azure-anthropic
+Base URL: https://myresource.services.ai.azure.com/anthropic
+API key: the Claude deployment's API key, or an env var reference
+Enabled: true
+```
+
+The `/anthropic` path suffix in the base URL is required — without it Azure returns
+404 "Resource not found". Phlox-GW appends `/v1/messages` and calls the deployment
+through the Anthropic Messages API, so these routes support the same pass-through and
+streaming behavior as any Anthropic-compatible provider. The model row's upstream model
+ID is the Foundry deployment name (for example `claude-sonnet-5`).
+
 ### AWS Bedrock
 
 Provider:

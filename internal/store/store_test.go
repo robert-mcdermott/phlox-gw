@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -899,5 +900,123 @@ func TestAuditLogInsertAndList(t *testing.T) {
 	got := items[0]
 	if got.Action != "provider.create" || got.TargetID != "local-vllm" || got.ActorUsername != "admin" || got.Details == "" {
 		t.Fatalf("unexpected audit item: %#v", got)
+	}
+}
+
+func TestAzureProviderRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+
+	provider := Provider{
+		ID:              "azure-openai-east",
+		Name:            "Azure OpenAI East",
+		Type:            "azure-openai",
+		BaseURL:         "https://myres.openai.azure.com",
+		APIKey:          "azure-secret",
+		AzureAPIVersion: "2024-10-21",
+		Enabled:         true,
+	}
+	if err := s.CreateProvider(ctx, provider); err != nil {
+		t.Fatalf("CreateProvider azure-openai: %v", err)
+	}
+	if err := s.CreateProvider(ctx, Provider{
+		ID:      "azure-claude",
+		Name:    "Azure Claude",
+		Type:    "azure-anthropic",
+		BaseURL: "https://myres.services.ai.azure.com/anthropic",
+		Enabled: true,
+	}); err != nil {
+		t.Fatalf("CreateProvider azure-anthropic: %v", err)
+	}
+	stored, err := s.GetProvider(ctx, provider.ID)
+	if err != nil {
+		t.Fatalf("GetProvider: %v", err)
+	}
+	if stored.Type != "azure-openai" || stored.AzureAPIVersion != "2024-10-21" {
+		t.Fatalf("unexpected stored provider: %#v", stored)
+	}
+	stored.AzureAPIVersion = "2025-01-01-preview"
+	if err := s.UpdateProvider(ctx, stored, ProviderSecretUpdate{}); err != nil {
+		t.Fatalf("UpdateProvider: %v", err)
+	}
+	stored, err = s.GetProvider(ctx, provider.ID)
+	if err != nil {
+		t.Fatalf("GetProvider after update: %v", err)
+	}
+	if stored.AzureAPIVersion != "2025-01-01-preview" || stored.APIKey != "azure-secret" {
+		t.Fatalf("update lost fields: %#v", stored)
+	}
+}
+
+func TestMigrateLegacyProviderTypeCheck(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	legacyDDL := `CREATE TABLE providers (
+		id TEXT PRIMARY KEY,
+		name TEXT NOT NULL,
+		type TEXT NOT NULL CHECK (type IN ('openai', 'anthropic', 'bedrock')),
+		base_url TEXT NOT NULL DEFAULT '',
+		api_key TEXT NOT NULL DEFAULT '',
+		api_key_env TEXT NOT NULL DEFAULT '',
+		aws_region TEXT NOT NULL DEFAULT '',
+		enabled INTEGER NOT NULL DEFAULT 1,
+		created_at TEXT NOT NULL,
+		updated_at TEXT NOT NULL
+	)`
+	if _, err := db.ExecContext(ctx, legacyDDL); err != nil {
+		t.Fatalf("create legacy table: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO providers (id, name, type, base_url, api_key, created_at, updated_at)
+		VALUES ('legacy-openai', 'Legacy OpenAI', 'openai', 'http://legacy.test/v1', 'k', '2025-01-01T00:00:00Z', '2025-01-01T00:00:00Z')`); err != nil {
+		t.Fatalf("insert legacy provider: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close raw db: %v", err)
+	}
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open after legacy schema: %v", err)
+	}
+	defer s.Close()
+	legacy, err := s.GetProvider(ctx, "legacy-openai")
+	if err != nil {
+		t.Fatalf("GetProvider legacy: %v", err)
+	}
+	if legacy.Type != "openai" || legacy.BaseURL != "http://legacy.test/v1" || legacy.APIKey != "k" || !legacy.Enabled {
+		t.Fatalf("legacy provider mangled by migration: %#v", legacy)
+	}
+	if err := s.CreateProvider(ctx, Provider{
+		ID:      "azure-new",
+		Name:    "Azure New",
+		Type:    "azure-openai",
+		BaseURL: "https://myres.openai.azure.com",
+		Enabled: true,
+	}); err != nil {
+		t.Fatalf("CreateProvider azure on migrated db: %v", err)
+	}
+	// Re-opening must not rebuild again or lose data.
+	if err := s.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+	s, err = Open(path)
+	if err != nil {
+		t.Fatalf("re-open migrated db: %v", err)
+	}
+	defer s.Close()
+	providers, err := s.ListProviders(ctx)
+	if err != nil {
+		t.Fatalf("ListProviders: %v", err)
+	}
+	if len(providers) != 2 {
+		t.Fatalf("provider count after re-open = %d", len(providers))
 	}
 }
