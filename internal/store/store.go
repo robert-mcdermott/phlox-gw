@@ -2309,15 +2309,8 @@ func (s *Store) UpsertClusterNode(ctx context.Context, node ClusterNode) error {
 	return err
 }
 
-func (s *Store) MarkClusterNodeStatus(ctx context.Context, instanceID, status string, t time.Time) error {
-	if t.IsZero() {
-		t = time.Now().UTC()
-	}
-	res, err := s.exec(ctx, `
-		UPDATE cluster_nodes
-		SET status = ?, last_seen_at = ?
-		WHERE instance_id = ?`,
-		valueOr(status, "ready"), formatTime(t), instanceID)
+func (s *Store) DeleteClusterNode(ctx context.Context, instanceID string) error {
+	res, err := s.exec(ctx, `DELETE FROM cluster_nodes WHERE instance_id = ?`, instanceID)
 	if err != nil {
 		return err
 	}
@@ -2326,6 +2319,18 @@ func (s *Store) MarkClusterNodeStatus(ctx context.Context, instanceID, status st
 		return ErrNotFound
 	}
 	return nil
+}
+
+// PruneClusterNodes removes node rows whose lease has long expired. The
+// registry reflects current membership, not history, so rows not refreshed
+// within the retention window are garbage-collected.
+func (s *Store) PruneClusterNodes(ctx context.Context, olderThan time.Time) (int64, error) {
+	res, err := s.exec(ctx, `DELETE FROM cluster_nodes WHERE last_seen_at < ?`, formatTime(olderThan))
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
 }
 
 func (s *Store) ListClusterNodes(ctx context.Context) ([]ClusterNode, error) {

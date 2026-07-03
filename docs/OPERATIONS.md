@@ -296,7 +296,11 @@ export PHLOX_GW_CLUSTER_NODE_STALE_AFTER=45s
 
 In cluster mode, startup schema creation and migrations are protected by a Postgres
 advisory lock so multiple nodes can start at the same time without racing schema changes.
-Nodes write heartbeats to the `cluster_nodes` table. Admins can view deployment mode,
+Nodes write heartbeats to the `cluster_nodes` table in every deployment mode. The table
+is a live membership registry, not a history: a node deletes its own row on graceful
+shutdown, and rows that stop refreshing (for example after a crash) are shown as stale
+and then garbage-collected automatically once they exceed the retention window (ten
+times the stale threshold, with a ten-minute minimum). Admins can view deployment mode,
 database backend, current node, and active or stale nodes in `Admin -> Cluster`.
 
 Load balancers can use:

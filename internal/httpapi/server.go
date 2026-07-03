@@ -231,9 +231,9 @@ func New(opts Options) (http.Handler, error) {
 	if err := s.updateClusterHeartbeat(context.Background(), "ready"); err != nil {
 		return nil, fmt.Errorf("register cluster node: %w", err)
 	}
-	if s.cfg.Deployment.Mode == "cluster-postgres" {
-		go s.clusterHeartbeatLoop()
-	}
+	// The heartbeat runs in every deployment mode so this node's own lease
+	// stays fresh; only readiness gating on it is cluster-specific.
+	go s.clusterHeartbeatLoop()
 
 	mux := http.NewServeMux()
 	if s.telemetry.MetricsEnabled() {
@@ -461,10 +461,7 @@ func (s *Server) buildClusterStatus(ctx context.Context) (clusterStatusResponse,
 		out.Notes = append(out.Notes, "Set PHLOX_GW_CONFIG_SIGNING_KEY_FILE to the same mounted file on every node so signed configuration exports use one shared key.")
 	}
 	for _, node := range nodes {
-		stale := false
-		if out.ClusterEnabled {
-			stale = now.Sub(node.LastSeenAt) > s.cfg.Deployment.NodeStaleAfter
-		}
+		stale := now.Sub(node.LastSeenAt) > s.cfg.Deployment.NodeStaleAfter
 		item := clusterNodeResponse{
 			InstanceID:     node.InstanceID,
 			Hostname:       node.Hostname,
@@ -538,6 +535,11 @@ func (s *Server) updateClusterHeartbeat(ctx context.Context, status string) erro
 		Metadata:       string(metadata),
 	}
 	err := s.store.UpsertClusterNode(ctx, node)
+	if err == nil {
+		if _, pruneErr := s.store.PruneClusterNodes(ctx, now.Add(-s.clusterNodeRetention())); pruneErr != nil {
+			s.logger.Warn("prune expired cluster nodes failed", "error", pruneErr)
+		}
+	}
 	s.clusterMu.Lock()
 	defer s.clusterMu.Unlock()
 	if err != nil {
@@ -547,6 +549,17 @@ func (s *Server) updateClusterHeartbeat(ctx context.Context, status string) erro
 	s.lastHeartbeatAt = now
 	s.lastHeartbeatErr = ""
 	return nil
+}
+
+// clusterNodeRetention is how long an unrefreshed node row survives before
+// garbage collection. It is much longer than the stale threshold so operators
+// can still see recently departed nodes before they age out of the registry.
+func (s *Server) clusterNodeRetention() time.Duration {
+	retention := 10 * s.cfg.Deployment.NodeStaleAfter
+	if retention < 10*time.Minute {
+		retention = 10 * time.Minute
+	}
+	return retention
 }
 
 func (s *Server) clusterHeartbeatState() (time.Time, string) {
