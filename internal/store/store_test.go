@@ -758,6 +758,77 @@ func TestUsageDrilldownsAggregateProvidersAndModels(t *testing.T) {
 	}
 }
 
+func TestChargebackReportGroupsByDepartmentAndUser(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+
+	june := time.Date(2026, 6, 10, 12, 0, 0, 0, time.UTC)
+	july := time.Date(2026, 7, 2, 9, 0, 0, 0, time.UTC)
+	records := []UsageRecord{
+		{ID: "u1", RequestID: "r1", UserID: "user_alice", Username: "alice", Department: "Engineering", InputTokens: 100, OutputTokens: 50, TotalTokens: 150, CostUSD: 1.00, CreatedAt: june},
+		{ID: "u2", RequestID: "r2", UserID: "user_alice", Username: "alice", Department: "Engineering", InputTokens: 40, OutputTokens: 10, TotalTokens: 50, CostUSD: 0.50, CreatedAt: june.Add(time.Hour)},
+		{ID: "u3", RequestID: "r3", UserID: "user_bob", Username: "bob", Department: "Engineering", InputTokens: 200, OutputTokens: 100, TotalTokens: 300, CostUSD: 2.00, CreatedAt: june.Add(2 * time.Hour)},
+		{ID: "u4", RequestID: "r4", UserID: "user_carol", Username: "carol", Department: "Sales", InputTokens: 10, OutputTokens: 5, TotalTokens: 15, CostUSD: 0.25, CreatedAt: june.Add(3 * time.Hour)},
+		{ID: "u5", RequestID: "r5", UserID: "user_alice", Username: "alice", Department: "Engineering", InputTokens: 10, OutputTokens: 5, TotalTokens: 15, CostUSD: 5.00, CreatedAt: july},
+	}
+	for _, record := range records {
+		if err := s.InsertUsage(ctx, record); err != nil {
+			t.Fatalf("InsertUsage %s: %v", record.ID, err)
+		}
+	}
+	if err := s.CreateBudget(ctx, Budget{ID: "budget_eng", ScopeType: "department", ScopeValue: "Engineering", LimitUSD: 100, WarnPct: 90, IsActive: true}); err != nil {
+		t.Fatalf("CreateBudget: %v", err)
+	}
+
+	report, err := s.ChargebackReport(ctx, time.Date(2026, 6, 20, 0, 0, 0, 0, time.UTC), july)
+	if err != nil {
+		t.Fatalf("ChargebackReport: %v", err)
+	}
+	if report.Month != "2026-06" {
+		t.Fatalf("month = %q", report.Month)
+	}
+	if report.Requests != 4 || report.CostUSD != 3.75 || report.TotalTokens != 515 {
+		t.Fatalf("unexpected totals: %#v", report)
+	}
+	if len(report.Departments) != 2 {
+		t.Fatalf("departments = %#v", report.Departments)
+	}
+	eng := report.Departments[0]
+	if eng.Department != "Engineering" || eng.CostUSD != 3.5 || eng.Requests != 3 || eng.BudgetUSD != 100 {
+		t.Fatalf("unexpected engineering rollup: %#v", eng)
+	}
+	if len(eng.Users) != 2 || eng.Users[0].Username != "bob" || eng.Users[0].CostUSD != 2.0 || eng.Users[1].Username != "alice" || eng.Users[1].CostUSD != 1.5 {
+		t.Fatalf("unexpected engineering users: %#v", eng.Users)
+	}
+	sales := report.Departments[1]
+	if sales.Department != "Sales" || sales.CostUSD != 0.25 || sales.BudgetUSD != 0 {
+		t.Fatalf("unexpected sales rollup: %#v", sales)
+	}
+	if len(report.AvailableMonths) != 2 || report.AvailableMonths[0] != "2026-07" || report.AvailableMonths[1] != "2026-06" {
+		t.Fatalf("unexpected months: %#v", report.AvailableMonths)
+	}
+
+	julyReport, err := s.ChargebackReport(ctx, july, july)
+	if err != nil {
+		t.Fatalf("ChargebackReport july: %v", err)
+	}
+	if julyReport.Requests != 1 || julyReport.CostUSD != 5.0 || len(julyReport.Departments) != 1 {
+		t.Fatalf("unexpected july report: %#v", julyReport)
+	}
+
+	empty, err := s.ChargebackReport(ctx, time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC), july)
+	if err != nil {
+		t.Fatalf("ChargebackReport empty: %v", err)
+	}
+	if empty.Requests != 0 || len(empty.Departments) != 0 {
+		t.Fatalf("expected empty report: %#v", empty)
+	}
+}
+
 func TestAuditLogInsertAndList(t *testing.T) {
 	ctx := context.Background()
 	s, err := Open(filepath.Join(t.TempDir(), "test.db"))

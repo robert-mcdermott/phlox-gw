@@ -40,6 +40,7 @@ const state = {
   oidcConfig: { enabled: false, display_name: 'Entra ID' },
   adminTab: 'operations',
   playground: { route: '', system: '', draft: '', maxTokens: 1024, busy: false, messages: [] },
+  chargeback: { month: '', report: null, loading: false, error: '' },
   secret: '',
   error: '',
   notice: ''
@@ -567,6 +568,8 @@ function adminContentView(usage) {
   }
   if (state.adminTab === 'budgets') {
     return `
+      ${adminPanel('Monthly chargeback', 'file', 'Billing report by department and user for a selected month. Download the CSV for finance, or pull the same data as JSON from GET /api/admin/chargeback?month=YYYY-MM for financial-system integration.', chargebackView())}
+      ${adminPanel('Budget burn-down', 'chart', 'Current month spend, remaining budget, and projected month-end run rate.', budgetBurnDownView())}
       ${adminPanel('Add budget', 'wallet', 'User budgets use the user id shown in Users. Department budgets use the department name.', `
         <div class="form-grid">
           <select id="budget-scope-type"><option value="department">Department</option><option value="user">User</option></select>
@@ -577,7 +580,6 @@ function adminContentView(usage) {
           <button class="btn primary" id="create-budget">${icon('plus', 'btn-icon')}Create budget</button>
         </div>
       `)}
-      ${adminPanel('Budget burn-down', 'chart', 'Current month spend, remaining budget, and projected month-end run rate.', budgetBurnDownView())}
       ${adminPanel('Budgets', 'wallet', '', budgetRows())}
     `;
   }
@@ -1123,6 +1125,90 @@ function keyGovernanceRows() {
               <td>${fmt(k.last_used_at)}</td>
               <td><div class="actions"><button class="btn" data-save-key="${esc(k.id)}">Save</button>${k.is_active ? `<button class="btn" data-rotate-admin-key="${esc(k.id)}">Rotate</button>` : ''}<button class="btn danger" data-revoke-admin-key="${esc(k.id)}">Revoke</button></div></td>
             </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function currentMonthKey() {
+  return new Date().toISOString().slice(0, 7);
+}
+
+async function loadChargeback(month) {
+  const cb = state.chargeback;
+  cb.loading = true;
+  cb.month = month;
+  cb.error = '';
+  render();
+  try {
+    cb.report = await api(`/api/admin/chargeback?month=${encodeURIComponent(month)}`);
+  } catch (err) {
+    cb.error = err.message;
+    cb.report = null;
+  }
+  cb.loading = false;
+  render();
+}
+
+function chargebackView() {
+  const cb = state.chargeback;
+  if (!cb.report && !cb.loading && !cb.error) {
+    loadChargeback(cb.month || currentMonthKey());
+    return '<p>Loading chargeback report&hellip;</p>';
+  }
+  if (cb.loading) return '<p>Loading chargeback report&hellip;</p>';
+  if (cb.error) return `<p class="error">Could not load chargeback report: ${esc(cb.error)}</p><button class="btn" id="chargeback-retry">Retry</button>`;
+  const report = cb.report;
+  const months = [...new Set([currentMonthKey(), cb.month, ...(report.available_months || [])])].filter(Boolean).sort().reverse();
+  const users = report.departments.reduce((sum, d) => sum + d.users.length, 0);
+  return `
+    <div class="chargeback-toolbar">
+      <label class="form-field"><span>Billing month</span><select id="chargeback-month">${months.map(m => option(m, m, cb.month)).join('')}</select></label>
+      <button class="btn" id="chargeback-download">${icon('file', 'btn-icon')}Download CSV</button>
+    </div>
+    <div class="metric-strip">
+      ${miniMetric('Cost', money(report.cost_usd))}
+      ${miniMetric('Requests', compact(report.requests))}
+      ${miniMetric('Tokens', compact(report.total_tokens))}
+      ${miniMetric('Departments', report.departments.length)}
+      ${miniMetric('Active users', users)}
+    </div>
+    ${chargebackTable(report)}
+  `;
+}
+
+function chargebackTable(report) {
+  if (!report.departments.length) return `<p>No usage recorded for ${esc(report.month)}.</p>`;
+  return `
+    <div class="table-scroll">
+      <table>
+        <thead><tr><th>Department / user</th><th>Requests</th><th>Input tokens</th><th>Output tokens</th><th>Total tokens</th><th>Cost</th><th>Budget</th><th>Share</th></tr></thead>
+        <tbody>
+          ${report.departments.map(dept => `
+            <tr class="chargeback-dept">
+              <td>${esc(dept.department || '(no department)')} <span class="muted">· ${dept.users.length} user${dept.users.length === 1 ? '' : 's'}</span></td>
+              <td>${compact(dept.requests)}</td>
+              <td>${compact(dept.input_tokens)}</td>
+              <td>${compact(dept.output_tokens)}</td>
+              <td>${compact(dept.total_tokens)}</td>
+              <td>${money(dept.cost_usd)}</td>
+              <td>${dept.budget_usd > 0 ? `${money(dept.budget_usd)} <span class="muted">(${percent(dept.cost_usd / dept.budget_usd)} used)</span>` : '<span class="muted">—</span>'}</td>
+              <td>${percent(report.cost_usd ? dept.cost_usd / report.cost_usd : 0)} <span class="muted">of total</span></td>
+            </tr>
+            ${dept.users.map(user => `
+              <tr class="chargeback-user">
+                <td class="chargeback-user-name">${esc(user.username || user.user_id || '(unattributed)')}</td>
+                <td>${compact(user.requests)}</td>
+                <td>${compact(user.input_tokens)}</td>
+                <td>${compact(user.output_tokens)}</td>
+                <td>${compact(user.total_tokens)}</td>
+                <td>${money(user.cost_usd)}</td>
+                <td></td>
+                <td>${percent(dept.cost_usd ? user.cost_usd / dept.cost_usd : 0)} <span class="muted">of dept</span></td>
+              </tr>
+            `).join('')}
           `).join('')}
         </tbody>
       </table>
@@ -1892,6 +1978,32 @@ function afterRender() {
       state.notice = 'Signed configuration export downloaded.';
       render();
     };
+  }
+  const chargebackMonth = document.getElementById('chargeback-month');
+  if (chargebackMonth) {
+    chargebackMonth.onchange = () => loadChargeback(chargebackMonth.value);
+    document.getElementById('chargeback-download').onclick = async () => {
+      const month = state.chargeback.month || currentMonthKey();
+      const res = await fetch(`/api/admin/chargeback/export.csv?month=${encodeURIComponent(month)}`, { headers: { Authorization: `Bearer ${state.token}` } });
+      if (!res.ok) {
+        state.error = `Chargeback export failed: ${res.status}`;
+        render();
+        return;
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `phlox-gw-chargeback-${month}.csv`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    };
+  }
+  const chargebackRetry = document.getElementById('chargeback-retry');
+  if (chargebackRetry) {
+    chargebackRetry.onclick = () => loadChargeback(state.chargeback.month || currentMonthKey());
   }
   const csvExport = document.getElementById('csv-export');
   if (csvExport) {

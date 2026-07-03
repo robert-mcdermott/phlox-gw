@@ -2824,6 +2824,91 @@ func TestAdminPlaygroundChat(t *testing.T) {
 	}
 }
 
+func TestAdminChargebackReportAndCSV(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer st.Close()
+	admin := store.User{ID: "user_admin", Username: "admin", Role: "admin", PasswordHash: "unused", AuthProvider: "local", IsActive: true}
+	if err := st.CreateUser(ctx, admin); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	now := time.Now().UTC()
+	// Middle of the previous month, immune to end-of-month normalization.
+	previous := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC).AddDate(0, 0, -15)
+	records := []store.UsageRecord{
+		{ID: "u1", RequestID: "r1", UserID: "user_alice", Username: "alice", Department: "Engineering", InputTokens: 100, OutputTokens: 50, TotalTokens: 150, CostUSD: 1.25, CreatedAt: now},
+		{ID: "u2", RequestID: "r2", UserID: "user_bob", Username: "bob", Department: "Engineering", InputTokens: 20, OutputTokens: 10, TotalTokens: 30, CostUSD: 0.75, CreatedAt: now},
+		{ID: "u3", RequestID: "r3", UserID: "user_alice", Username: "alice", Department: "Engineering", InputTokens: 10, OutputTokens: 5, TotalTokens: 15, CostUSD: 9.00, CreatedAt: previous},
+	}
+	for _, record := range records {
+		if err := st.InsertUsage(ctx, record); err != nil {
+			t.Fatalf("InsertUsage: %v", err)
+		}
+	}
+	handler, err := New(Options{
+		Config: config.Config{SessionSecret: "test-secret"},
+		Store:  st,
+		Frontend: fstest.MapFS{
+			"frontend/dist/index.html": &fstest.MapFile{Data: []byte("<html></html>")},
+		},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	token := sessionToken(t, admin)
+
+	// Default month is the current month.
+	resp := jsonRequest(t, handler, http.MethodGet, "/api/admin/chargeback", token, nil)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("chargeback status = %d body = %s", resp.Code, resp.Body.String())
+	}
+	var report store.MonthlyChargebackReport
+	decodeRecorder(t, resp, &report)
+	if report.Month != now.Format("2006-01") || report.Requests != 2 || report.CostUSD != 2.0 {
+		t.Fatalf("unexpected current report: %#v", report)
+	}
+	if len(report.AvailableMonths) != 2 {
+		t.Fatalf("unexpected available months: %#v", report.AvailableMonths)
+	}
+
+	// Previous months remain queryable for chargebacks.
+	prevResp := jsonRequest(t, handler, http.MethodGet, "/api/admin/chargeback?month="+previous.Format("2006-01"), token, nil)
+	if prevResp.Code != http.StatusOK {
+		t.Fatalf("previous month status = %d body = %s", prevResp.Code, prevResp.Body.String())
+	}
+	var prevReport store.MonthlyChargebackReport
+	decodeRecorder(t, prevResp, &prevReport)
+	if prevReport.Requests != 1 || prevReport.CostUSD != 9.0 {
+		t.Fatalf("unexpected previous report: %#v", prevReport)
+	}
+
+	badResp := jsonRequest(t, handler, http.MethodGet, "/api/admin/chargeback?month=junk", token, nil)
+	if badResp.Code != http.StatusBadRequest {
+		t.Fatalf("bad month status = %d body = %s", badResp.Code, badResp.Body.String())
+	}
+
+	csvResp := jsonRequest(t, handler, http.MethodGet, "/api/admin/chargeback/export.csv?month="+now.Format("2006-01"), token, nil)
+	if csvResp.Code != http.StatusOK {
+		t.Fatalf("csv status = %d body = %s", csvResp.Code, csvResp.Body.String())
+	}
+	if got := csvResp.Header().Get("Content-Disposition"); !strings.Contains(got, "phlox-gw-chargeback-"+now.Format("2006-01")+".csv") {
+		t.Fatalf("unexpected content disposition: %q", got)
+	}
+	lines := strings.Split(strings.TrimSpace(csvResp.Body.String()), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("expected header plus two rows, got %d lines: %s", len(lines), csvResp.Body.String())
+	}
+	if !strings.HasPrefix(lines[0], "month,department,user_id,username,requests") {
+		t.Fatalf("unexpected csv header: %s", lines[0])
+	}
+	if !strings.Contains(lines[1], "Engineering,user_alice,alice,1,") {
+		t.Fatalf("expected alice as highest spender first: %s", lines[1])
+	}
+}
+
 func TestAdminRequestLogSearchAndCSV(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))

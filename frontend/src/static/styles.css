@@ -1114,6 +1114,33 @@ button {
   color: var(--accent);
 }
 
+.chargeback-toolbar {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+
+.chargeback-toolbar .form-field {
+  min-width: 180px;
+}
+
+.chargeback-toolbar + .metric-strip {
+  margin-bottom: 12px;
+}
+
+.chargeback-dept td {
+  background: var(--surface-2);
+  font-weight: 600;
+}
+
+.chargeback-user-name {
+  padding-left: 28px;
+  color: var(--muted);
+}
+
 .muted,
 .progress-label {
   color: var(--muted);
