@@ -9,6 +9,9 @@
 /.phlox-gw-cluster-demo/
 phlox-gw.db
 phlox-gw.db-*
+phlox-gw-demo.db
+phlox-gw.backup
+/phlox-gw-*
 phlox-gw-signing-key.json
 node_modules/
 output/playwright/

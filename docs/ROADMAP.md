@@ -37,9 +37,33 @@
 
 ## Next
 
-- External secrets management.
+- External secrets management (Vault and AWS Secrets Manager backends) with at-rest
+  encryption for provider credentials stored in the database.
+- `/v1/embeddings` gateway endpoint with per-model pricing, budgets, and rate limits.
+- Azure OpenAI provider type (api-key header and api-version handling).
+- Official container image, Dockerfile, and Kubernetes/Helm deployment guidance.
+- Signed configuration import/restore workflow to complete environment promotion.
+- Internal refactor: split `internal/httpapi/server.go` and `internal/store/store.go`
+  into focused packages (gateway adapters, admin handlers, policy gates, routing) to
+  keep the codebase contributor-friendly.
 
 ## Later
 
 - Semantic response cache.
 - Strict distributed RPM/TPM counters for hard global cluster limits under high concurrency.
+- Teams/organizations with scoped admin roles and service accounts beyond the current
+  admin/user split.
+- SCIM or Microsoft Graph sync for departments and groups after Entra ID SSO.
+- External guardrail/policy plugins (webhook policy engine) and richer policy composition.
+- Google Gemini / Vertex AI provider adapter.
+- OpenAI Responses API surface and additional modalities (images, audio) as demand warrants.
+- In-memory hot-path rate-limit counters to remove per-request usage-ledger aggregate
+  queries.
+
+## Principles
+
+- Every feature ships fully open source under Apache-2.0. Capabilities that comparable
+  products gate behind enterprise licenses (SSO, audit logs, guardrails, metrics,
+  clustering) stay free here.
+- Single-binary simplicity is a product feature. New capabilities must not introduce
+  mandatory external dependencies beyond the optional Postgres backend.
