@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sort"
 	"strings"
 	"time"
 
@@ -1781,6 +1782,134 @@ func (s *Store) BudgetBurnDown(ctx context.Context, now time.Time) ([]BudgetBurn
 		})
 	}
 	return items, nil
+}
+
+type ChargebackUserRow struct {
+	UserID       string  `json:"user_id"`
+	Username     string  `json:"username"`
+	Requests     int64   `json:"requests"`
+	InputTokens  int64   `json:"input_tokens"`
+	OutputTokens int64   `json:"output_tokens"`
+	TotalTokens  int64   `json:"total_tokens"`
+	CostUSD      float64 `json:"cost_usd"`
+}
+
+type ChargebackDepartment struct {
+	Department   string              `json:"department"`
+	Requests     int64               `json:"requests"`
+	InputTokens  int64               `json:"input_tokens"`
+	OutputTokens int64               `json:"output_tokens"`
+	TotalTokens  int64               `json:"total_tokens"`
+	CostUSD      float64             `json:"cost_usd"`
+	BudgetUSD    float64             `json:"budget_usd"`
+	Users        []ChargebackUserRow `json:"users"`
+}
+
+type MonthlyChargebackReport struct {
+	Month           string                 `json:"month"`
+	PeriodStart     time.Time              `json:"period_start"`
+	PeriodEnd       time.Time              `json:"period_end"`
+	GeneratedAt     time.Time              `json:"generated_at"`
+	Requests        int64                  `json:"requests"`
+	InputTokens     int64                  `json:"input_tokens"`
+	OutputTokens    int64                  `json:"output_tokens"`
+	TotalTokens     int64                  `json:"total_tokens"`
+	CostUSD         float64                `json:"cost_usd"`
+	Departments     []ChargebackDepartment `json:"departments"`
+	AvailableMonths []string               `json:"available_months"`
+}
+
+// ChargebackReport aggregates the usage ledger for one calendar month by
+// department and user. Department and username come from the ledger rows, so
+// the report reflects attribution at the time of use even if users have since
+// moved departments or been deleted.
+func (s *Store) ChargebackReport(ctx context.Context, month time.Time, now time.Time) (MonthlyChargebackReport, error) {
+	start, end := monthBounds(month.UTC())
+	report := MonthlyChargebackReport{
+		Month:       start.Format("2006-01"),
+		PeriodStart: start,
+		PeriodEnd:   end,
+		GeneratedAt: now.UTC(),
+	}
+	rows, err := s.query(ctx, `
+		SELECT department, user_id, MAX(username) AS username,
+		       COUNT(*) AS requests,
+		       COALESCE(SUM(input_tokens), 0) AS input_tokens,
+		       COALESCE(SUM(output_tokens), 0) AS output_tokens,
+		       COALESCE(SUM(total_tokens), 0) AS total_tokens,
+		       COALESCE(SUM(cost_usd), 0) AS cost_usd
+		FROM usage_ledger
+		WHERE created_at >= ? AND created_at < ?
+		GROUP BY department, user_id
+		ORDER BY department`, formatTime(start), formatTime(end))
+	if err != nil {
+		return MonthlyChargebackReport{}, err
+	}
+	defer rows.Close()
+	byDept := make(map[string]*ChargebackDepartment)
+	var deptOrder []string
+	for rows.Next() {
+		var department string
+		var user ChargebackUserRow
+		if err := rows.Scan(&department, &user.UserID, &user.Username, &user.Requests, &user.InputTokens, &user.OutputTokens, &user.TotalTokens, &user.CostUSD); err != nil {
+			return MonthlyChargebackReport{}, err
+		}
+		user.CostUSD = roundCost(user.CostUSD)
+		dept, ok := byDept[department]
+		if !ok {
+			dept = &ChargebackDepartment{Department: department}
+			byDept[department] = dept
+			deptOrder = append(deptOrder, department)
+		}
+		dept.Requests += user.Requests
+		dept.InputTokens += user.InputTokens
+		dept.OutputTokens += user.OutputTokens
+		dept.TotalTokens += user.TotalTokens
+		dept.CostUSD = roundCost(dept.CostUSD + user.CostUSD)
+		dept.Users = append(dept.Users, user)
+		report.Requests += user.Requests
+		report.InputTokens += user.InputTokens
+		report.OutputTokens += user.OutputTokens
+		report.TotalTokens += user.TotalTokens
+		report.CostUSD = roundCost(report.CostUSD + user.CostUSD)
+	}
+	if err := rows.Err(); err != nil {
+		return MonthlyChargebackReport{}, err
+	}
+
+	budgets, err := s.ListBudgets(ctx)
+	if err != nil {
+		return MonthlyChargebackReport{}, err
+	}
+	for _, budget := range budgets {
+		if budget.ScopeType == "department" && budget.IsActive {
+			if dept, ok := byDept[budget.ScopeValue]; ok {
+				dept.BudgetUSD = budget.LimitUSD
+			}
+		}
+	}
+
+	report.Departments = make([]ChargebackDepartment, 0, len(deptOrder))
+	for _, name := range deptOrder {
+		dept := byDept[name]
+		sort.SliceStable(dept.Users, func(i, j int) bool { return dept.Users[i].CostUSD > dept.Users[j].CostUSD })
+		report.Departments = append(report.Departments, *dept)
+	}
+	sort.SliceStable(report.Departments, func(i, j int) bool { return report.Departments[i].CostUSD > report.Departments[j].CostUSD })
+
+	monthRows, err := s.query(ctx, `SELECT DISTINCT substr(created_at, 1, 7) AS month FROM usage_ledger ORDER BY month DESC`)
+	if err != nil {
+		return MonthlyChargebackReport{}, err
+	}
+	defer monthRows.Close()
+	for monthRows.Next() {
+		var m string
+		if err := monthRows.Scan(&m); err != nil {
+			return MonthlyChargebackReport{}, err
+		}
+		report.AvailableMonths = append(report.AvailableMonths, m)
+	}
+	return report, monthRows.Err()
 }
 
 func (s *Store) UsageTimeSeries(ctx context.Context, days int, now time.Time) ([]UsageTimeSeriesPoint, error) {

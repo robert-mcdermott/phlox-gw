@@ -241,8 +241,13 @@ func insertDepartmentBudgets(ctx context.Context, tx *sql.Tx, now time.Time) {
 func generateUsage(now, monthStart, startDay time.Time) []usageSeed {
 	var out []usageSeed
 	globalIndex := 0
+	daysInMonth := monthStart.AddDate(0, 1, 0).Sub(monthStart).Hours() / 24
 	for _, dept := range departments {
+		// Pro-rate the monthly spend target to the days elapsed so far, so
+		// month-to-date spend tracks toward TargetUSD by month end and the
+		// burn-down projection lands near it no matter when the seeder runs.
 		currentDays := daysBetween(maxDay(startDay, monthStart), now)
+		currentTarget := dept.TargetUSD * float64(len(currentDays)) / daysInMonth
 		currentWeights := make([]float64, len(currentDays)*4)
 		for dayIndex, day := range currentDays {
 			for slot := 0; slot < 4; slot++ {
@@ -255,20 +260,33 @@ func generateUsage(now, monthStart, startDay time.Time) []usageSeed {
 		for dayIndex, day := range currentDays {
 			for slot := 0; slot < 4; slot++ {
 				weight := currentWeights[dayIndex*4+slot]
-				cost := dept.TargetUSD * weight / currentTotalWeight
+				cost := currentTarget * weight / currentTotalWeight
 				out = append(out, buildUsageRow(dept.Name, day, slot, rowIndex, globalIndex, cost))
 				rowIndex++
 				globalIndex++
 			}
 		}
 
+		// Previous-month rows bill like a typical full month (~92% of the
+		// spend target), pro-rated to the covered days, so the monthly
+		// chargeback report shows plausible budget utilization.
 		previousDays := daysBetween(startDay, monthStart.AddDate(0, 0, -1))
-		for dayIndex, day := range previousDays {
-			for slot := 0; slot < 3; slot++ {
-				cost := (dept.TargetUSD / math.Max(float64(len(currentDays)), 1)) * (0.45 + 0.12*float64((dayIndex+slot)%4))
-				out = append(out, buildUsageRow(dept.Name, day, slot, rowIndex, globalIndex, cost))
-				rowIndex++
-				globalIndex++
+		if len(previousDays) > 0 {
+			previousTarget := dept.TargetUSD * 0.92 * float64(len(previousDays)) / 30
+			previousWeights := make([]float64, len(previousDays)*3)
+			for dayIndex := range previousDays {
+				for slot := 0; slot < 3; slot++ {
+					previousWeights[dayIndex*3+slot] = 0.45 + 0.12*float64((dayIndex+slot)%4)
+				}
+			}
+			previousTotalWeight := sum(previousWeights)
+			for dayIndex, day := range previousDays {
+				for slot := 0; slot < 3; slot++ {
+					cost := previousTarget * previousWeights[dayIndex*3+slot] / previousTotalWeight
+					out = append(out, buildUsageRow(dept.Name, day, slot, rowIndex, globalIndex, cost))
+					rowIndex++
+					globalIndex++
+				}
 			}
 		}
 	}

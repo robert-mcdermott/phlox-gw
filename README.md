@@ -37,6 +37,8 @@ Phlox-GW provides:
 - Admin operations charts for cost, tokens, requests, errors, latency, providers, and
   models.
 - Budget burn-down views and CSV exports.
+- Monthly chargeback reports by department and user with CSV download and a JSON API for
+  financial-system integration.
 - Request metadata search and CSV export without storing prompt text, response text, image
   bytes, tool contents, API keys, or provider secrets by default.
 - Built-in guardrail policy controls for PII/API-key detection, request redaction or

@@ -708,6 +708,45 @@ Budget checks happen before dispatch, but final cost is known after the provider
 The request that crosses a monthly budget can finish and the next priced request is
 blocked.
 
+## Monthly Chargeback Reporting
+
+`Admin -> Budgets` opens with a monthly chargeback report for billing and cost recovery.
+Pick a billing month (current month is the default; every month with ledger data is
+selectable) to see spend grouped by department, with a per-user breakdown inside each
+department. Department rows show requests, tokens, cost, the department budget with
+utilization, and share of total spend; user rows show each member's usage and share of
+their department. Click a department row to collapse or expand its user breakdown, or
+use `Collapse all` for a department-level summary.
+
+Department and username are captured on each ledger row at request time, so historical
+months bill against the department a user belonged to when the spend happened, even if
+they have since moved or been deleted. Department budget columns always reflect current
+budget definitions.
+
+**CSV export for finance.** The `Download CSV` button exports the selected month as flat
+per-user rows suitable for pivoting or import into billing systems:
+
+```text
+month,department,user_id,username,requests,input_tokens,output_tokens,total_tokens,cost_usd,department_budget_usd
+```
+
+**API integration.** The same report is available as JSON for financial reporting
+systems. Authenticate with an admin login to get a session token, then request the month:
+
+```bash
+TOKEN=$(curl -s -X POST http://127.0.0.1:8080/api/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"<password>"}' | jq -r .token)
+
+curl -s http://127.0.0.1:8080/api/admin/chargeback?month=2026-06 \
+  -H "Authorization: Bearer ${TOKEN}"
+```
+
+The response includes the period bounds, totals, per-department and per-user rollups,
+and `available_months` listing every month with ledger data. Omit `month` for the
+current month. `GET /api/admin/chargeback/export.csv?month=YYYY-MM` returns the CSV
+form with the same authentication.
+
 ## Guardrail Policy
 
 Configure guardrail policy in `Admin -> Guardrails`.

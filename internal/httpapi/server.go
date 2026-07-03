@@ -298,6 +298,8 @@ func New(opts Options) (http.Handler, error) {
 	mux.HandleFunc("GET /api/admin/usage/timeseries", s.requireAdmin(s.adminUsageTimeSeries))
 	mux.HandleFunc("GET /api/admin/usage/drilldowns", s.requireAdmin(s.adminUsageDrilldowns))
 	mux.HandleFunc("GET /api/admin/budgets/burndown", s.requireAdmin(s.adminBudgetBurnDown))
+	mux.HandleFunc("GET /api/admin/chargeback", s.requireAdmin(s.chargebackReport))
+	mux.HandleFunc("GET /api/admin/chargeback/export.csv", s.requireAdmin(s.chargebackCSV))
 	mux.HandleFunc("GET /api/admin/usage/export.csv", s.requireAdmin(s.adminUsageCSV))
 	mux.HandleFunc("GET /v1/models", s.requireAPIKey(s.openAIModels))
 	mux.HandleFunc("POST /v1/chat/completions", s.requireAPIKey(s.openAIChatCompletions))
@@ -1896,6 +1898,73 @@ func (s *Server) adminUsageCSV(w http.ResponseWriter, r *http.Request, _ store.U
 	cw.Flush()
 	if err := cw.Error(); err != nil {
 		s.logger.Warn("csv write failed", "error", err)
+	}
+}
+
+func chargebackMonthFromRequest(w http.ResponseWriter, r *http.Request) (time.Time, bool) {
+	raw := strings.TrimSpace(r.URL.Query().Get("month"))
+	if raw == "" {
+		return time.Now().UTC(), true
+	}
+	month, err := time.Parse("2006-01", raw)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "month must be formatted YYYY-MM")
+		return time.Time{}, false
+	}
+	return month, true
+}
+
+func (s *Server) chargebackReport(w http.ResponseWriter, r *http.Request, _ store.User) {
+	month, ok := chargebackMonthFromRequest(w, r)
+	if !ok {
+		return
+	}
+	report, err := s.store.ChargebackReport(r.Context(), month, time.Now().UTC())
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	respondJSON(w, http.StatusOK, report)
+}
+
+func (s *Server) chargebackCSV(w http.ResponseWriter, r *http.Request, _ store.User) {
+	month, ok := chargebackMonthFromRequest(w, r)
+	if !ok {
+		return
+	}
+	report, err := s.store.ChargebackReport(r.Context(), month, time.Now().UTC())
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	filename := "phlox-gw-chargeback-" + report.Month + ".csv"
+	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+	w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
+	cw := csv.NewWriter(w)
+	_ = cw.Write([]string{"month", "department", "user_id", "username", "requests", "input_tokens", "output_tokens", "total_tokens", "cost_usd", "department_budget_usd"})
+	for _, dept := range report.Departments {
+		budget := strconv.FormatFloat(dept.BudgetUSD, 'f', 2, 64)
+		if dept.BudgetUSD <= 0 {
+			budget = ""
+		}
+		for _, user := range dept.Users {
+			_ = cw.Write([]string{
+				report.Month,
+				dept.Department,
+				user.UserID,
+				user.Username,
+				strconv.FormatInt(user.Requests, 10),
+				strconv.FormatInt(user.InputTokens, 10),
+				strconv.FormatInt(user.OutputTokens, 10),
+				strconv.FormatInt(user.TotalTokens, 10),
+				strconv.FormatFloat(user.CostUSD, 'f', 6, 64),
+				budget,
+			})
+		}
+	}
+	cw.Flush()
+	if err := cw.Error(); err != nil {
+		s.logger.Warn("chargeback csv write failed", "error", err)
 	}
 }
 
