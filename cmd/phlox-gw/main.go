@@ -104,8 +104,8 @@ func main() {
 		logger.Error("shutdown failed", "error", err)
 		os.Exit(1)
 	}
-	if err := db.MarkClusterNodeStatus(context.Background(), cfg.Deployment.InstanceID, "stopped", time.Now().UTC()); err != nil && !errors.Is(err, store.ErrNotFound) {
-		logger.Warn("mark cluster node stopped failed", "instance_id", cfg.Deployment.InstanceID, "error", err)
+	if err := db.DeleteClusterNode(context.Background(), cfg.Deployment.InstanceID); err != nil && !errors.Is(err, store.ErrNotFound) {
+		logger.Warn("release cluster node registration failed", "instance_id", cfg.Deployment.InstanceID, "error", err)
 	}
 }
 
