@@ -548,3 +548,107 @@ func luhnValid(digits string) bool {
 	}
 	return sum > 0 && sum%10 == 0
 }
+
+func (s *Server) guardrailPolicy(w http.ResponseWriter, r *http.Request, _ store.User) {
+	policy, err := s.store.GetGuardrailPolicy(r.Context())
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	respondJSON(w, http.StatusOK, policy)
+}
+
+func (s *Server) updateGuardrailPolicy(w http.ResponseWriter, r *http.Request, admin store.User) {
+	var req store.GuardrailPolicy
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	if !validGuardrailAction(req.InputAction) || !validGuardrailAction(req.OutputAction) {
+		respondError(w, http.StatusBadRequest, "guardrail actions must be off, redact, or block")
+		return
+	}
+	if strings.TrimSpace(req.RedactionText) == "" {
+		req.RedactionText = "[REDACTED]"
+	}
+	req.StreamingBlockMode = "reject"
+	if err := validateGuardrailCustomPatterns(req.CustomPatterns); err != nil {
+		respondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	policy, err := s.store.UpdateGuardrailPolicy(r.Context(), req)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	s.audit(r, admin, "guardrail.update", "guardrail_policy", policy.ID, "default", guardrailAuditDetails(policy))
+	respondJSON(w, http.StatusOK, policy)
+}
+
+type guardrailPreviewRequest struct {
+	Policy store.GuardrailPolicy `json:"policy"`
+	Text   string                `json:"text"`
+	Phase  string                `json:"phase"`
+}
+
+type guardrailPreviewResponse struct {
+	Phase    string   `json:"phase"`
+	Action   string   `json:"action"`
+	Findings []string `json:"findings"`
+	Redacted bool     `json:"redacted"`
+	Blocked  bool     `json:"blocked"`
+	Output   string   `json:"output"`
+}
+
+func (s *Server) previewGuardrailPolicy(w http.ResponseWriter, r *http.Request, _ store.User) {
+	var req guardrailPreviewRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	if !validGuardrailAction(req.Policy.InputAction) || !validGuardrailAction(req.Policy.OutputAction) {
+		respondError(w, http.StatusBadRequest, "guardrail actions must be off, redact, or block")
+		return
+	}
+	if strings.TrimSpace(req.Policy.RedactionText) == "" {
+		req.Policy.RedactionText = "[REDACTED]"
+	}
+	req.Policy.StreamingBlockMode = "reject"
+	if err := validateGuardrailCustomPatterns(req.Policy.CustomPatterns); err != nil {
+		respondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	phase := strings.ToLower(strings.TrimSpace(req.Phase))
+	if phase != "output" {
+		phase = "input"
+	}
+	action := guardrailAction(req.Policy, phase)
+	result := applyGuardrailToText(req.Text, req.Policy, action, false)
+	respondJSON(w, http.StatusOK, guardrailPreviewResponse{
+		Phase:    phase,
+		Action:   action,
+		Findings: result.Findings,
+		Redacted: result.Redacted,
+		Blocked:  result.Blocked,
+		Output:   result.Text,
+	})
+}
+
+func guardrailAuditDetails(p store.GuardrailPolicy) map[string]any {
+	return map[string]any{
+		"enabled":              p.Enabled,
+		"input_action":         p.InputAction,
+		"output_action":        p.OutputAction,
+		"detect_email":         p.DetectEmail,
+		"detect_phone":         p.DetectPhone,
+		"detect_ssn":           p.DetectSSN,
+		"detect_credit_card":   p.DetectCreditCard,
+		"detect_api_key":       p.DetectAPIKey,
+		"custom_patterns":      len(p.CustomPatterns),
+		"streaming_block_mode": p.StreamingBlockMode,
+	}
+}
+
+func validGuardrailAction(action string) bool {
+	return action == "off" || action == "redact" || action == "block"
+}
