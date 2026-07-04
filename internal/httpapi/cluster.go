@@ -193,6 +193,9 @@ func (s *Server) updateClusterHeartbeat(ctx context.Context, status string) erro
 	return nil
 }
 
+// clusterNodeRetention is how long an unrefreshed node row survives before
+// garbage collection. It is much longer than the stale threshold so operators
+// can still see recently departed nodes before they age out of the registry.
 func (s *Server) clusterNodeRetention() time.Duration {
 	retention := 10 * s.cfg.Deployment.NodeStaleAfter
 	if retention < 10*time.Minute {

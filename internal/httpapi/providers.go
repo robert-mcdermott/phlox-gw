@@ -217,10 +217,21 @@ func providerAuditDetails(p store.Provider, secrets store.ProviderSecretUpdate) 
 	}
 }
 
+// defaultAzureAPIVersion is the Azure OpenAI data-plane api-version used when
+// a provider does not pin one. 2024-10-21 is the latest GA version.
 const defaultAzureAPIVersion = "2024-10-21"
 
+// defaultGoogleBaseURL is the Gemini API's OpenAI-compatible surface. Google
+// maintains this compatibility layer for the Gemini Developer API (AI Studio
+// keys), covering chat completions, streaming, and tool calls with standard
+// Bearer authentication.
 const defaultGoogleBaseURL = "https://generativelanguage.googleapis.com/v1beta/openai"
 
+// providerProtocol maps a provider type to the wire protocol it speaks.
+// Azure OpenAI deployments and the Gemini API's OpenAI-compatible surface
+// speak the OpenAI chat-completions protocol; Claude deployments in Azure AI
+// Foundry speak the Anthropic Messages protocol. These types differ only in
+// endpoint shape and auth headers.
 func providerProtocol(p store.Provider) string {
 	switch p.Type {
 	case "azure-openai", "google":
@@ -232,6 +243,9 @@ func providerProtocol(p store.Provider) string {
 	}
 }
 
+// ensureStreamUsageOption asks the upstream to include usage in the final
+// stream chunk on providers that support but do not default to it, so
+// streamed requests are billed from real token counts instead of estimates.
 func ensureStreamUsageOption(p store.Provider, raw map[string]any) {
 	if p.Type != "google" {
 		return
@@ -252,6 +266,10 @@ func azureAPIVersion(p store.Provider) string {
 	return defaultAzureAPIVersion
 }
 
+// openAIChatEndpoint returns the upstream chat-completions URL for an
+// OpenAI-protocol provider. Azure OpenAI routes through per-deployment paths
+// (the upstream model id is the deployment name) with a required api-version
+// query parameter.
 func openAIChatEndpoint(p store.Provider, upstreamModel string) string {
 	base := strings.TrimRight(p.BaseURL, "/")
 	if p.Type == "azure-openai" {
