@@ -363,3 +363,11 @@ func parseAnthropicUsage(body []byte) tokenUsage {
 	total := resp.Usage.InputTokens + resp.Usage.OutputTokens
 	return tokenUsage{Input: resp.Usage.InputTokens, Output: resp.Usage.OutputTokens, Total: total}
 }
+
+func writeAnthropicResult(w http.ResponseWriter, result upstreamResult) {
+	if result.Body == nil {
+		anthropicError(w, resultStatus(result), fallbackString(result.ErrorText, "provider unavailable"))
+		return
+	}
+	writeUpstreamResult(w, result)
+}
