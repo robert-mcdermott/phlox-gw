@@ -129,24 +129,6 @@ type weightedRoutePolicy struct {
 	Weight int
 }
 
-type upstreamResult struct {
-	Route     store.RoutedModel
-	Protocol  string
-	Status    int
-	Headers   http.Header
-	Body      []byte
-	ErrorText string
-	LatencyMS int64
-}
-
-type requestEventMeta struct {
-	Method    string
-	Endpoint  string
-	Streaming bool
-	ClientIP  string
-	UserAgent string
-}
-
 type clusterStatusResponse struct {
 	DeploymentMode           string                `json:"deployment_mode"`
 	ClusterEnabled           bool                  `json:"cluster_enabled"`
@@ -5428,17 +5410,6 @@ func respondOIDCError(w http.ResponseWriter, status int, message string) {
 	w.WriteHeader(status)
 	payload, _ := json.Marshal(message)
 	_, _ = fmt.Fprintf(w, `<!doctype html><html><head><meta charset="utf-8"><title>Sign in failed</title></head><body><main><h1>Sign in failed</h1><p id="message"></p><script>document.getElementById('message').textContent = %s;</script></main></body></html>`, payload)
-}
-
-type modelHealthResult struct {
-	OK         bool   `json:"ok"`
-	ProviderID string `json:"provider_id"`
-	Model      string `json:"model"`
-	Protocol   string `json:"protocol"`
-	StatusCode int    `json:"status_code"`
-	LatencyMS  int64  `json:"latency_ms"`
-	Error      string `json:"error,omitempty"`
-	Snippet    string `json:"snippet,omitempty"`
 }
 
 func (s *Server) runModelHealthCheck(parent context.Context, route store.RoutedModel) modelHealthResult {
