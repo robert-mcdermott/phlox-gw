@@ -3793,3 +3793,284 @@ func TestAnthropicMessagesTranslationRetriesReasoningModelParams(t *testing.T) {
 		t.Fatalf("unexpected translated body: %s", resp.Body.String())
 	}
 }
+
+func TestOpenAIChatCompletionsRoutesToGoogleGemini(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer st.Close()
+	user := store.User{
+		ID:           "user_google",
+		Username:     "google-user",
+		Department:   "AI",
+		Role:         "user",
+		PasswordHash: "unused",
+		AuthProvider: "local",
+		IsActive:     true,
+	}
+	if err := st.CreateUser(ctx, user); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	plain, prefix, keyHash, err := auth.NewAPIKey()
+	if err != nil {
+		t.Fatalf("NewAPIKey: %v", err)
+	}
+	if err := st.CreateAPIKey(ctx, store.APIKey{ID: "key_google", UserID: user.ID, Name: "Google key", Prefix: prefix, KeyHash: keyHash}); err != nil {
+		t.Fatalf("CreateAPIKey: %v", err)
+	}
+	provider := store.Provider{
+		ID:      "google",
+		Name:    "Google Gemini",
+		Type:    "google",
+		BaseURL: "https://generativelanguage.googleapis.com/v1beta/openai",
+		APIKey:  "gemini-secret",
+		Enabled: true,
+	}
+	if err := st.CreateProvider(ctx, provider); err != nil {
+		t.Fatalf("CreateProvider: %v", err)
+	}
+	model := store.Model{
+		ID:                "model_gemini_flash",
+		ProviderID:        provider.ID,
+		ModelID:           "gemini-3.5-flash",
+		Route:             "google/gemini-3.5-flash",
+		DisplayName:       "Gemini 3.5 Flash",
+		SupportsStreaming: true,
+		Enabled:           true,
+	}
+	if err := st.CreateModel(ctx, model); err != nil {
+		t.Fatalf("CreateModel: %v", err)
+	}
+	upstreamHits := 0
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		upstreamHits++
+		if r.URL.Host != "generativelanguage.googleapis.com" || r.URL.Path != "/v1beta/openai/chat/completions" {
+			t.Fatalf("unexpected upstream target: %s", r.URL.String())
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer gemini-secret" {
+			t.Fatalf("Authorization header = %q", got)
+		}
+		var req map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("upstream decode: %v", err)
+		}
+		if req["model"] != "gemini-3.5-flash" {
+			t.Fatalf("unexpected upstream model: %#v", req["model"])
+		}
+		if _, has := req["stream_options"]; has {
+			t.Fatalf("stream_options must not be injected for non-streaming requests: %#v", req)
+		}
+		body := `{"id":"chatcmpl-1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":6,"completion_tokens":2,"total_tokens":8}}`
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Request:    r,
+		}, nil
+	})
+	handler, err := New(Options{
+		Config: config.Config{SessionSecret: "test-secret"},
+		Store:  st,
+		Frontend: fstest.MapFS{
+			"frontend/dist/index.html": &fstest.MapFile{Data: []byte("<html></html>")},
+		},
+		HTTPClient: &http.Client{Transport: transport},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	resp := jsonRequest(t, handler, http.MethodPost, "/v1/chat/completions", plain, map[string]any{
+		"model":    model.Route,
+		"messages": []map[string]string{{"role": "user", "content": "Hello"}},
+	})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", resp.Code, resp.Body.String())
+	}
+	if upstreamHits != 1 {
+		t.Fatalf("upstream hits = %d", upstreamHits)
+	}
+	usage, err := st.UsageForUser(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("UsageForUser: %v", err)
+	}
+	if usage.Requests != 1 || usage.InputTokens != 6 || usage.OutputTokens != 2 {
+		t.Fatalf("unexpected stored usage: %#v", usage)
+	}
+}
+
+func TestOpenAIChatCompletionsStreamsGoogleWithUsageOption(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer st.Close()
+	user := store.User{
+		ID:           "user_google_stream",
+		Username:     "google-stream-user",
+		Department:   "AI",
+		Role:         "user",
+		PasswordHash: "unused",
+		AuthProvider: "local",
+		IsActive:     true,
+	}
+	if err := st.CreateUser(ctx, user); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	plain, prefix, keyHash, err := auth.NewAPIKey()
+	if err != nil {
+		t.Fatalf("NewAPIKey: %v", err)
+	}
+	if err := st.CreateAPIKey(ctx, store.APIKey{ID: "key_google_stream", UserID: user.ID, Name: "Google stream key", Prefix: prefix, KeyHash: keyHash}); err != nil {
+		t.Fatalf("CreateAPIKey: %v", err)
+	}
+	provider := store.Provider{
+		ID:      "google-stream",
+		Name:    "Google Gemini Stream",
+		Type:    "google",
+		BaseURL: "https://generativelanguage.googleapis.com/v1beta/openai",
+		APIKey:  "gemini-secret",
+		Enabled: true,
+	}
+	if err := st.CreateProvider(ctx, provider); err != nil {
+		t.Fatalf("CreateProvider: %v", err)
+	}
+	model := store.Model{
+		ID:                   "model_gemini_stream",
+		ProviderID:           provider.ID,
+		ModelID:              "gemini-3.5-flash",
+		Route:                "google-stream/gemini-3.5-flash",
+		DisplayName:          "Gemini Stream",
+		InputCostPerMillion:  1,
+		OutputCostPerMillion: 2,
+		SupportsStreaming:    true,
+		Enabled:              true,
+	}
+	if err := st.CreateModel(ctx, model); err != nil {
+		t.Fatalf("CreateModel: %v", err)
+	}
+	upstreamHits := 0
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		upstreamHits++
+		var req map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("upstream decode: %v", err)
+		}
+		opts, ok := req["stream_options"].(map[string]any)
+		if !ok || opts["include_usage"] != true {
+			t.Fatalf("stream_options.include_usage not injected: %#v", req)
+		}
+		streamBody := strings.Join([]string{
+			`data: {"id":"c1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"role":"assistant","content":"hel"}}]}` + "\n\n",
+			`data: {"id":"c1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"lo"},"finish_reason":"stop"}]}` + "\n\n",
+			`data: {"id":"c1","object":"chat.completion.chunk","choices":[],"usage":{"prompt_tokens":9,"completion_tokens":4,"total_tokens":13}}` + "\n\n",
+			"data: [DONE]\n\n",
+		}, "")
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(strings.NewReader(streamBody)),
+			Request:    r,
+		}, nil
+	})
+	handler, err := New(Options{
+		Config: config.Config{SessionSecret: "test-secret"},
+		Store:  st,
+		Frontend: fstest.MapFS{
+			"frontend/dist/index.html": &fstest.MapFile{Data: []byte("<html></html>")},
+		},
+		HTTPClient: &http.Client{Transport: transport},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	resp := jsonRequest(t, handler, http.MethodPost, "/v1/chat/completions", plain, map[string]any{
+		"model":    model.Route,
+		"stream":   true,
+		"messages": []map[string]string{{"role": "user", "content": "Hello"}},
+	})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", resp.Code, resp.Body.String())
+	}
+	if upstreamHits != 1 {
+		t.Fatalf("upstream hits = %d", upstreamHits)
+	}
+	if body := resp.Body.String(); !strings.Contains(body, `"content":"hel"`) || !strings.Contains(body, "[DONE]") {
+		t.Fatalf("unexpected stream body: %s", body)
+	}
+	usage, err := st.UsageForUser(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("UsageForUser: %v", err)
+	}
+	if usage.Requests != 1 || usage.InputTokens != 9 || usage.OutputTokens != 4 {
+		t.Fatalf("unexpected stored usage: %#v", usage)
+	}
+}
+
+func TestAdminGoogleProviderDefaultsBaseURL(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer st.Close()
+	hash, err := auth.HashPassword("admin")
+	if err != nil {
+		t.Fatalf("HashPassword: %v", err)
+	}
+	if err := st.EnsureSeedData(hash); err != nil {
+		t.Fatalf("EnsureSeedData: %v", err)
+	}
+	handler, err := New(Options{
+		Config: config.Config{SessionSecret: "test-secret"},
+		Store:  st,
+		Frontend: fstest.MapFS{
+			"frontend/dist/index.html": &fstest.MapFile{Data: []byte("<html></html>")},
+		},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	loginResp := jsonRequest(t, handler, http.MethodPost, "/api/auth/login", "", map[string]any{"username": "admin", "password": "admin"})
+	var login struct {
+		Token string `json:"token"`
+	}
+	decodeRecorder(t, loginResp, &login)
+
+	createResp := jsonRequest(t, handler, http.MethodPost, "/api/admin/providers", login.Token, map[string]any{
+		"id":      "google",
+		"name":    "Google Gemini",
+		"type":    "google",
+		"api_key": "gemini-secret",
+		"enabled": true,
+	})
+	if createResp.Code != http.StatusCreated {
+		t.Fatalf("create google provider status = %d body = %s", createResp.Code, createResp.Body.String())
+	}
+	stored, err := st.GetProvider(context.Background(), "google")
+	if err != nil {
+		t.Fatalf("GetProvider: %v", err)
+	}
+	if stored.Type != "google" || stored.BaseURL != "https://generativelanguage.googleapis.com/v1beta/openai" {
+		t.Fatalf("blank base_url should default to the Gemini endpoint: %#v", stored)
+	}
+
+	// An explicit base URL is kept as-is.
+	updateResp := jsonRequest(t, handler, http.MethodPut, "/api/admin/providers/google", login.Token, map[string]any{
+		"name":     "Google Gemini",
+		"type":     "google",
+		"base_url": "https://proxy.internal/gemini/openai/",
+		"enabled":  true,
+	})
+	if updateResp.Code != http.StatusOK {
+		t.Fatalf("update provider status = %d body = %s", updateResp.Code, updateResp.Body.String())
+	}
+	stored, err = st.GetProvider(context.Background(), "google")
+	if err != nil {
+		t.Fatalf("GetProvider after update: %v", err)
+	}
+	if stored.BaseURL != "https://proxy.internal/gemini/openai" {
+		t.Fatalf("explicit base_url not kept: %#v", stored)
+	}
+}

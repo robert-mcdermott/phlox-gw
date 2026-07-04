@@ -125,6 +125,10 @@ Provider adapters are deliberately thin:
 - `azure-anthropic`: speaks the Anthropic Messages protocol against Claude deployments
   in Azure AI Foundry. The base URL is the resource's `/anthropic` endpoint and requests
   carry both `x-api-key` and `api-key` headers for compatibility.
+- `google`: speaks the OpenAI protocol against the Gemini API's OpenAI-compatible
+  surface (`https://generativelanguage.googleapis.com/v1beta/openai` by default) with
+  Bearer authentication using a Google AI Studio API key. Streamed requests inject
+  `stream_options.include_usage` so usage is captured from the final stream chunk.
 - `bedrock`: calls Bedrock Converse and ConverseStream in the provider `aws_region` using
   one of three per-provider auth methods: the AWS SDK default credential chain (env vars,
   shared config profiles, or an attached IAM role — the default), explicit access keys

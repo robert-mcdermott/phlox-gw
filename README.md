@@ -24,6 +24,7 @@ Phlox-GW provides:
 - AWS Bedrock access through OpenAI-compatible and Anthropic-compatible endpoints using
   Bedrock Converse and ConverseStream.
 - Azure support for both Azure OpenAI deployments and Claude models in Azure AI Foundry.
+- Google Gemini support through the Gemini API with AI Studio API keys.
 - Provider and model catalog management from the admin UI.
 - Admin playground for sending test chat messages through any model route to validate
   providers and models without minting an API key.
@@ -146,8 +147,9 @@ Podman Postgres setup, cluster runbook, and single-host demo cluster script.
 For production, put Phlox-GW behind a TLS-terminating reverse proxy or load balancer. The
 application currently serves HTTP directly and expects TLS to be handled at the edge.
 
-See the [Operator Guide](docs/OPERATIONS.md) for systemd, macOS, Windows, OIDC, provider,
-backup, and reverse-proxy guidance.
+See the [Operator Guide](docs/OPERATIONS.md) for systemd, macOS, Windows, OIDC, backup,
+and reverse-proxy guidance, and the [Provider Setup Guide](docs/PROVIDERS.md) for
+per-provider configuration.
 
 ## Build Options
 
@@ -218,59 +220,20 @@ Provider rows describe where Phlox-GW sends requests after model routing.
 | `openai` | `https://api.openai.com/v1` | Also works for OpenRouter, LiteLLM, vLLM, Ollama, LM Studio, and other OpenAI-compatible APIs. |
 | `openai` for Ollama | `http://localhost:11434/v1` | Local Ollama exposes an OpenAI-compatible API at `/v1`. |
 | `anthropic` | `https://api.anthropic.com` | Phlox-GW appends `/v1/messages`. |
-| `azure-openai` | `https://myresource.openai.azure.com` | Azure OpenAI deployments. Requests go to `/openai/deployments/{deployment}/chat/completions?api-version=...` with the `api-key` header; the model row's upstream model id is the deployment name. The api-version is configurable per provider and defaults to `2024-10-21`. |
-| `azure-anthropic` | `https://myresource.services.ai.azure.com/anthropic` | Claude deployments in Azure AI Foundry, called through the Anthropic Messages API (`/v1/messages`). |
-| `bedrock` | blank | Calls Bedrock in the configured AWS region using one of three authentication methods (see below). |
+| `azure-openai` | `https://myresource.openai.azure.com` | Azure OpenAI deployments via the per-deployment data-plane API with `api-key` auth. |
+| `azure-anthropic` | `https://myresource.services.ai.azure.com/anthropic` | Claude deployments in Azure AI Foundry, called through the Anthropic Messages API. |
+| `google` | blank | Google Gemini with AI Studio API keys; blank defaults to Google's OpenAI-compatible endpoint. |
+| `bedrock` | blank | Calls Bedrock in the configured AWS region using one of three authentication methods. |
 
 Provider API keys can be stored directly for local testing, but production deployments
 should prefer environment variable references. For example, set `api_key_env` to
-`OPENAI_API_KEY` and run the gateway with that environment variable set.
+`OPENAI_API_KEY` and run the gateway with that environment variable set. Stored secrets
+are write-only in the admin UI and are never returned to the browser.
 
-### Azure Providers
-
-Azure exposes two different APIs, so Phlox-GW has two Azure provider types. Fill in
-`Admin -> Providers` as follows:
-
-| Field | Azure OpenAI | Claude in Azure AI Foundry |
-| --- | --- | --- |
-| Type | Azure OpenAI (`azure-openai`) | Azure Anthropic (Foundry) (`azure-anthropic`) |
-| Base URL | `https://myresource.openai.azure.com` | `https://myresource.services.ai.azure.com/anthropic` — the `/anthropic` suffix is required; without it Azure returns 404 |
-| API version | Optional, e.g. `2024-12-01-preview`; blank uses `2024-10-21` | Not used |
-| API key | The resource's API key (or an env var reference) | The deployment's API key (or an env var reference) |
-| Model: upstream model id | The **deployment name** (for example `gpt-4o` or whatever you named the deployment), not the underlying model name | The deployment name, for example `claude-sonnet-5` |
-
-Both values come from the deployment's details page in the Azure portal / Foundry: the
-endpoint URL supplies the base URL (drop everything after the host for Azure OpenAI, keep
-the `/anthropic` path for Foundry Claude), and the key is shown alongside it.
-
-Azure resources using the newer Azure OpenAI v1 API surface
-(`https://myresource.openai.azure.com/openai/v1`) can also be added as a plain `openai`
-provider, since that surface accepts a Bearer token and takes the model name in the
-request body. The `azure-openai` type targets the classic per-deployment data-plane API.
-
-**Reasoning models** (the GPT-5 family, o-series) reject the legacy `max_tokens`
-parameter in favor of `max_completion_tokens`, and only accept the default temperature.
-Where Phlox-GW builds the request itself — model health tests, the admin playground, and
-Anthropic-protocol requests translated to an OpenAI-compatible route — it detects this
-rejection and retries automatically with adjusted parameters. Requests to
-`/v1/chat/completions` are passed through faithfully, so OpenAI-protocol clients calling
-a reasoning-model route must send `max_completion_tokens` themselves, exactly as if they
-were calling the upstream directly.
-
-Bedrock providers offer three authentication methods, selected per provider in
-`Admin -> Providers`:
-
-- **AWS credential chain** (default): no credentials are stored on the provider. The AWS
-  SDK resolves credentials from standard sources such as `AWS_PROFILE`,
-  `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`,
-  `AWS_BEARER_TOKEN_BEDROCK`, SSO profiles, ECS task roles, or EC2 instance roles.
-- **Access key & secret**: an access key id, secret access key, and optional session token
-  entered on the provider row.
-- **Bedrock API key**: a single API key sent to Bedrock as a Bearer token.
-
-The AWS region is optional in all cases; when blank the SDK falls back to `AWS_REGION`.
-Stored AWS secrets and Bedrock API keys are write-only in the admin UI and are never
-returned to the browser.
+The [Provider Setup Guide](docs/PROVIDERS.md) has a field-by-field table for every
+provider type — OpenAI-compatible services (including Ollama, vLLM, LM Studio,
+OpenRouter, and LiteLLM), Anthropic, Azure OpenAI, Claude in Azure AI Foundry, Google
+Gemini, and AWS Bedrock's three authentication methods.
 
 ## Models And Routes
 
@@ -445,8 +408,10 @@ draft pattern changes before saving.
 
 ## Documentation
 
-- [Operator Guide](docs/OPERATIONS.md): build, configuration, SSO, providers, deployment,
-  backups, and troubleshooting.
+- [Operator Guide](docs/OPERATIONS.md): build, configuration, SSO, deployment, backups,
+  and troubleshooting.
+- [Provider Setup Guide](docs/PROVIDERS.md): field-by-field setup tables for every
+  provider type.
 - [API Usage](docs/API_USAGE.md): client endpoints, curl examples, streaming, errors, and
   integration notes.
 - [Design](docs/DESIGN.md): architecture and implementation decisions.

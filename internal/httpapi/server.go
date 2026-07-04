@@ -2266,6 +2266,7 @@ func (s *Server) openAIChatCompletions(w http.ResponseWriter, r *http.Request, u
 		} else {
 			attemptRaw := cloneJSONMap(raw)
 			attemptRaw["model"] = selected.Model.ModelID
+			ensureStreamUsageOption(selected.Provider, attemptRaw)
 			body, _ := json.Marshal(attemptRaw)
 			statusCode, responseBody, errText = s.proxyOpenAI(w, r, selected, body, attemptRaw, guardrails)
 		}
@@ -4093,6 +4094,7 @@ func (s *Server) proxyAnthropicViaOpenAIStream(w http.ResponseWriter, r *http.Re
 	}
 	openAIRaw["stream"] = true
 	openAIRaw["model"] = route.Model.ModelID
+	ensureStreamUsageOption(route.Provider, openAIRaw)
 	endpoint := openAIChatEndpoint(route.Provider, route.Model.ModelID)
 	ctx, finishTrace := s.upstreamTrace(r.Context(), route, "anthropic", "messages.stream.translate_openai")
 	start := time.Now()
@@ -5592,10 +5594,15 @@ func (s *Server) providerFromRequest(w http.ResponseWriter, r *http.Request, pat
 		return store.Provider{}, store.ProviderSecretUpdate{}, false
 	}
 	switch req.Type {
-	case "openai", "anthropic", "azure-openai", "azure-anthropic", "bedrock":
+	case "openai", "anthropic", "azure-openai", "azure-anthropic", "google", "bedrock":
 	default:
-		respondError(w, http.StatusBadRequest, "provider type must be openai, anthropic, azure-openai, azure-anthropic, or bedrock")
+		respondError(w, http.StatusBadRequest, "provider type must be openai, anthropic, azure-openai, azure-anthropic, google, or bedrock")
 		return store.Provider{}, store.ProviderSecretUpdate{}, false
+	}
+	if req.Type == "google" && strings.TrimSpace(req.BaseURL) == "" {
+		// The Gemini API has a fixed public endpoint; a blank base URL means
+		// the standard OpenAI-compatible surface.
+		req.BaseURL = defaultGoogleBaseURL
 	}
 	if req.Type != "bedrock" && strings.TrimSpace(req.BaseURL) == "" {
 		respondError(w, http.StatusBadRequest, "base_url is required for non-Bedrock providers")
@@ -6689,19 +6696,42 @@ func parseAnthropicUsage(body []byte) tokenUsage {
 // a provider does not pin one. 2024-10-21 is the latest GA version.
 const defaultAzureAPIVersion = "2024-10-21"
 
+// defaultGoogleBaseURL is the Gemini API's OpenAI-compatible surface. Google
+// maintains this compatibility layer for the Gemini Developer API (AI Studio
+// keys), covering chat completions, streaming, and tool calls with standard
+// Bearer authentication.
+const defaultGoogleBaseURL = "https://generativelanguage.googleapis.com/v1beta/openai"
+
 // providerProtocol maps a provider type to the wire protocol it speaks.
-// Azure OpenAI deployments speak the OpenAI chat-completions protocol and
-// Claude deployments in Azure AI Foundry speak the Anthropic Messages
-// protocol; they differ only in endpoint shape and auth headers.
+// Azure OpenAI deployments and the Gemini API's OpenAI-compatible surface
+// speak the OpenAI chat-completions protocol; Claude deployments in Azure AI
+// Foundry speak the Anthropic Messages protocol. These types differ only in
+// endpoint shape and auth headers.
 func providerProtocol(p store.Provider) string {
 	switch p.Type {
-	case "azure-openai":
+	case "azure-openai", "google":
 		return "openai"
 	case "azure-anthropic":
 		return "anthropic"
 	default:
 		return p.Type
 	}
+}
+
+// ensureStreamUsageOption asks the upstream to include usage in the final
+// stream chunk on providers that support but do not default to it, so
+// streamed requests are billed from real token counts instead of estimates.
+func ensureStreamUsageOption(p store.Provider, raw map[string]any) {
+	if p.Type != "google" {
+		return
+	}
+	if stream, _ := raw["stream"].(bool); !stream {
+		return
+	}
+	if _, ok := raw["stream_options"]; ok {
+		return
+	}
+	raw["stream_options"] = map[string]any{"include_usage": true}
 }
 
 func azureAPIVersion(p store.Provider) string {

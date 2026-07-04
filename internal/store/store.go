@@ -686,8 +686,9 @@ func (s *Store) migrateTx(ctx context.Context, tx *sql.Tx) error {
 }
 
 // migrateProviderTypeCheckSQLite rebuilds the providers table when its DDL
-// still carries a CHECK constraint that predates the Azure provider types.
+// still carries a CHECK constraint that predates the newest provider types.
 // SQLite cannot alter CHECK constraints in place, so the table is copied.
+// 'google' is the newest type, so its absence marks a stale constraint.
 func (s *Store) migrateProviderTypeCheckSQLite(ctx context.Context) error {
 	var ddl sql.NullString
 	err := s.queryRow(ctx, `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'providers'`).Scan(&ddl)
@@ -697,7 +698,7 @@ func (s *Store) migrateProviderTypeCheckSQLite(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if !strings.Contains(ddl.String, "CHECK") || strings.Contains(ddl.String, "'azure-openai'") {
+	if !strings.Contains(ddl.String, "CHECK") || strings.Contains(ddl.String, "'google'") {
 		return nil
 	}
 	if _, err := s.exec(ctx, "PRAGMA foreign_keys = OFF"); err != nil {
@@ -2915,7 +2916,7 @@ func isUniqueErr(err error) bool {
 	return err != nil && strings.Contains(strings.ToLower(err.Error()), "unique")
 }
 
-const providerTypeCheck = `CHECK (type IN ('openai', 'anthropic', 'azure-openai', 'azure-anthropic', 'bedrock'))`
+const providerTypeCheck = `CHECK (type IN ('openai', 'anthropic', 'azure-openai', 'azure-anthropic', 'google', 'bedrock'))`
 
 func providersTableDDL(name string) string {
 	return `CREATE TABLE IF NOT EXISTS ` + name + ` (
