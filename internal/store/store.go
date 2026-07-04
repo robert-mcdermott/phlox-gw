@@ -40,21 +40,6 @@ const (
 	dialectPostgres sqlDialect = "postgres"
 )
 
-type User struct {
-	ID           string     `json:"id"`
-	Username     string     `json:"username"`
-	Email        string     `json:"email"`
-	DisplayName  string     `json:"display_name"`
-	Department   string     `json:"department"`
-	Role         string     `json:"role"`
-	PasswordHash string     `json:"-"`
-	AuthProvider string     `json:"auth_provider"`
-	IsActive     bool       `json:"is_active"`
-	CreatedAt    time.Time  `json:"created_at"`
-	UpdatedAt    time.Time  `json:"updated_at"`
-	LastLoginAt  *time.Time `json:"last_login_at,omitempty"`
-}
-
 type APIKey struct {
 	ID             string     `json:"id"`
 	UserID         string     `json:"user_id"`
@@ -303,87 +288,6 @@ type UsageExportRow struct {
 	LatencyMS    int64     `json:"latency_ms"`
 	StatusCode   int       `json:"status_code"`
 	ErrorText    string    `json:"error_text"`
-}
-
-type RequestLogRecord struct {
-	ID              string    `json:"id"`
-	RequestID       string    `json:"request_id"`
-	UserID          string    `json:"user_id"`
-	Username        string    `json:"username"`
-	Department      string    `json:"department"`
-	APIKeyID        string    `json:"api_key_id"`
-	APIKeyPrefix    string    `json:"api_key_prefix"`
-	APIKeyName      string    `json:"api_key_name"`
-	ProviderID      string    `json:"provider_id"`
-	ProviderType    string    `json:"provider_type"`
-	ModelRoute      string    `json:"model_route"`
-	UpstreamModelID string    `json:"upstream_model_id"`
-	Protocol        string    `json:"protocol"`
-	Method          string    `json:"method"`
-	Endpoint        string    `json:"endpoint"`
-	Streaming       bool      `json:"streaming"`
-	InputTokens     int       `json:"input_tokens"`
-	OutputTokens    int       `json:"output_tokens"`
-	TotalTokens     int       `json:"total_tokens"`
-	CostUSD         float64   `json:"cost_usd"`
-	LatencyMS       int64     `json:"latency_ms"`
-	StatusCode      int       `json:"status_code"`
-	ErrorText       string    `json:"error_text"`
-	ClientIP        string    `json:"client_ip"`
-	UserAgent       string    `json:"user_agent"`
-	CreatedAt       time.Time `json:"created_at"`
-}
-
-type RequestLogQuery struct {
-	Search       string
-	Username     string
-	Department   string
-	APIKeyID     string
-	ProviderID   string
-	ProviderType string
-	ModelRoute   string
-	Protocol     string
-	Endpoint     string
-	Status       string
-	Streaming    *bool
-	From         *time.Time
-	To           *time.Time
-	Limit        int
-	Offset       int
-}
-
-type RequestLogSearchResult struct {
-	Items  []RequestLogRecord `json:"items"`
-	Total  int64              `json:"total"`
-	Limit  int                `json:"limit"`
-	Offset int                `json:"offset"`
-}
-
-type AuditLog struct {
-	ID            string    `json:"id"`
-	ActorUserID   string    `json:"actor_user_id"`
-	ActorUsername string    `json:"actor_username"`
-	Action        string    `json:"action"`
-	TargetType    string    `json:"target_type"`
-	TargetID      string    `json:"target_id"`
-	TargetDisplay string    `json:"target_display"`
-	Details       string    `json:"details"`
-	IPAddress     string    `json:"ip_address"`
-	UserAgent     string    `json:"user_agent"`
-	CreatedAt     time.Time `json:"created_at"`
-}
-
-type ClusterNode struct {
-	InstanceID     string    `json:"instance_id"`
-	Hostname       string    `json:"hostname"`
-	Version        string    `json:"version"`
-	Addr           string    `json:"addr"`
-	DeploymentMode string    `json:"deployment_mode"`
-	DBDriver       string    `json:"db_driver"`
-	Status         string    `json:"status"`
-	StartedAt      time.Time `json:"started_at"`
-	LastSeenAt     time.Time `json:"last_seen_at"`
-	Metadata       string    `json:"metadata"`
 }
 
 func Open(path string) (*Store, error) {

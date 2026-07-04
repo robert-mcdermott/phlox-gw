@@ -8,6 +8,60 @@ import (
 	"time"
 )
 
+type RequestLogRecord struct {
+	ID              string    `json:"id"`
+	RequestID       string    `json:"request_id"`
+	UserID          string    `json:"user_id"`
+	Username        string    `json:"username"`
+	Department      string    `json:"department"`
+	APIKeyID        string    `json:"api_key_id"`
+	APIKeyPrefix    string    `json:"api_key_prefix"`
+	APIKeyName      string    `json:"api_key_name"`
+	ProviderID      string    `json:"provider_id"`
+	ProviderType    string    `json:"provider_type"`
+	ModelRoute      string    `json:"model_route"`
+	UpstreamModelID string    `json:"upstream_model_id"`
+	Protocol        string    `json:"protocol"`
+	Method          string    `json:"method"`
+	Endpoint        string    `json:"endpoint"`
+	Streaming       bool      `json:"streaming"`
+	InputTokens     int       `json:"input_tokens"`
+	OutputTokens    int       `json:"output_tokens"`
+	TotalTokens     int       `json:"total_tokens"`
+	CostUSD         float64   `json:"cost_usd"`
+	LatencyMS       int64     `json:"latency_ms"`
+	StatusCode      int       `json:"status_code"`
+	ErrorText       string    `json:"error_text"`
+	ClientIP        string    `json:"client_ip"`
+	UserAgent       string    `json:"user_agent"`
+	CreatedAt       time.Time `json:"created_at"`
+}
+
+type RequestLogQuery struct {
+	Search       string
+	Username     string
+	Department   string
+	APIKeyID     string
+	ProviderID   string
+	ProviderType string
+	ModelRoute   string
+	Protocol     string
+	Endpoint     string
+	Status       string
+	Streaming    *bool
+	From         *time.Time
+	To           *time.Time
+	Limit        int
+	Offset       int
+}
+
+type RequestLogSearchResult struct {
+	Items  []RequestLogRecord `json:"items"`
+	Total  int64              `json:"total"`
+	Limit  int                `json:"limit"`
+	Offset int                `json:"offset"`
+}
+
 func (s *Store) InsertRequestLog(ctx context.Context, r RequestLogRecord) error {
 	now := r.CreatedAt
 	if now.IsZero() {

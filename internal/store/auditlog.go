@@ -7,6 +7,20 @@ import (
 	"time"
 )
 
+type AuditLog struct {
+	ID            string    `json:"id"`
+	ActorUserID   string    `json:"actor_user_id"`
+	ActorUsername string    `json:"actor_username"`
+	Action        string    `json:"action"`
+	TargetType    string    `json:"target_type"`
+	TargetID      string    `json:"target_id"`
+	TargetDisplay string    `json:"target_display"`
+	Details       string    `json:"details"`
+	IPAddress     string    `json:"ip_address"`
+	UserAgent     string    `json:"user_agent"`
+	CreatedAt     time.Time `json:"created_at"`
+}
+
 func (s *Store) InsertAuditLog(ctx context.Context, item AuditLog) error {
 	now := item.CreatedAt
 	if now.IsZero() {

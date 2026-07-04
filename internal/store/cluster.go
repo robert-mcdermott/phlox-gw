@@ -8,6 +8,19 @@ import (
 	"time"
 )
 
+type ClusterNode struct {
+	InstanceID     string    `json:"instance_id"`
+	Hostname       string    `json:"hostname"`
+	Version        string    `json:"version"`
+	Addr           string    `json:"addr"`
+	DeploymentMode string    `json:"deployment_mode"`
+	DBDriver       string    `json:"db_driver"`
+	Status         string    `json:"status"`
+	StartedAt      time.Time `json:"started_at"`
+	LastSeenAt     time.Time `json:"last_seen_at"`
+	Metadata       string    `json:"metadata"`
+}
+
 func (s *Store) UpsertClusterNode(ctx context.Context, node ClusterNode) error {
 	now := node.LastSeenAt
 	if now.IsZero() {

@@ -7,6 +7,21 @@ import (
 	"time"
 )
 
+type User struct {
+	ID           string     `json:"id"`
+	Username     string     `json:"username"`
+	Email        string     `json:"email"`
+	DisplayName  string     `json:"display_name"`
+	Department   string     `json:"department"`
+	Role         string     `json:"role"`
+	PasswordHash string     `json:"-"`
+	AuthProvider string     `json:"auth_provider"`
+	IsActive     bool       `json:"is_active"`
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
+	LastLoginAt  *time.Time `json:"last_login_at,omitempty"`
+}
+
 func (s *Store) GetUserByUsername(ctx context.Context, username string) (User, error) {
 	row := s.queryRow(ctx, `SELECT id, username, email, display_name, department, role, password_hash, auth_provider, is_active, created_at, updated_at, last_login_at FROM users WHERE username = ?`, username)
 	return scanUser(row)
