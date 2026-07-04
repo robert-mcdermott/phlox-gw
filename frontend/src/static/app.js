@@ -474,7 +474,7 @@ function adminContentView(usage) {
           <div class="form-grid">
             <label class="form-field"><span>Provider id</span><input id="provider-id" placeholder="e.g. local-vllm" /></label>
             <label class="form-field"><span>Display name</span><input id="provider-name" placeholder="e.g. Local vLLM" /></label>
-            <label class="form-field"><span>Type</span><select id="provider-type"><option value="openai">OpenAI-compatible</option><option value="anthropic">Anthropic-compatible</option><option value="azure-openai">Azure OpenAI</option><option value="azure-anthropic">Azure Anthropic (Foundry)</option><option value="bedrock">AWS Bedrock</option></select></label>
+            <label class="form-field"><span>Type</span><select id="provider-type"><option value="openai">OpenAI-compatible</option><option value="anthropic">Anthropic-compatible</option><option value="azure-openai">Azure OpenAI</option><option value="azure-anthropic">Azure Anthropic (Foundry)</option><option value="google">Google Gemini</option><option value="bedrock">AWS Bedrock</option></select></label>
             <label class="form-field"><span>Status</span><label class="check"><input id="provider-enabled" type="checkbox" checked /> Enabled</label></label>
           </div>
           <div class="form-grid" data-provider-group="api">
@@ -487,6 +487,7 @@ function adminContentView(usage) {
             <label class="form-field"><span>API version</span><input id="provider-azure-api-version" placeholder="blank uses 2024-10-21" /></label>
           </div>
           <p class="field-help" data-provider-group="azure-anthropic-help">Base URL is the Foundry resource's Anthropic endpoint, e.g. https://myresource.services.ai.azure.com/anthropic. Claude deployments are called through the Anthropic Messages API (/v1/messages).</p>
+          <p class="field-help" data-provider-group="google-help">Uses the Gemini API with an API key from Google AI Studio. Leave the base URL blank to use the standard endpoint (https://generativelanguage.googleapis.com/v1beta/openai). Model upstream ids are Gemini model names, e.g. gemini-3.5-flash.</p>
           <div class="form-grid" data-provider-group="bedrock">
             <label class="form-field"><span>Authentication</span><select id="provider-aws-auth">
               <option value="chain">AWS credential chain (env / IAM role)</option>
@@ -942,7 +943,7 @@ function providerRow(p) {
     <tr data-provider-row="${esc(p.id)}">
       <td class="mono">${esc(p.id)}</td>
       <td><input data-provider-field="name" value="${attr(p.name)}" /></td>
-      <td><select data-provider-field="type">${option('openai', 'OpenAI-compatible', p.type)}${option('anthropic', 'Anthropic-compatible', p.type)}${option('azure-openai', 'Azure OpenAI', p.type)}${option('azure-anthropic', 'Azure Anthropic (Foundry)', p.type)}${option('bedrock', 'AWS Bedrock', p.type)}</select></td>
+      <td><select data-provider-field="type">${option('openai', 'OpenAI-compatible', p.type)}${option('anthropic', 'Anthropic-compatible', p.type)}${option('azure-openai', 'Azure OpenAI', p.type)}${option('azure-anthropic', 'Azure Anthropic (Foundry)', p.type)}${option('google', 'Google Gemini', p.type)}${option('bedrock', 'AWS Bedrock', p.type)}</select></td>
       <td class="connection-cell">
         <div class="cell-stack" data-provider-group="api">
           <label class="mini-field"><span>Base URL</span><input data-provider-field="base_url" value="${attr(p.base_url)}" /></label>
@@ -2171,6 +2172,7 @@ function syncProviderGroups(scope, type, auth) {
   show('azure-openai', type === 'azure-openai');
   show('azure-openai-help', type === 'azure-openai');
   show('azure-anthropic-help', type === 'azure-anthropic');
+  show('google-help', type === 'google');
   show('bedrock', bedrock);
   show('bedrock-chain', bedrock && auth === 'chain');
   show('bedrock-keys', bedrock && auth === 'keys');

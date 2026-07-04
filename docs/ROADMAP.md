@@ -36,6 +36,7 @@
 - [x] Cluster deployment hardening with Postgres: explicit deployment modes, migration locking, node heartbeats, readiness checks, admin cluster UI, and single-host demo runbook.
 - [x] Azure provider types: Azure OpenAI deployments (api-key header and api-version handling) and Claude models in Azure AI Foundry via the Anthropic Messages API.
 - [x] Reasoning-model parameter handling: health tests, the playground, and Anthropic-to-OpenAI translation retry with `max_completion_tokens` when an upstream rejects legacy sampling parameters.
+- [x] Google Gemini provider type using the Gemini API (AI Studio keys) via Google's OpenAI-compatible surface, with streamed usage capture.
 
 ## Next
 
@@ -56,7 +57,8 @@
   admin/user split.
 - SCIM or Microsoft Graph sync for departments and groups after Entra ID SSO.
 - External guardrail/policy plugins (webhook policy engine) and richer policy composition.
-- Google Gemini / Vertex AI provider adapter.
+- Google Vertex AI provider adapter (project/region endpoints with OAuth or
+  service-account credentials; the API-key Gemini API is already supported).
 - OpenAI Responses API surface and additional modalities (images, audio) as demand warrants.
 - In-memory hot-path rate-limit counters to remove per-request usage-ledger aggregate
   queries.
