@@ -415,6 +415,8 @@ draft pattern changes before saving.
 - [API Usage](docs/API_USAGE.md): client endpoints, curl examples, streaming, errors, and
   integration notes.
 - [Design](docs/DESIGN.md): architecture and implementation decisions.
+- [Architecture](docs/ARCHITECTURE.md): contributor code map — the request lifecycle,
+  what each file does, and where to make common changes.
 - [Model Routing](docs/ROUTING.md): route IDs, fallback routes, weighted routes, and common
   patterns.
 - [Plan](docs/PLAN.md): product scope and implementation phases.
@@ -435,8 +437,11 @@ internal/httpapi/    Browser, admin, API key, provider, and gateway handlers
 internal/store/      SQLite schema, migrations, and persistence methods
 frontend/dist/       Embedded dashboard assets
 frontend/src/static/ Source dashboard assets used by the frontend build
-docs/                Design, operator, API, routing, plan, and roadmap docs
+docs/                Design, architecture, operator, API, routing, plan, and roadmap docs
 ```
+
+For a deeper code map — the gateway request lifecycle, per-file responsibilities, and
+"to change X, edit Y" recipes — see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Current Roadmap Focus
 
