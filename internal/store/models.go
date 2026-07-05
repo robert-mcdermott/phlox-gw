@@ -222,7 +222,7 @@ func scanRoutedModel(row scanner) (RoutedModel, error) {
 	var mCreated, mUpdated, pCreated, pUpdated string
 	err := row.Scan(&m.ID, &m.ProviderID, &m.ModelID, &m.Route, &m.DisplayName, &m.InputCostPerMillion, &m.OutputCostPerMillion, &m.ContextWindow,
 		&mStreaming, &mEnabled, &m.FallbackRoutes, &m.WeightedRoutes, &m.RetryAttempts, &m.RequestTimeoutMS, &mHealthRouting, &mCreated, &mUpdated,
-		&p.ID, &p.Name, &p.Type, &p.BaseURL, &p.APIKey, &p.APIKeyEnv, &p.AzureAPIVersion, &p.AWSRegion, &p.AWSAuthMethod, &p.AWSAccessKeyID, &p.AWSSecretAccessKey, &p.AWSSessionToken, &p.BedrockAPIKey, &pEnabled, &p.HealthStatus, &p.ConsecutiveFailures, &pLastCheck, &p.LastError, &pCircuitOpen, &pCreated, &pUpdated)
+		&p.ID, &p.Name, &p.Type, &p.BaseURL, &p.APIKey, &p.APIKeyEnv, &p.AzureAPIVersion, &p.BetaHeaderPrefixes, &p.AWSRegion, &p.AWSAuthMethod, &p.AWSAccessKeyID, &p.AWSSecretAccessKey, &p.AWSSessionToken, &p.BedrockAPIKey, &pEnabled, &p.HealthStatus, &p.ConsecutiveFailures, &pLastCheck, &p.LastError, &pCircuitOpen, &pCreated, &pUpdated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return RoutedModel{}, ErrNotFound
 	}

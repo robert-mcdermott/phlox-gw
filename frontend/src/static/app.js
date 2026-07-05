@@ -486,7 +486,10 @@ function adminContentView(usage) {
           <div class="form-grid" data-provider-group="azure-openai">
             <label class="form-field"><span>API version</span><input id="provider-azure-api-version" placeholder="blank uses 2024-10-21" /></label>
           </div>
-          <p class="field-help" data-provider-group="azure-anthropic-help">Base URL is the Foundry resource's Anthropic endpoint, e.g. https://myresource.services.ai.azure.com/anthropic. Claude deployments are called through the Anthropic Messages API (/v1/messages).</p>
+          <p class="field-help" data-provider-group="azure-anthropic-help">Base URL is the Foundry resource's Anthropic endpoint, e.g. https://myresource.services.ai.azure.com/anthropic. Claude deployments are called through the Anthropic Messages API (/v1/messages). Client anthropic-beta header values are filtered to a built-in allowlist of Foundry-supported features; unknown values would otherwise be rejected by Foundry with a 400.</p>
+          <div class="form-grid" data-provider-group="anthropic-beta">
+            <label class="form-field"><span>Beta header allowlist (optional)</span><textarea id="provider-beta-prefixes" placeholder="e.g.&#10;interleaved-thinking-&#10;fine-grained-tool-streaming-"></textarea><small class="field-help">One anthropic-beta prefix per line; overrides the built-in defaults for this provider. Use * to pass every value through unfiltered. Blank keeps the defaults.</small></label>
+          </div>
           <p class="field-help" data-provider-group="google-help">Uses the Gemini API with an API key from Google AI Studio. Leave the base URL blank to use the standard endpoint (https://generativelanguage.googleapis.com/v1beta/openai). Model upstream ids are Gemini model names, e.g. gemini-3.5-flash.</p>
           <div class="form-grid" data-provider-group="bedrock">
             <label class="form-field"><span>Authentication</span><select id="provider-aws-auth">
@@ -952,6 +955,9 @@ function providerRow(p) {
         </div>
         <div class="cell-stack" data-provider-group="azure-openai">
           <label class="mini-field"><span>API version</span><input data-provider-field="azure_api_version" value="${attr(p.azure_api_version)}" placeholder="blank uses 2024-10-21" /></label>
+        </div>
+        <div class="cell-stack" data-provider-group="anthropic-beta">
+          <label class="mini-field"><span>Beta allowlist</span><textarea data-provider-field="beta_header_prefixes" placeholder="blank uses built-in defaults">${esc(p.beta_header_prefixes || '')}</textarea></label>
         </div>
         <div class="cell-stack" data-provider-group="bedrock">
           <label class="mini-field"><span>Auth</span><select data-provider-field="aws_auth_method">${option('chain', 'AWS credential chain', auth)}${option('keys', 'Access key & secret', auth)}${option('api_key', 'Bedrock API key', auth)}</select></label>
@@ -1634,6 +1640,7 @@ function afterRender() {
         api_key_env: val('provider-api-key-env'),
         api_key: val('provider-api-key'),
         azure_api_version: val('provider-azure-api-version'),
+        beta_header_prefixes: val('provider-beta-prefixes'),
         aws_region: val('provider-aws-region'),
         aws_auth_method: val('provider-aws-auth') || 'chain',
         aws_access_key_id: val('provider-aws-access-key'),
@@ -2172,6 +2179,7 @@ function syncProviderGroups(scope, type, auth) {
   show('azure-openai', type === 'azure-openai');
   show('azure-openai-help', type === 'azure-openai');
   show('azure-anthropic-help', type === 'azure-anthropic');
+  show('anthropic-beta', type === 'anthropic' || type === 'azure-anthropic');
   show('google-help', type === 'google');
   show('bedrock', bedrock);
   show('bedrock-chain', bedrock && auth === 'chain');
