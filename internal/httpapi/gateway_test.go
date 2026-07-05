@@ -1895,6 +1895,9 @@ func TestAnthropicMessagesRoutesToAzureAnthropic(t *testing.T) {
 		if got := r.Header.Get("anthropic-version"); got != "2023-06-01" {
 			t.Fatalf("anthropic-version = %q", got)
 		}
+		if got := r.Header.Get("anthropic-beta"); got != "interleaved-thinking-2025-05-14" {
+			t.Fatalf("anthropic-beta should be filtered to Foundry-supported values, got %q", got)
+		}
 		var req map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Fatalf("upstream decode: %v", err)
@@ -1921,7 +1924,10 @@ func TestAnthropicMessagesRoutesToAzureAnthropic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	resp := jsonRequest(t, handler, http.MethodPost, "/anthropic/v1/messages", plain, map[string]any{
+	resp := jsonRequestWithHeaders(t, handler, http.MethodPost, "/anthropic/v1/messages", map[string]string{
+		"Authorization":  "Bearer " + plain,
+		"anthropic-beta": "advisor-tool-2026-03-01,interleaved-thinking-2025-05-14,claude-code-20250219",
+	}, map[string]any{
 		"model":      model.Route,
 		"max_tokens": 32,
 		"messages":   []map[string]string{{"role": "user", "content": "Hello"}},

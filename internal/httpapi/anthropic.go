@@ -37,9 +37,7 @@ func (s *Server) callAnthropicNonStreaming(parent context.Context, route store.R
 		version = "2023-06-01"
 	}
 	req.Header.Set("anthropic-version", version)
-	if beta := inbound.Get("anthropic-beta"); beta != "" {
-		req.Header.Set("anthropic-beta", beta)
-	}
+	s.setUpstreamAnthropicBetaHeader(req, route.Provider, inbound)
 	setAnthropicAuthHeader(req, route.Provider)
 	start := time.Now()
 	resp, err := s.httpClient.Do(req)
@@ -220,9 +218,7 @@ func (s *Server) proxyAnthropic(w http.ResponseWriter, r *http.Request, route st
 		version = "2023-06-01"
 	}
 	req.Header.Set("anthropic-version", version)
-	if beta := r.Header.Get("anthropic-beta"); beta != "" {
-		req.Header.Set("anthropic-beta", beta)
-	}
+	s.setUpstreamAnthropicBetaHeader(req, route.Provider, r.Header)
 	setAnthropicAuthHeader(req, route.Provider)
 
 	start := time.Now()
@@ -271,9 +267,7 @@ func (s *Server) proxyAnthropicStream(w http.ResponseWriter, r *http.Request, ro
 		version = "2023-06-01"
 	}
 	req.Header.Set("anthropic-version", version)
-	if beta := r.Header.Get("anthropic-beta"); beta != "" {
-		req.Header.Set("anthropic-beta", beta)
-	}
+	s.setUpstreamAnthropicBetaHeader(req, route.Provider, r.Header)
 	setAnthropicAuthHeader(req, route.Provider)
 
 	start := time.Now()

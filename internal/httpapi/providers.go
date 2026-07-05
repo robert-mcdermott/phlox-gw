@@ -86,6 +86,7 @@ func (s *Server) providerFromRequest(w http.ResponseWriter, r *http.Request, pat
 		APIKey             string `json:"api_key"`
 		APIKeyEnv          string `json:"api_key_env"`
 		AzureAPIVersion    string `json:"azure_api_version"`
+		BetaHeaderPrefixes string `json:"beta_header_prefixes"`
 		AWSRegion          string `json:"aws_region"`
 		AWSAuthMethod      string `json:"aws_auth_method"`
 		AWSAccessKeyID     string `json:"aws_access_key_id"`
@@ -129,6 +130,7 @@ func (s *Server) providerFromRequest(w http.ResponseWriter, r *http.Request, pat
 		APIKey:             req.APIKey,
 		APIKeyEnv:          strings.TrimSpace(req.APIKeyEnv),
 		AzureAPIVersion:    strings.TrimSpace(req.AzureAPIVersion),
+		BetaHeaderPrefixes: normalizeBetaPrefixes(req.BetaHeaderPrefixes),
 		AWSRegion:          strings.TrimSpace(req.AWSRegion),
 		AWSAuthMethod:      strings.TrimSpace(req.AWSAuthMethod),
 		AWSAccessKeyID:     strings.TrimSpace(req.AWSAccessKeyID),
@@ -140,6 +142,10 @@ func (s *Server) providerFromRequest(w http.ResponseWriter, r *http.Request, pat
 	if p.Type != "azure-openai" {
 		// api-version only applies to Azure OpenAI deployment endpoints.
 		p.AzureAPIVersion = ""
+	}
+	if providerProtocol(p) != "anthropic" {
+		// Beta header filtering only applies to Anthropic-protocol upstreams.
+		p.BetaHeaderPrefixes = ""
 	}
 	secrets := store.ProviderSecretUpdate{APIKey: strings.TrimSpace(req.APIKey) != ""}
 	if p.Type != "bedrock" {
@@ -208,6 +214,7 @@ func providerAuditDetails(p store.Provider, secrets store.ProviderSecretUpdate) 
 		"base_url":                p.BaseURL,
 		"api_key_env":             p.APIKeyEnv,
 		"azure_api_version":       p.AzureAPIVersion,
+		"beta_header_prefixes":    p.BetaHeaderPrefixes,
 		"direct_secret_updated":   secrets.APIKey,
 		"aws_region":              p.AWSRegion,
 		"aws_auth_method":         p.AWSAuthMethod,

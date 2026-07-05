@@ -123,6 +123,50 @@ Phlox-GW appends `/v1/messages` and calls the deployment through the Anthropic M
 API, so these routes support the same pass-through and streaming behavior as any
 Anthropic-compatible provider.
 
+### Anthropic Beta Header Filtering
+
+Anthropic clients such as Claude Code advertise optional beta features through the
+`anthropic-beta` request header (for example
+`anthropic-beta: advisor-tool-2026-03-01,interleaved-thinking-2025-05-14`). The
+first-party Anthropic API ignores values it does not recognize, but Azure AI Foundry
+validates the header and rejects the entire request with a 400 error when any value is
+unknown to it:
+
+```
+API Error: 400 Unexpected value(s) `advisor-tool-2026-03-01` for the `anthropic-beta` header.
+```
+
+To prevent this, Phlox-GW filters the `anthropic-beta` header per provider before
+forwarding. For `azure-anthropic` providers, values are kept only when they match a
+built-in allowlist of feature prefixes that Foundry supports (extended thinking,
+fine-grained tool streaming, computer use, context management, files, skills, code
+execution, MCP, prompt caching, and related families). Values from betas that exist only
+on the first-party API — such as `advisor-tool-*`, `claude-code-*`, `fast-mode-*`, and
+`task-budgets-*` — are dropped. Matching is on the prefix before the date suffix, so the
+filter keeps working when Anthropic bumps a beta's version date. Plain `anthropic`
+providers are never filtered by default.
+
+The defaults can be overridden per provider with the **Beta header allowlist** field on
+the provider form (API field: `beta_header_prefixes`), one prefix per line:
+
+```
+interleaved-thinking-
+fine-grained-tool-streaming-
+computer-use-
+```
+
+- **Blank** (the default) uses the built-in allowlist for the provider type.
+- **A list of prefixes** replaces the built-in defaults entirely — list every family the
+  provider should receive. Matching is a case-insensitive prefix match against each
+  comma-separated header value.
+- **A single `*` entry** disables filtering and passes every client value through
+  unchanged.
+
+The override is also honored on plain `anthropic` providers, where it can be used to
+restrict which betas clients may request. When values are dropped, the gateway logs a
+debug-level `dropped unsupported anthropic-beta values` entry naming the provider and the
+removed values, so you can tell why a client-requested beta feature is inactive.
+
 ## Google Gemini
 
 The `google` provider type calls the Gemini API (the Google AI Studio service) through

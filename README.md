@@ -221,7 +221,7 @@ Provider rows describe where Phlox-GW sends requests after model routing.
 | `openai` for Ollama | `http://localhost:11434/v1` | Local Ollama exposes an OpenAI-compatible API at `/v1`. |
 | `anthropic` | `https://api.anthropic.com` | Phlox-GW appends `/v1/messages`. |
 | `azure-openai` | `https://myresource.openai.azure.com` | Azure OpenAI deployments via the per-deployment data-plane API with `api-key` auth. |
-| `azure-anthropic` | `https://myresource.services.ai.azure.com/anthropic` | Claude deployments in Azure AI Foundry, called through the Anthropic Messages API. |
+| `azure-anthropic` | `https://myresource.services.ai.azure.com/anthropic` | Claude deployments in Azure AI Foundry, called through the Anthropic Messages API. Client `anthropic-beta` header values are filtered to Foundry-supported features (overridable per provider) so strict header validation doesn't 400 clients like Claude Code. |
 | `google` | blank | Google Gemini with AI Studio API keys; blank defaults to Google's OpenAI-compatible endpoint. |
 | `bedrock` | blank | Calls Bedrock in the configured AWS region using one of three authentication methods. |
 

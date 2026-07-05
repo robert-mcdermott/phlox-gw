@@ -245,6 +245,75 @@ func TestAdminAzureProviderValidation(t *testing.T) {
 	}
 }
 
+func TestAdminProviderBetaHeaderPrefixes(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer st.Close()
+	hash, err := auth.HashPassword("admin")
+	if err != nil {
+		t.Fatalf("HashPassword: %v", err)
+	}
+	if err := st.EnsureSeedData(hash); err != nil {
+		t.Fatalf("EnsureSeedData: %v", err)
+	}
+	handler, err := New(Options{
+		Config: config.Config{SessionSecret: "test-secret"},
+		Store:  st,
+		Frontend: fstest.MapFS{
+			"frontend/dist/index.html": &fstest.MapFile{Data: []byte("<html></html>")},
+		},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	loginResp := jsonRequest(t, handler, http.MethodPost, "/api/auth/login", "", map[string]any{"username": "admin", "password": "admin"})
+	var login struct {
+		Token string `json:"token"`
+	}
+	decodeRecorder(t, loginResp, &login)
+
+	createResp := jsonRequest(t, handler, http.MethodPost, "/api/admin/providers", login.Token, map[string]any{
+		"id":                   "foundry-claude",
+		"name":                 "Foundry Claude",
+		"type":                 "azure-anthropic",
+		"base_url":             "https://myres.services.ai.azure.com/anthropic",
+		"api_key":              "foundry-secret",
+		"beta_header_prefixes": " interleaved-thinking- ,\nadvisor-tool-\n",
+		"enabled":              true,
+	})
+	if createResp.Code != http.StatusCreated {
+		t.Fatalf("create provider status = %d body = %s", createResp.Code, createResp.Body.String())
+	}
+	stored, err := st.GetProvider(context.Background(), "foundry-claude")
+	if err != nil {
+		t.Fatalf("GetProvider: %v", err)
+	}
+	if stored.BetaHeaderPrefixes != "interleaved-thinking-\nadvisor-tool-" {
+		t.Fatalf("prefixes should be normalized one per line, got %q", stored.BetaHeaderPrefixes)
+	}
+
+	// Switching to a non-Anthropic protocol clears the allowlist.
+	updateResp := jsonRequest(t, handler, http.MethodPut, "/api/admin/providers/foundry-claude", login.Token, map[string]any{
+		"name":                 "Now OpenAI",
+		"type":                 "openai",
+		"base_url":             "https://example.com/v1",
+		"beta_header_prefixes": "interleaved-thinking-",
+		"enabled":              true,
+	})
+	if updateResp.Code != http.StatusOK {
+		t.Fatalf("update provider status = %d body = %s", updateResp.Code, updateResp.Body.String())
+	}
+	stored, err = st.GetProvider(context.Background(), "foundry-claude")
+	if err != nil {
+		t.Fatalf("GetProvider after update: %v", err)
+	}
+	if stored.BetaHeaderPrefixes != "" {
+		t.Fatalf("beta prefixes should be cleared on protocol change: %#v", stored)
+	}
+}
+
 func TestAdminGoogleProviderDefaultsBaseURL(t *testing.T) {
 	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {

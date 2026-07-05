@@ -65,6 +65,7 @@ type adminProviderConfigExport struct {
 	BaseURL         string `json:"base_url"`
 	APIKeyEnv       string `json:"api_key_env,omitempty"`
 	AzureAPIVersion string `json:"azure_api_version,omitempty"`
+	BetaPrefixes    string `json:"beta_header_prefixes,omitempty"`
 	AWSRegion       string `json:"aws_region,omitempty"`
 	AWSAuthMethod   string `json:"aws_auth_method,omitempty"`
 	Enabled         bool   `json:"enabled"`
@@ -258,6 +259,7 @@ func exportProviders(providers []store.Provider) []adminProviderConfigExport {
 			BaseURL:         p.BaseURL,
 			APIKeyEnv:       p.APIKeyEnv,
 			AzureAPIVersion: p.AzureAPIVersion,
+			BetaPrefixes:    p.BetaHeaderPrefixes,
 			AWSRegion:       p.AWSRegion,
 			AWSAuthMethod:   p.AWSAuthMethod,
 			Enabled:         p.Enabled,
