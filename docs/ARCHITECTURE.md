@@ -65,6 +65,10 @@ The most useful thing to internalize is the path a `/v1/chat/completions` or
    - **`bridge_anthropic_openai.go`** — translation layer used when an
      Anthropic-format request routes to an OpenAI-protocol provider:
      request/response/tool-call conversion and the streaming state machine.
+   - **`bridge_openai_anthropic.go`** — the reverse translation layer, used
+     when an OpenAI-format request routes to an Anthropic-protocol provider
+     (`anthropic` or `azure-anthropic`): request/response/tool-call
+     conversion and Anthropic-SSE-to-OpenAI-chunk stream translation.
    - **`bridge_bedrock.go`** — translation to/from Bedrock Converse and
      ConverseStream, including image and tool mapping, plus the Bedrock
      client construction and credential handling.

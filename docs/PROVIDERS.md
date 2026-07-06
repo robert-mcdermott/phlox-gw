@@ -61,13 +61,13 @@ Common OpenAI-compatible services and their base URLs:
 
 Reasoning-family models (the GPT-5 family, o-series) reject the legacy `max_tokens`
 parameter in favor of `max_completion_tokens`, and only accept the default temperature.
-Where Phlox-GW builds the request itself — model health tests, the admin playground, and
-Anthropic-protocol requests translated to an OpenAI-compatible route — it detects this
-rejection and retries automatically with adjusted parameters. Requests to
-`/v1/chat/completions` are passed through faithfully, so OpenAI-protocol clients calling
-a reasoning-model route must send `max_completion_tokens` themselves, exactly as if they
-were calling the upstream directly. This applies to all OpenAI-protocol provider types,
-including Azure OpenAI.
+Phlox-GW detects this rejection and retries automatically with adjusted parameters —
+on model health tests, the admin playground, Anthropic-protocol requests translated to
+an OpenAI-compatible route, and `/v1/chat/completions` requests (streaming and
+non-streaming). The retry is reactive: requests are passed through unchanged first, and
+only a 400 that names the offending parameter triggers a resend, so providers that
+accept the original payload (Ollama, OpenRouter, vLLM, and the like) are unaffected.
+This applies to all OpenAI-protocol provider types, including Azure OpenAI.
 
 ## Anthropic
 
@@ -82,6 +82,16 @@ Phlox-GW appends `/v1/messages` and forwards Anthropic version and beta headers.
 client-facing `/anthropic/v1/messages` endpoint can also translate Anthropic Messages
 requests to OpenAI-compatible and Bedrock routes, including streaming text and tool-use
 events, so Anthropic-protocol clients are not limited to Anthropic providers.
+
+The translation also works in the other direction: `/v1/chat/completions` requests that
+route to an Anthropic-protocol provider (`anthropic` or `azure-anthropic`) are converted
+to Anthropic Messages requests, including streaming, images, and tool calls, so
+OpenAI-protocol clients can use Claude models directly or in Azure AI Foundry. Requests
+that omit `max_tokens` get a default of 4096, since the Messages API requires it. Newer
+Claude models (Opus 4.7+, Sonnet 5) reject the `temperature`, `top_p`, and `top_k`
+sampling parameters that OpenAI clients often hardcode; when the upstream 400 names the
+offending parameter, the gateway retries with it removed, so those clients keep working
+unchanged.
 
 ## Azure OpenAI
 
@@ -121,7 +131,8 @@ their own provider type.
 
 Phlox-GW appends `/v1/messages` and calls the deployment through the Anthropic Messages
 API, so these routes support the same pass-through and streaming behavior as any
-Anthropic-compatible provider.
+Anthropic-compatible provider. They are also reachable from `/v1/chat/completions`
+through the gateway's OpenAI-to-Anthropic request/response translation.
 
 ### Anthropic Beta Header Filtering
 

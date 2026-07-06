@@ -97,7 +97,7 @@ func (s *Server) executeOpenAIPlan(ctx context.Context, candidates []store.Route
 	var last upstreamResult
 	attemptSeq := 0
 	for idx, route := range candidates {
-		if protocol := providerProtocol(route.Provider); protocol != "openai" && protocol != "bedrock" {
+		if protocol := providerProtocol(route.Provider); protocol != "openai" && protocol != "bedrock" && protocol != "anthropic" {
 			continue
 		}
 		if policy.HealthRoutingEnabled {
@@ -118,7 +118,12 @@ func (s *Server) executeOpenAIPlan(ctx context.Context, candidates []store.Route
 		attempts := policy.RetryAttempts + 1
 		for attempt := 0; attempt < attempts; attempt++ {
 			attemptSeq++
-			result := s.callOpenAINonStreaming(ctx, route, raw, policy.RequestTimeout)
+			var result upstreamResult
+			if providerProtocol(route.Provider) == "anthropic" {
+				result = s.callOpenAIViaAnthropicNonStreaming(ctx, route, raw, policy.RequestTimeout)
+			} else {
+				result = s.callOpenAINonStreamingWithParamRetry(ctx, route, raw, policy.RequestTimeout)
+			}
 			s.recordProviderOutcome(ctx, route.Provider.ID, result.Status, result.ErrorText)
 			usage := parseOpenAIUsage(result.Body)
 			if result.Protocol == "openai" {
@@ -137,7 +142,7 @@ func (s *Server) executeOpenAIPlan(ctx context.Context, candidates []store.Route
 		}
 	}
 	if last.Status == 0 {
-		return upstreamResult{Status: http.StatusServiceUnavailable, ErrorText: "no available OpenAI-compatible provider candidate"}
+		return upstreamResult{Status: http.StatusServiceUnavailable, ErrorText: "no available provider candidate for OpenAI-compatible request"}
 	}
 	return last
 }
@@ -192,7 +197,7 @@ func (s *Server) executeAnthropicPlan(ctx context.Context, candidates []store.Ro
 
 func (s *Server) selectOpenAIStreamCandidate(ctx context.Context, candidates []store.RoutedModel, user store.User, key store.APIKey, policy routeReliabilityPolicy) (store.RoutedModel, int, string, string, bool) {
 	for idx, route := range candidates {
-		if protocol := providerProtocol(route.Provider); protocol != "openai" && protocol != "bedrock" {
+		if protocol := providerProtocol(route.Provider); protocol != "openai" && protocol != "bedrock" && protocol != "anthropic" {
 			continue
 		}
 		if policy.HealthRoutingEnabled {
@@ -213,7 +218,7 @@ func (s *Server) selectOpenAIStreamCandidate(ctx context.Context, candidates []s
 		}
 		return route, 0, "", "", true
 	}
-	return store.RoutedModel{}, http.StatusServiceUnavailable, "no available streaming OpenAI-compatible or Bedrock provider candidate", "provider_unavailable", false
+	return store.RoutedModel{}, http.StatusServiceUnavailable, "no available streaming provider candidate for OpenAI-compatible request", "provider_unavailable", false
 }
 
 func (s *Server) selectAnthropicStreamCandidate(ctx context.Context, candidates []store.RoutedModel, user store.User, key store.APIKey, policy routeReliabilityPolicy) (store.RoutedModel, int, string, bool) {
