@@ -72,8 +72,8 @@ func (s *Server) openAIChatCompletions(w http.ResponseWriter, r *http.Request, u
 	}
 	candidates := plan.Candidates
 	route := candidates[0]
-	if protocol := providerProtocol(route.Provider); protocol != "openai" && protocol != "bedrock" {
-		openAIError(w, http.StatusNotImplemented, "model is not on an OpenAI-compatible or Bedrock provider", "unsupported_provider")
+	if protocol := providerProtocol(route.Provider); protocol != "openai" && protocol != "bedrock" && protocol != "anthropic" {
+		openAIError(w, http.StatusNotImplemented, "model is not on a supported provider", "unsupported_provider")
 		return
 	}
 	if blocked, status, reason, typ := s.checkAPIKeyPolicy(r.Context(), key, route); blocked {
@@ -103,6 +103,8 @@ func (s *Server) openAIChatCompletions(w http.ResponseWriter, r *http.Request, u
 		var errText string
 		if selected.Provider.Type == "bedrock" {
 			statusCode, responseBody, errText = s.proxyBedrockOpenAIStream(w, r, selected, raw, guardrails)
+		} else if providerProtocol(selected.Provider) == "anthropic" {
+			statusCode, responseBody, errText = s.proxyOpenAIViaAnthropicStream(w, r, selected, raw, guardrails)
 		} else {
 			attemptRaw := cloneJSONMap(raw)
 			attemptRaw["model"] = selected.Model.ModelID

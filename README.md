@@ -18,7 +18,8 @@ Phlox-GW provides:
 - Optional Entra ID or other OIDC single sign-on.
 - User-owned API keys for programmatic access.
 - OpenAI-compatible gateway endpoints for OpenAI, Ollama, OpenRouter, LiteLLM, vLLM,
-  LM Studio, and other compatible endpoints.
+  LM Studio, and other compatible endpoints, including request/response translation to
+  Anthropic-protocol and Bedrock routes.
 - Anthropic-compatible gateway endpoint support, including request/response translation
   to OpenAI-compatible and Bedrock routes.
 - AWS Bedrock access through OpenAI-compatible and Anthropic-compatible endpoints using
@@ -280,7 +281,9 @@ curl -sS http://127.0.0.1:8080/v1/models \
   -H "Authorization: Bearer pgw-sk-your-key"
 ```
 
-Call an OpenAI-compatible chat route:
+Call an OpenAI-compatible chat route. The route may point to an OpenAI-compatible,
+Anthropic-protocol (including Claude in Azure AI Foundry), or Bedrock provider for both
+streaming and non-streaming requests; the gateway translates the request and response:
 
 ```bash
 curl -sS http://127.0.0.1:8080/v1/chat/completions \

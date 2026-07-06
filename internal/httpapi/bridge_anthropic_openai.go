@@ -20,18 +20,10 @@ func (s *Server) callAnthropicViaOpenAINonStreaming(parent context.Context, rout
 	if err != nil {
 		return upstreamResult{Route: route, Protocol: "anthropic", Status: http.StatusBadRequest, ErrorText: err.Error()}
 	}
-	result := s.callOpenAINonStreaming(parent, route, openAIRaw, timeout)
 	// Anthropic requests always carry max_tokens, which reasoning-family
-	// models reject in favor of max_completion_tokens; retry the authored
-	// payload with adjusted parameters.
-	for attempt := 0; attempt < 2; attempt++ {
-		adjusted, ok := openAIPayloadForUnsupportedParams(openAIRaw, result.Status, string(result.Body))
-		if !ok {
-			break
-		}
-		openAIRaw = adjusted
-		result = s.callOpenAINonStreaming(parent, route, openAIRaw, timeout)
-	}
+	// models reject in favor of max_completion_tokens; the retry helper
+	// resends the authored payload with adjusted parameters.
+	result := s.callOpenAINonStreamingWithParamRetry(parent, route, openAIRaw, timeout)
 	if result.Status < 200 || result.Status >= 300 {
 		return upstreamResult{
 			Route:     route,

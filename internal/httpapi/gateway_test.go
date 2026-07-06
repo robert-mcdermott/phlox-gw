@@ -2252,3 +2252,633 @@ func TestOpenAIChatCompletionsStreamsGoogleWithUsageOption(t *testing.T) {
 		t.Fatalf("unexpected stored usage: %#v", usage)
 	}
 }
+
+func TestOpenAIChatCompletionsTranslatesAnthropicRoute(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer st.Close()
+	user := store.User{
+		ID:           "user_openai_anthropic",
+		Username:     "openai-anthropic-user",
+		Department:   "AI",
+		Role:         "user",
+		PasswordHash: "unused",
+		AuthProvider: "local",
+		IsActive:     true,
+	}
+	if err := st.CreateUser(ctx, user); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	plain, prefix, keyHash, err := auth.NewAPIKey()
+	if err != nil {
+		t.Fatalf("NewAPIKey: %v", err)
+	}
+	if err := st.CreateAPIKey(ctx, store.APIKey{ID: "key_openai_anthropic", UserID: user.ID, Name: "OpenAI Anthropic key", Prefix: prefix, KeyHash: keyHash}); err != nil {
+		t.Fatalf("CreateAPIKey: %v", err)
+	}
+	provider := store.Provider{ID: "claude-direct", Name: "Claude Direct", Type: "anthropic", BaseURL: "http://claude.test", APIKey: "sk-ant-test", Enabled: true}
+	if err := st.CreateProvider(ctx, provider); err != nil {
+		t.Fatalf("CreateProvider: %v", err)
+	}
+	model := store.Model{
+		ID:                   "model_openai_anthropic",
+		ProviderID:           provider.ID,
+		ModelID:              "claude-sonnet-latest",
+		Route:                "anthropic/claude-sonnet",
+		DisplayName:          "Claude Sonnet",
+		InputCostPerMillion:  1,
+		OutputCostPerMillion: 2,
+		SupportsStreaming:    true,
+		Enabled:              true,
+	}
+	if err := st.CreateModel(ctx, model); err != nil {
+		t.Fatalf("CreateModel: %v", err)
+	}
+	upstreamHits := 0
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		upstreamHits++
+		if r.URL.Host != "claude.test" || r.URL.Path != "/v1/messages" {
+			t.Fatalf("unexpected upstream target: %s", r.URL.String())
+		}
+		if r.Header.Get("x-api-key") != "sk-ant-test" {
+			t.Fatalf("missing x-api-key header")
+		}
+		if r.Header.Get("anthropic-version") == "" {
+			t.Fatalf("missing anthropic-version header")
+		}
+		var req map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("upstream decode: %v", err)
+		}
+		if req["model"] != "claude-sonnet-latest" || req["max_tokens"] != float64(64) {
+			t.Fatalf("unexpected upstream request: %#v", req)
+		}
+		if req["system"] != "be brief" {
+			t.Fatalf("unexpected upstream system prompt: %#v", req["system"])
+		}
+		messages, _ := req["messages"].([]any)
+		if len(messages) != 1 {
+			t.Fatalf("upstream messages = %#v", req["messages"])
+		}
+		msg, _ := messages[0].(map[string]any)
+		blocks, _ := msg["content"].([]any)
+		block, _ := blocks[0].(map[string]any)
+		if msg["role"] != "user" || block["type"] != "text" || block["text"] != "ping" {
+			t.Fatalf("unexpected upstream message: %#v", msg)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body: io.NopCloser(strings.NewReader(`{
+				"id":"msg_translate",
+				"type":"message",
+				"role":"assistant",
+				"model":"claude-sonnet-latest",
+				"content":[{"type":"text","text":"pong"}],
+				"stop_reason":"end_turn",
+				"usage":{"input_tokens":4,"output_tokens":2}
+			}`)),
+			Request: r,
+		}, nil
+	})
+	handler, err := New(Options{
+		Config: config.Config{SessionSecret: "test-secret"},
+		Store:  st,
+		Frontend: fstest.MapFS{
+			"frontend/dist/index.html": &fstest.MapFile{Data: []byte("<html></html>")},
+		},
+		HTTPClient: &http.Client{Transport: transport},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	resp := jsonRequest(t, handler, http.MethodPost, "/v1/chat/completions", plain, map[string]any{
+		"model":      model.Route,
+		"max_tokens": 64,
+		"messages": []map[string]string{
+			{"role": "system", "content": "be brief"},
+			{"role": "user", "content": "ping"},
+		},
+	})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", resp.Code, resp.Body.String())
+	}
+	if upstreamHits != 1 {
+		t.Fatalf("upstream hits = %d", upstreamHits)
+	}
+	var body map[string]any
+	decodeRecorder(t, resp, &body)
+	if body["object"] != "chat.completion" || body["model"] != "claude-sonnet-latest" {
+		t.Fatalf("unexpected openai response: %#v", body)
+	}
+	choices, _ := body["choices"].([]any)
+	if len(choices) != 1 {
+		t.Fatalf("unexpected choices: %#v", body["choices"])
+	}
+	choice, _ := choices[0].(map[string]any)
+	message, _ := choice["message"].(map[string]any)
+	if message["role"] != "assistant" || message["content"] != "pong" || choice["finish_reason"] != "stop" {
+		t.Fatalf("unexpected choice: %#v", choice)
+	}
+	usage, err := st.UsageForUser(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("UsageForUser: %v", err)
+	}
+	if usage.Requests != 1 || usage.InputTokens != 4 || usage.OutputTokens != 2 || usage.TotalTokens != 6 || usage.CostUSD != 0.000008 {
+		t.Fatalf("unexpected stored usage: %#v", usage)
+	}
+}
+
+func TestOpenAIChatCompletionsStreamsAzureAnthropicRoute(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer st.Close()
+	user := store.User{
+		ID:           "user_openai_anthropic_stream",
+		Username:     "openai-anthropic-stream-user",
+		Department:   "AI",
+		Role:         "user",
+		PasswordHash: "unused",
+		AuthProvider: "local",
+		IsActive:     true,
+	}
+	if err := st.CreateUser(ctx, user); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	plain, prefix, keyHash, err := auth.NewAPIKey()
+	if err != nil {
+		t.Fatalf("NewAPIKey: %v", err)
+	}
+	if err := st.CreateAPIKey(ctx, store.APIKey{ID: "key_openai_anthropic_stream", UserID: user.ID, Name: "OpenAI Anthropic stream key", Prefix: prefix, KeyHash: keyHash}); err != nil {
+		t.Fatalf("CreateAPIKey: %v", err)
+	}
+	provider := store.Provider{ID: "azure-claude", Name: "Azure Claude", Type: "azure-anthropic", BaseURL: "http://foundry.test", APIKey: "azure-key", Enabled: true}
+	if err := st.CreateProvider(ctx, provider); err != nil {
+		t.Fatalf("CreateProvider: %v", err)
+	}
+	model := store.Model{
+		ID:                   "model_openai_anthropic_stream",
+		ProviderID:           provider.ID,
+		ModelID:              "claude-sonnet-azure",
+		Route:                "azure/claude-sonnet",
+		DisplayName:          "Azure Claude Sonnet",
+		InputCostPerMillion:  1,
+		OutputCostPerMillion: 2,
+		SupportsStreaming:    true,
+		Enabled:              true,
+	}
+	if err := st.CreateModel(ctx, model); err != nil {
+		t.Fatalf("CreateModel: %v", err)
+	}
+	upstreamHits := 0
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		upstreamHits++
+		if r.URL.Host != "foundry.test" || r.URL.Path != "/v1/messages" {
+			t.Fatalf("unexpected upstream target: %s", r.URL.String())
+		}
+		if r.Header.Get("x-api-key") != "azure-key" || r.Header.Get("api-key") != "azure-key" {
+			t.Fatalf("missing azure-anthropic auth headers")
+		}
+		var req map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("upstream decode: %v", err)
+		}
+		if req["model"] != "claude-sonnet-azure" || req["stream"] != true {
+			t.Fatalf("unexpected upstream request: %#v", req)
+		}
+		tools, _ := req["tools"].([]any)
+		if len(tools) != 1 {
+			t.Fatalf("expected one translated tool, got %#v", req["tools"])
+		}
+		tool, _ := tools[0].(map[string]any)
+		if tool["name"] != "Read" || tool["input_schema"] == nil {
+			t.Fatalf("unexpected translated tool: %#v", tool)
+		}
+		streamBody := strings.Join([]string{
+			`event: message_start` + "\n" + `data: {"type":"message_start","message":{"id":"msg_stream","type":"message","role":"assistant","model":"claude-sonnet-azure","content":[],"usage":{"input_tokens":10,"output_tokens":1}}}` + "\n\n",
+			`event: content_block_start` + "\n" + `data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}` + "\n\n",
+			`event: content_block_delta` + "\n" + `data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello "}}` + "\n\n",
+			`event: content_block_stop` + "\n" + `data: {"type":"content_block_stop","index":0}` + "\n\n",
+			`event: content_block_start` + "\n" + `data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_read","name":"Read","input":{}}}` + "\n\n",
+			`event: content_block_delta` + "\n" + `data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"file_path\":\"README.md\"}"}}` + "\n\n",
+			`event: content_block_stop` + "\n" + `data: {"type":"content_block_stop","index":1}` + "\n\n",
+			`event: message_delta` + "\n" + `data: {"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":6}}` + "\n\n",
+			`event: message_stop` + "\n" + `data: {"type":"message_stop"}` + "\n\n",
+		}, "")
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(strings.NewReader(streamBody)),
+			Request:    r,
+		}, nil
+	})
+	handler, err := New(Options{
+		Config: config.Config{SessionSecret: "test-secret"},
+		Store:  st,
+		Frontend: fstest.MapFS{
+			"frontend/dist/index.html": &fstest.MapFile{Data: []byte("<html></html>")},
+		},
+		HTTPClient: &http.Client{Transport: transport},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	resp := jsonRequest(t, handler, http.MethodPost, "/v1/chat/completions", plain, map[string]any{
+		"model":          model.Route,
+		"stream":         true,
+		"stream_options": map[string]any{"include_usage": true},
+		"max_tokens":     32,
+		"messages":       []map[string]string{{"role": "user", "content": "read the readme"}},
+		"tools": []map[string]any{{
+			"type": "function",
+			"function": map[string]any{
+				"name":        "Read",
+				"description": "Read a file",
+				"parameters": map[string]any{
+					"type":       "object",
+					"properties": map[string]any{"file_path": map[string]any{"type": "string"}},
+				},
+			},
+		}},
+	})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", resp.Code, resp.Body.String())
+	}
+	if upstreamHits != 1 {
+		t.Fatalf("upstream hits = %d", upstreamHits)
+	}
+	if got := resp.Header().Get("Content-Type"); !strings.HasPrefix(got, "text/event-stream") {
+		t.Fatalf("content type = %q", got)
+	}
+	body := resp.Body.String()
+	for _, want := range []string{
+		`"role":"assistant"`,
+		`"content":"hello "`,
+		`"id":"toolu_read"`,
+		`"name":"Read"`,
+		`"arguments":"{\"file_path\":\"README.md\"}"`,
+		`"finish_reason":"tool_calls"`,
+		`"prompt_tokens":10`,
+		`"completion_tokens":6`,
+		"data: [DONE]",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("stream body missing %q: %s", want, body)
+		}
+	}
+	usage, err := st.UsageForUser(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("UsageForUser: %v", err)
+	}
+	if usage.Requests != 1 || usage.InputTokens != 10 || usage.OutputTokens != 6 || usage.TotalTokens != 16 || usage.CostUSD != 0.000022 {
+		t.Fatalf("unexpected stored usage: %#v", usage)
+	}
+}
+
+func TestOpenAIChatCompletionsRetriesDeprecatedSamplingParamsOnAnthropicRoute(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer st.Close()
+	user := store.User{
+		ID:           "user_openai_anthropic_retry",
+		Username:     "openai-anthropic-retry-user",
+		Department:   "AI",
+		Role:         "user",
+		PasswordHash: "unused",
+		AuthProvider: "local",
+		IsActive:     true,
+	}
+	if err := st.CreateUser(ctx, user); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	plain, prefix, keyHash, err := auth.NewAPIKey()
+	if err != nil {
+		t.Fatalf("NewAPIKey: %v", err)
+	}
+	if err := st.CreateAPIKey(ctx, store.APIKey{ID: "key_openai_anthropic_retry", UserID: user.ID, Name: "OpenAI Anthropic retry key", Prefix: prefix, KeyHash: keyHash}); err != nil {
+		t.Fatalf("CreateAPIKey: %v", err)
+	}
+	provider := store.Provider{ID: "azure-claude-retry", Name: "Azure Claude Retry", Type: "azure-anthropic", BaseURL: "http://foundry-retry.test", APIKey: "azure-key", Enabled: true}
+	if err := st.CreateProvider(ctx, provider); err != nil {
+		t.Fatalf("CreateProvider: %v", err)
+	}
+	model := store.Model{
+		ID:                   "model_openai_anthropic_retry",
+		ProviderID:           provider.ID,
+		ModelID:              "claude-sonnet-5",
+		Route:                "azure/claude-sonnet-5",
+		DisplayName:          "Azure Claude Sonnet 5",
+		InputCostPerMillion:  1,
+		OutputCostPerMillion: 2,
+		SupportsStreaming:    true,
+		Enabled:              true,
+	}
+	if err := st.CreateModel(ctx, model); err != nil {
+		t.Fatalf("CreateModel: %v", err)
+	}
+	upstreamHits := 0
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		upstreamHits++
+		var req map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("upstream decode: %v", err)
+		}
+		if upstreamHits == 1 {
+			if _, ok := req["temperature"]; !ok {
+				t.Fatalf("first attempt should include temperature: %#v", req)
+			}
+			return &http.Response{
+				StatusCode: http.StatusBadRequest,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader("{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"`temperature` is deprecated for this model.\"}}")),
+				Request:    r,
+			}, nil
+		}
+		if _, ok := req["temperature"]; ok {
+			t.Fatalf("retry should not include temperature: %#v", req)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body: io.NopCloser(strings.NewReader(`{
+				"id":"msg_retry",
+				"type":"message",
+				"role":"assistant",
+				"model":"claude-sonnet-5",
+				"content":[{"type":"text","text":"pong"}],
+				"stop_reason":"end_turn",
+				"usage":{"input_tokens":4,"output_tokens":2}
+			}`)),
+			Request: r,
+		}, nil
+	})
+	handler, err := New(Options{
+		Config: config.Config{SessionSecret: "test-secret"},
+		Store:  st,
+		Frontend: fstest.MapFS{
+			"frontend/dist/index.html": &fstest.MapFile{Data: []byte("<html></html>")},
+		},
+		HTTPClient: &http.Client{Transport: transport},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	resp := jsonRequest(t, handler, http.MethodPost, "/v1/chat/completions", plain, map[string]any{
+		"model":       model.Route,
+		"max_tokens":  64,
+		"temperature": 0.7,
+		"messages":    []map[string]string{{"role": "user", "content": "ping"}},
+	})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", resp.Code, resp.Body.String())
+	}
+	if upstreamHits != 2 {
+		t.Fatalf("upstream hits = %d, want 2 (initial + retry)", upstreamHits)
+	}
+	var body map[string]any
+	decodeRecorder(t, resp, &body)
+	choices, _ := body["choices"].([]any)
+	choice, _ := choices[0].(map[string]any)
+	message, _ := choice["message"].(map[string]any)
+	if message["content"] != "pong" {
+		t.Fatalf("unexpected response after retry: %#v", body)
+	}
+}
+
+func TestOpenAIChatCompletionsRetriesReasoningModelParamsOnPassthrough(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer st.Close()
+	user := store.User{
+		ID:           "user_openai_passthrough_retry",
+		Username:     "openai-passthrough-retry-user",
+		Department:   "AI",
+		Role:         "user",
+		PasswordHash: "unused",
+		AuthProvider: "local",
+		IsActive:     true,
+	}
+	if err := st.CreateUser(ctx, user); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	plain, prefix, keyHash, err := auth.NewAPIKey()
+	if err != nil {
+		t.Fatalf("NewAPIKey: %v", err)
+	}
+	if err := st.CreateAPIKey(ctx, store.APIKey{ID: "key_openai_passthrough_retry", UserID: user.ID, Name: "Passthrough retry key", Prefix: prefix, KeyHash: keyHash}); err != nil {
+		t.Fatalf("CreateAPIKey: %v", err)
+	}
+	provider := store.Provider{ID: "azure-gpt", Name: "Azure GPT", Type: "azure-openai", BaseURL: "http://azure-gpt.test", APIKey: "azure-key", Enabled: true}
+	if err := st.CreateProvider(ctx, provider); err != nil {
+		t.Fatalf("CreateProvider: %v", err)
+	}
+	model := store.Model{
+		ID:                   "model_openai_passthrough_retry",
+		ProviderID:           provider.ID,
+		ModelID:              "gpt-5.5",
+		Route:                "azure/gpt-5.5",
+		DisplayName:          "Azure GPT 5.5",
+		InputCostPerMillion:  1,
+		OutputCostPerMillion: 2,
+		SupportsStreaming:    true,
+		Enabled:              true,
+	}
+	if err := st.CreateModel(ctx, model); err != nil {
+		t.Fatalf("CreateModel: %v", err)
+	}
+	upstreamHits := 0
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		upstreamHits++
+		var req map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("upstream decode: %v", err)
+		}
+		if upstreamHits == 1 {
+			if _, ok := req["max_tokens"]; !ok {
+				t.Fatalf("first attempt should include max_tokens: %#v", req)
+			}
+			return &http.Response{
+				StatusCode: http.StatusBadRequest,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.","type":"invalid_request_error","param":"max_tokens","code":"unsupported_parameter"}}`)),
+				Request:    r,
+			}, nil
+		}
+		if _, ok := req["max_tokens"]; ok {
+			t.Fatalf("retry should not include max_tokens: %#v", req)
+		}
+		if req["max_completion_tokens"] != float64(64) {
+			t.Fatalf("retry should carry max_completion_tokens: %#v", req)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body: io.NopCloser(strings.NewReader(`{
+				"id":"chatcmpl_retry",
+				"object":"chat.completion",
+				"model":"gpt-5.5",
+				"choices":[{"index":0,"message":{"role":"assistant","content":"pong"},"finish_reason":"stop"}],
+				"usage":{"prompt_tokens":4,"completion_tokens":2,"total_tokens":6}
+			}`)),
+			Request: r,
+		}, nil
+	})
+	handler, err := New(Options{
+		Config: config.Config{SessionSecret: "test-secret"},
+		Store:  st,
+		Frontend: fstest.MapFS{
+			"frontend/dist/index.html": &fstest.MapFile{Data: []byte("<html></html>")},
+		},
+		HTTPClient: &http.Client{Transport: transport},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	resp := jsonRequest(t, handler, http.MethodPost, "/v1/chat/completions", plain, map[string]any{
+		"model":      model.Route,
+		"max_tokens": 64,
+		"messages":   []map[string]string{{"role": "user", "content": "ping"}},
+	})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", resp.Code, resp.Body.String())
+	}
+	if upstreamHits != 2 {
+		t.Fatalf("upstream hits = %d, want 2 (initial + retry)", upstreamHits)
+	}
+	var body map[string]any
+	decodeRecorder(t, resp, &body)
+	choices, _ := body["choices"].([]any)
+	choice, _ := choices[0].(map[string]any)
+	message, _ := choice["message"].(map[string]any)
+	if message["content"] != "pong" {
+		t.Fatalf("unexpected response after retry: %#v", body)
+	}
+}
+
+func TestOpenAIChatCompletionsStreamRetriesReasoningModelParamsOnPassthrough(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer st.Close()
+	user := store.User{
+		ID:           "user_openai_passthrough_stream_retry",
+		Username:     "openai-passthrough-stream-retry-user",
+		Department:   "AI",
+		Role:         "user",
+		PasswordHash: "unused",
+		AuthProvider: "local",
+		IsActive:     true,
+	}
+	if err := st.CreateUser(ctx, user); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	plain, prefix, keyHash, err := auth.NewAPIKey()
+	if err != nil {
+		t.Fatalf("NewAPIKey: %v", err)
+	}
+	if err := st.CreateAPIKey(ctx, store.APIKey{ID: "key_openai_passthrough_stream_retry", UserID: user.ID, Name: "Passthrough stream retry key", Prefix: prefix, KeyHash: keyHash}); err != nil {
+		t.Fatalf("CreateAPIKey: %v", err)
+	}
+	provider := store.Provider{ID: "azure-gpt-stream", Name: "Azure GPT Stream", Type: "azure-openai", BaseURL: "http://azure-gpt-stream.test", APIKey: "azure-key", Enabled: true}
+	if err := st.CreateProvider(ctx, provider); err != nil {
+		t.Fatalf("CreateProvider: %v", err)
+	}
+	model := store.Model{
+		ID:                   "model_openai_passthrough_stream_retry",
+		ProviderID:           provider.ID,
+		ModelID:              "gpt-5.5",
+		Route:                "azure/gpt-5.5-stream",
+		DisplayName:          "Azure GPT 5.5 Stream",
+		InputCostPerMillion:  1,
+		OutputCostPerMillion: 2,
+		SupportsStreaming:    true,
+		Enabled:              true,
+	}
+	if err := st.CreateModel(ctx, model); err != nil {
+		t.Fatalf("CreateModel: %v", err)
+	}
+	upstreamHits := 0
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		upstreamHits++
+		var req map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("upstream decode: %v", err)
+		}
+		if upstreamHits == 1 {
+			return &http.Response{
+				StatusCode: http.StatusBadRequest,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(`{"error":{"message":"Unsupported parameter: 'max_tokens' is not supported with this model. Use 'max_completion_tokens' instead.","type":"invalid_request_error","param":"max_tokens","code":"unsupported_parameter"}}`)),
+				Request:    r,
+			}, nil
+		}
+		if _, ok := req["max_tokens"]; ok {
+			t.Fatalf("retry should not include max_tokens: %#v", req)
+		}
+		if req["stream"] != true {
+			t.Fatalf("retry should preserve stream flag: %#v", req)
+		}
+		streamBody := strings.Join([]string{
+			`data: {"id":"chatcmpl_stream_retry","model":"gpt-5.5","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}` + "\n\n",
+			`data: {"id":"chatcmpl_stream_retry","model":"gpt-5.5","choices":[{"index":0,"delta":{"content":"pong"},"finish_reason":null}]}` + "\n\n",
+			`data: {"id":"chatcmpl_stream_retry","model":"gpt-5.5","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":2,"total_tokens":6}}` + "\n\n",
+			"data: [DONE]\n\n",
+		}, "")
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(strings.NewReader(streamBody)),
+			Request:    r,
+		}, nil
+	})
+	handler, err := New(Options{
+		Config: config.Config{SessionSecret: "test-secret"},
+		Store:  st,
+		Frontend: fstest.MapFS{
+			"frontend/dist/index.html": &fstest.MapFile{Data: []byte("<html></html>")},
+		},
+		HTTPClient: &http.Client{Transport: transport},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	resp := jsonRequest(t, handler, http.MethodPost, "/v1/chat/completions", plain, map[string]any{
+		"model":      model.Route,
+		"stream":     true,
+		"max_tokens": 64,
+		"messages":   []map[string]string{{"role": "user", "content": "ping"}},
+	})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", resp.Code, resp.Body.String())
+	}
+	if upstreamHits != 2 {
+		t.Fatalf("upstream hits = %d, want 2 (initial + retry)", upstreamHits)
+	}
+	body := resp.Body.String()
+	for _, want := range []string{`"content":"pong"`, `"finish_reason":"stop"`, "data: [DONE]"} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("stream body missing %q: %s", want, body)
+		}
+	}
+	usage, err := st.UsageForUser(ctx, user.ID)
+	if err != nil {
+		t.Fatalf("UsageForUser: %v", err)
+	}
+	if usage.Requests != 1 || usage.InputTokens != 4 || usage.OutputTokens != 2 {
+		t.Fatalf("unexpected stored usage: %#v", usage)
+	}
+}
