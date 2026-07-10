@@ -1335,7 +1335,7 @@ function guardrailPolicyView() {
       <div class="guardrail-policy-grid">
         <label class="form-field"><span>Input action</span><select id="guard-input-action">${guardrailActionOptions(p.input_action)}</select></label>
         <label class="form-field"><span>Output action</span><select id="guard-output-action">${guardrailActionOptions(p.output_action)}</select><small class="field-help">Output block rejects streaming requests and blocks non-streaming responses after provider return.</small></label>
-        <label class="form-field guardrail-redaction"><span>Redaction text</span><input id="guard-redaction-text" value="${attr(p.redaction_text || '[REDACTED]')}" /></label>
+        <label class="form-field guardrail-redaction"><span>Redaction text</span><input id="guard-redaction-text" value="${attr(p.redaction_text || '[REDACTED]')}" /><small class="field-help">Fallback replacement for custom patterns without their own replacement text. Built-in patterns use the tokens shown below.</small></label>
       </div>
       ${guardrailBuiltInPatterns(p)}
       ${guardrailCustomPatterns(p)}
@@ -1357,7 +1357,7 @@ function guardrailBuiltInPatterns(p) {
       <div class="guardrail-section-heading">
         <div>
           <div class="guardrail-group-title">Built-in patterns</div>
-          <p>Email, phone, SSN, credit card, and API key detectors. Info icons show the active regex.</p>
+          <p>Email, phone, SSN, credit card, and API key detectors. Info icons show the active regex; matches are redacted with the token shown.</p>
         </div>
       </div>
       <div class="guardrail-pattern-list">
