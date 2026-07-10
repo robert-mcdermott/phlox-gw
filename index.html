@@ -1,0 +1,754 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Phlox-GW — The Enterprise LLM Gateway Without the Enterprise Paywall</title>
+<meta name="description" content="Phlox-GW is a fully open-source, self-hosted LLM gateway: SSO, cost accounting, budgets, rate limits, guardrails, clustering, and protocol translation for OpenAI, Anthropic, Azure, Bedrock, Gemini, and any OpenAI-compatible provider. Apache-2.0. Free forever.">
+<meta property="og:title" content="Phlox-GW — The Enterprise LLM Gateway Without the Enterprise Paywall">
+<meta property="og:description" content="One self-hosted gateway for every LLM provider. SSO, chargeback, budget enforcement, guardrails, and clustering — every feature open source, free forever.">
+<meta property="og:type" content="website">
+<meta property="og:image" content="https://robert-mcdermott.github.io/phlox-gw/images/operations.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Cg transform='translate(50 50)'%3E%3Cg fill='%23c084fc'%3E%3Cellipse cx='0' cy='-24' rx='13' ry='22'/%3E%3Cellipse cx='0' cy='-24' rx='13' ry='22' transform='rotate(72)'/%3E%3Cellipse cx='0' cy='-24' rx='13' ry='22' transform='rotate(144)'/%3E%3Cellipse cx='0' cy='-24' rx='13' ry='22' transform='rotate(216)'/%3E%3Cellipse cx='0' cy='-24' rx='13' ry='22' transform='rotate(288)'/%3E%3C/g%3E%3Ccircle r='11' fill='%237c3aed'/%3E%3C/g%3E%3C/svg%3E">
+<style>
+:root{
+  --bg:#0b0713;
+  --bg-soft:#120c1e;
+  --bg-card:#171028;
+  --bg-card-2:#1c1332;
+  --border:rgba(192,132,252,.14);
+  --border-strong:rgba(192,132,252,.3);
+  --text:#ece7f6;
+  --text-dim:#a89cc4;
+  --text-faint:#7a6f96;
+  --violet:#a855f7;
+  --violet-bright:#c084fc;
+  --violet-deep:#7c3aed;
+  --pink:#e879f9;
+  --green:#4ade80;
+  --amber:#fbbf24;
+  --mono:'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
+  --radius:14px;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth;scroll-padding-top:84px}
+body{
+  font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+  background:var(--bg);color:var(--text);line-height:1.6;
+  overflow-x:hidden;
+}
+::selection{background:rgba(168,85,247,.4)}
+a{color:var(--violet-bright);text-decoration:none}
+img{max-width:100%;display:block}
+.container{max-width:1180px;margin:0 auto;padding:0 24px}
+
+/* ---------- nav ---------- */
+header{
+  position:sticky;top:0;z-index:100;
+  background:rgba(11,7,19,.82);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
+  border-bottom:1px solid var(--border);
+}
+.nav{display:flex;align-items:center;justify-content:space-between;height:64px}
+.brand{display:flex;align-items:center;gap:10px;color:var(--text);font-weight:700;font-size:1.1rem;letter-spacing:-.01em;white-space:nowrap}
+.brand svg{width:30px;height:30px}
+.brand .tag{font-size:.66rem;font-weight:600;color:var(--violet-bright);border:1px solid var(--border-strong);border-radius:99px;padding:2px 9px;margin-left:2px;letter-spacing:.06em;text-transform:uppercase}
+.nav-links{display:flex;align-items:center;gap:26px}
+.nav-links a{color:var(--text-dim);font-size:.92rem;font-weight:500;transition:color .15s}
+.nav-links a:hover{color:var(--text)}
+.btn{
+  display:inline-flex;align-items:center;gap:8px;
+  border-radius:10px;padding:10px 20px;font-weight:600;font-size:.95rem;
+  transition:transform .15s,box-shadow .15s,background .15s;cursor:pointer;border:none;
+}
+.btn-primary{
+  background:linear-gradient(135deg,#a855f7,#7c3aed);color:#fff;
+  box-shadow:0 4px 24px rgba(168,85,247,.35);
+}
+.btn-primary:hover{transform:translateY(-1px);box-shadow:0 6px 32px rgba(168,85,247,.5)}
+.btn-ghost{
+  background:rgba(192,132,252,.08);color:var(--text);
+  border:1px solid var(--border-strong);
+}
+.btn-ghost:hover{background:rgba(192,132,252,.16)}
+.btn-sm{padding:8px 16px;font-size:.88rem}
+.gh-icon{width:18px;height:18px;fill:currentColor}
+.nav .btn{white-space:nowrap}
+@media(max-width:820px){.nav-links a:not(.btn){display:none}}
+@media(max-width:520px){.brand .tag{display:none}}
+
+/* ---------- hero ---------- */
+.hero{position:relative;padding:96px 0 40px;text-align:center}
+.hero::before{
+  content:"";position:absolute;inset:-200px 0 auto 0;height:640px;pointer-events:none;
+  background:
+    radial-gradient(600px 340px at 50% 0%,rgba(124,58,237,.32),transparent 70%),
+    radial-gradient(900px 420px at 80% 10%,rgba(232,121,249,.10),transparent 70%),
+    radial-gradient(700px 380px at 15% 15%,rgba(168,85,247,.14),transparent 70%);
+}
+.hero>*{position:relative}
+.hero-badge{
+  display:inline-flex;align-items:center;gap:8px;
+  font-size:.82rem;font-weight:600;color:var(--violet-bright);
+  background:rgba(168,85,247,.1);border:1px solid var(--border-strong);
+  border-radius:99px;padding:7px 16px;margin-bottom:28px;
+}
+.hero-badge .dot{width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 8px var(--green)}
+h1{
+  font-size:clamp(2.3rem,5.4vw,4rem);font-weight:800;line-height:1.08;letter-spacing:-.03em;
+  max-width:900px;margin:0 auto 24px;
+}
+h1 .grad{
+  background:linear-gradient(100deg,#c084fc 10%,#e879f9 50%,#a855f7 90%);
+  -webkit-background-clip:text;background-clip:text;color:transparent;
+}
+.hero-sub{
+  font-size:clamp(1.02rem,1.6vw,1.22rem);color:var(--text-dim);
+  max-width:780px;margin:0 auto 36px;
+}
+.hero-sub strong{color:var(--text);font-weight:600}
+.hero-ctas{display:flex;gap:14px;justify-content:center;flex-wrap:wrap;margin-bottom:22px}
+.hero-note{font-size:.85rem;color:var(--text-faint);font-family:var(--mono)}
+.hero-shot{margin:56px auto 0;max-width:1080px;position:relative}
+.hero-shot::after{
+  content:"";position:absolute;inset:auto 8% -40px 8%;height:80px;
+  background:radial-gradient(50% 100% at 50% 0,rgba(168,85,247,.28),transparent);
+  filter:blur(20px);z-index:-1;
+}
+
+/* browser frame */
+.frame{
+  border-radius:var(--radius);overflow:hidden;
+  border:1px solid var(--border-strong);
+  background:var(--bg-card);
+  box-shadow:0 24px 80px rgba(0,0,0,.55),0 0 0 1px rgba(255,255,255,.03) inset;
+}
+.frame-bar{
+  display:flex;align-items:center;gap:8px;height:38px;padding:0 14px;
+  background:linear-gradient(180deg,#241a3d,#1b1230);border-bottom:1px solid var(--border);
+}
+.frame-bar i{width:11px;height:11px;border-radius:50%;display:block}
+.frame-bar i:nth-child(1){background:#f87171}.frame-bar i:nth-child(2){background:#fbbf24}.frame-bar i:nth-child(3){background:#4ade80}
+.frame-bar span{
+  margin-left:12px;font-family:var(--mono);font-size:.72rem;color:var(--text-faint);
+  background:rgba(0,0,0,.3);border-radius:6px;padding:3px 12px;
+}
+.frame img{cursor:zoom-in}
+
+/* ---------- provider strip ---------- */
+.strip{padding:64px 0 30px}
+.strip-label{text-align:center;font-size:.8rem;font-weight:600;letter-spacing:.14em;text-transform:uppercase;color:var(--text-faint);margin-bottom:24px}
+.chips{display:flex;flex-wrap:wrap;justify-content:center;gap:12px;max-width:940px;margin:0 auto}
+.chip{
+  font-family:var(--mono);font-size:.86rem;font-weight:500;color:var(--text-dim);
+  border:1px solid var(--border);border-radius:99px;padding:9px 18px;
+  background:rgba(192,132,252,.04);transition:all .2s;
+}
+.chip:hover{color:var(--violet-bright);border-color:var(--border-strong);background:rgba(168,85,247,.1)}
+.chip.local{border-style:dashed}
+
+/* ---------- sections ---------- */
+section{padding:88px 0}
+.sec-head{max-width:760px;margin:0 auto 56px;text-align:center}
+.eyebrow{
+  display:inline-block;font-size:.78rem;font-weight:700;letter-spacing:.12em;text-transform:uppercase;
+  color:var(--violet-bright);margin-bottom:14px;
+}
+h2{font-size:clamp(1.7rem,3.4vw,2.5rem);font-weight:800;letter-spacing:-.02em;line-height:1.15;margin-bottom:16px}
+.sec-head p{color:var(--text-dim);font-size:1.05rem}
+
+/* pledge / comparison */
+.pledge{background:linear-gradient(180deg,var(--bg-soft),var(--bg));border-top:1px solid var(--border);border-bottom:1px solid var(--border)}
+.compare{
+  max-width:860px;margin:0 auto;border:1px solid var(--border-strong);border-radius:var(--radius);
+  overflow:hidden;background:var(--bg-card);
+}
+.compare table{width:100%;border-collapse:collapse;font-size:.95rem}
+.compare th,.compare td{padding:15px 22px;text-align:left;border-bottom:1px solid var(--border)}
+.compare tr:last-child td{border-bottom:none}
+.compare thead th{background:rgba(124,58,237,.14);font-size:.82rem;letter-spacing:.06em;text-transform:uppercase;color:var(--text-dim)}
+.compare thead th:first-child{width:44%}
+.compare td:first-child{font-weight:600}
+.compare .no{color:var(--amber);font-size:.9rem}
+.compare .yes{color:var(--green);font-weight:600;font-size:.9rem}
+.compare .yes::before{content:"✓  ";font-weight:800}
+.pledge-note{max-width:860px;margin:26px auto 0;text-align:center;color:var(--text-dim);font-size:.98rem}
+.pledge-note strong{color:var(--text)}
+
+/* feature grid */
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:18px}
+@media(max-width:940px){.grid{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:620px){.grid{grid-template-columns:1fr}}
+.card{
+  background:linear-gradient(180deg,var(--bg-card-2),var(--bg-card));
+  border:1px solid var(--border);border-radius:var(--radius);
+  padding:26px 24px;transition:border-color .2s,transform .2s;
+}
+.card:hover{border-color:var(--border-strong);transform:translateY(-2px)}
+.card .ico{
+  width:42px;height:42px;border-radius:11px;display:flex;align-items:center;justify-content:center;
+  background:linear-gradient(135deg,rgba(168,85,247,.22),rgba(124,58,237,.12));
+  border:1px solid var(--border-strong);margin-bottom:16px;font-size:1.2rem;
+}
+.card h3{font-size:1.06rem;font-weight:700;margin-bottom:8px;letter-spacing:-.01em}
+.card p{font-size:.92rem;color:var(--text-dim)}
+.card code{font-family:var(--mono);font-size:.8em;color:var(--violet-bright);background:rgba(168,85,247,.1);padding:1px 6px;border-radius:5px}
+
+/* feature rows (image + text) */
+.feat-row{
+  display:grid;grid-template-columns:1fr 1.15fr;gap:56px;align-items:center;margin-bottom:96px;
+}
+.feat-row:last-child{margin-bottom:0}
+.feat-row.rev .feat-copy{order:2}
+.feat-row.rev .feat-media{order:1}
+@media(max-width:900px){
+  .feat-row,.feat-row.rev{grid-template-columns:1fr;gap:28px}
+  .feat-row.rev .feat-copy{order:1}.feat-row.rev .feat-media{order:2}
+}
+.feat-copy .eyebrow{margin-bottom:10px}
+.feat-copy h3{font-size:clamp(1.4rem,2.4vw,1.9rem);font-weight:800;letter-spacing:-.02em;line-height:1.2;margin-bottom:14px}
+.feat-copy>p{color:var(--text-dim);margin-bottom:18px}
+.feat-list{list-style:none}
+.feat-list li{
+  position:relative;padding-left:28px;margin-bottom:11px;font-size:.95rem;color:var(--text-dim);
+}
+.feat-list li strong{color:var(--text);font-weight:600}
+.feat-list li::before{
+  content:"";position:absolute;left:0;top:7px;width:14px;height:14px;border-radius:5px;
+  background:linear-gradient(135deg,var(--violet),var(--violet-deep));
+  mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M13.5 4.5 6.75 11.25 2.5 7' fill='none' stroke='black' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center/contain no-repeat;
+  -webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M13.5 4.5 6.75 11.25 2.5 7' fill='none' stroke='black' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center/contain no-repeat;
+}
+
+/* protocol diagram */
+.proto{background:linear-gradient(180deg,var(--bg-soft),var(--bg));border-top:1px solid var(--border);border-bottom:1px solid var(--border)}
+.diagram{
+  display:grid;grid-template-columns:1fr auto 1fr;gap:0;align-items:center;
+  max-width:1020px;margin:0 auto 56px;
+}
+@media(max-width:860px){.diagram{grid-template-columns:1fr;gap:18px;justify-items:center}.d-arrows{transform:rotate(90deg);height:60px}}
+.d-col{display:flex;flex-direction:column;gap:12px}
+.d-node{
+  background:var(--bg-card);border:1px solid var(--border);border-radius:12px;
+  padding:13px 18px;font-family:var(--mono);font-size:.84rem;color:var(--text-dim);
+  display:flex;align-items:center;gap:10px;min-width:230px;
+}
+.d-node b{color:var(--text);font-weight:600}
+.d-node .pin{width:8px;height:8px;border-radius:50%;background:var(--violet-bright);flex:none;box-shadow:0 0 8px rgba(192,132,252,.8)}
+.d-node .pin.g{background:var(--green);box-shadow:0 0 8px rgba(74,222,128,.8)}
+.d-hub{
+  margin:0 34px;text-align:center;position:relative;
+  background:linear-gradient(160deg,#2a1b4d,#1a1033);
+  border:1px solid var(--border-strong);border-radius:18px;padding:28px 30px;
+  box-shadow:0 0 60px rgba(124,58,237,.35);
+}
+.d-hub svg{width:44px;height:44px;margin:0 auto 10px}
+.d-hub b{display:block;font-size:1.02rem;letter-spacing:-.01em}
+.d-hub span{display:block;font-family:var(--mono);font-size:.7rem;color:var(--violet-bright);margin-top:6px}
+.d-hub em{display:block;font-style:normal;font-size:.74rem;color:var(--text-faint);margin-top:10px;max-width:190px}
+.proto-table-wrap{max-width:860px;margin:0 auto;overflow-x:auto;border:1px solid var(--border-strong);border-radius:var(--radius);background:var(--bg-card)}
+.proto-table{width:100%;border-collapse:collapse;font-size:.9rem;min-width:560px}
+.proto-table th,.proto-table td{padding:13px 20px;border-bottom:1px solid var(--border);text-align:center}
+.proto-table tr:last-child td{border-bottom:none}
+.proto-table thead th{background:rgba(124,58,237,.14);font-size:.78rem;letter-spacing:.06em;text-transform:uppercase;color:var(--text-dim)}
+.proto-table td:first-child,.proto-table th:first-child{text-align:left;font-family:var(--mono);font-size:.84rem}
+.proto-table .ok{color:var(--green);font-weight:700}
+.proto-caption{max-width:860px;margin:18px auto 0;text-align:center;font-size:.88rem;color:var(--text-faint)}
+
+/* gallery */
+.gallery{display:grid;grid-template-columns:repeat(2,1fr);gap:22px}
+@media(max-width:760px){.gallery{grid-template-columns:1fr}}
+.shot{cursor:zoom-in}
+.shot figcaption{
+  margin-top:12px;font-size:.9rem;color:var(--text-dim);text-align:center;
+}
+.shot figcaption b{color:var(--text);font-weight:600}
+
+/* quickstart */
+.qs{background:linear-gradient(180deg,var(--bg-soft),var(--bg));border-top:1px solid var(--border);border-bottom:1px solid var(--border)}
+.qs-grid{display:grid;grid-template-columns:1fr 1fr;gap:26px;align-items:start}
+@media(max-width:900px){.qs-grid{grid-template-columns:1fr}}
+.term{
+  background:#0d0817;border:1px solid var(--border-strong);border-radius:var(--radius);
+  overflow:hidden;box-shadow:0 16px 48px rgba(0,0,0,.4);
+}
+.term-bar{display:flex;align-items:center;gap:8px;height:36px;padding:0 14px;background:#1a1130;border-bottom:1px solid var(--border)}
+.term-bar i{width:10px;height:10px;border-radius:50%;display:block}
+.term-bar i:nth-child(1){background:#f87171}.term-bar i:nth-child(2){background:#fbbf24}.term-bar i:nth-child(3){background:#4ade80}
+.term-bar span{margin-left:8px;font-family:var(--mono);font-size:.72rem;color:var(--text-faint)}
+.term pre{
+  padding:20px 22px;font-family:var(--mono);font-size:.82rem;line-height:1.7;
+  overflow-x:auto;color:#d8cfef;
+}
+.term .c{color:#6d6390}.term .p{color:#c084fc}.term .s{color:#8be9a8}.term .k{color:#e879f9}
+.qs-steps{list-style:none;counter-reset:step}
+.qs-steps li{
+  counter-increment:step;position:relative;padding:0 0 22px 52px;
+}
+.qs-steps li::before{
+  content:counter(step);position:absolute;left:0;top:0;
+  width:34px;height:34px;border-radius:10px;display:flex;align-items:center;justify-content:center;
+  background:linear-gradient(135deg,rgba(168,85,247,.25),rgba(124,58,237,.12));
+  border:1px solid var(--border-strong);color:var(--violet-bright);
+  font-weight:700;font-size:.95rem;font-family:var(--mono);
+}
+.qs-steps li:not(:last-child)::after{
+  content:"";position:absolute;left:17px;top:40px;bottom:4px;width:1px;
+  background:linear-gradient(180deg,var(--border-strong),transparent);
+}
+.qs-steps h4{font-size:1rem;font-weight:700;margin-bottom:4px}
+.qs-steps p{font-size:.9rem;color:var(--text-dim)}
+.qs-steps code{font-family:var(--mono);font-size:.82em;color:var(--violet-bright);background:rgba(168,85,247,.1);padding:1px 6px;border-radius:5px}
+
+/* deploy stats */
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:18px;margin-top:48px}
+@media(max-width:900px){.stats{grid-template-columns:repeat(2,1fr)}}
+.stat{
+  text-align:center;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);padding:26px 16px;
+}
+.stat b{display:block;font-size:1.5rem;font-weight:800;letter-spacing:-.02em;
+  background:linear-gradient(100deg,#c084fc,#e879f9);-webkit-background-clip:text;background-clip:text;color:transparent}
+.stat span{font-size:.84rem;color:var(--text-dim)}
+
+/* CTA */
+.cta{position:relative;text-align:center;padding:110px 0}
+.cta::before{
+  content:"";position:absolute;inset:0;pointer-events:none;
+  background:radial-gradient(640px 320px at 50% 60%,rgba(124,58,237,.3),transparent 70%);
+}
+.cta>*{position:relative}
+.cta h2{margin-bottom:14px}
+.cta p{color:var(--text-dim);max-width:620px;margin:0 auto 34px}
+
+/* footer */
+footer{border-top:1px solid var(--border);padding:44px 0;background:var(--bg-soft)}
+.foot{display:flex;justify-content:space-between;align-items:center;gap:20px;flex-wrap:wrap}
+.foot .brand{font-size:1rem}
+.foot-links{display:flex;gap:24px;flex-wrap:wrap}
+.foot-links a{color:var(--text-dim);font-size:.9rem}
+.foot-links a:hover{color:var(--text)}
+.foot small{color:var(--text-faint);font-size:.82rem;width:100%;text-align:center;margin-top:10px}
+
+/* lightbox */
+.lightbox{
+  position:fixed;inset:0;z-index:200;display:none;align-items:center;justify-content:center;
+  background:rgba(6,3,12,.92);backdrop-filter:blur(6px);padding:4vh 3vw;cursor:zoom-out;
+}
+.lightbox.open{display:flex}
+.lightbox img{max-width:100%;max-height:92vh;border-radius:10px;border:1px solid var(--border-strong);box-shadow:0 30px 100px rgba(0,0,0,.7)}
+
+/* reveal */
+.reveal{opacity:0;transform:translateY(22px);transition:opacity .6s ease,transform .6s ease}
+.reveal.in{opacity:1;transform:none}
+@media(prefers-reduced-motion:reduce){.reveal{opacity:1;transform:none;transition:none}html{scroll-behavior:auto}}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="container nav">
+    <a class="brand" href="#top">
+      <svg viewBox="0 0 100 100" aria-hidden="true"><g transform="translate(50 50)"><g fill="#c084fc"><ellipse cx="0" cy="-24" rx="13" ry="22"/><ellipse cx="0" cy="-24" rx="13" ry="22" transform="rotate(72)"/><ellipse cx="0" cy="-24" rx="13" ry="22" transform="rotate(144)"/><ellipse cx="0" cy="-24" rx="13" ry="22" transform="rotate(216)"/><ellipse cx="0" cy="-24" rx="13" ry="22" transform="rotate(288)"/></g><circle r="11" fill="#7c3aed"/></g></svg>
+      Phlox-GW <span class="tag">LLM Gateway</span>
+    </a>
+    <nav class="nav-links">
+      <a href="#pledge">Why Free</a>
+      <a href="#features">Features</a>
+      <a href="#protocols">Protocols</a>
+      <a href="#governance">Governance</a>
+      <a href="#quickstart">Quick Start</a>
+      <a class="btn btn-ghost btn-sm" href="https://github.com/robert-mcdermott/phlox-gw" target="_blank" rel="noopener">
+        <svg class="gh-icon" viewBox="0 0 16 16"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+        GitHub
+      </a>
+    </nav>
+  </div>
+</header>
+
+<main id="top">
+
+<!-- ============ HERO ============ -->
+<section class="hero" style="padding-top:88px">
+  <div class="container">
+    <div class="hero-badge"><span class="dot"></span> 100% open source &nbsp;·&nbsp; Apache-2.0 &nbsp;·&nbsp; No enterprise tier. Ever.</div>
+    <h1>The enterprise LLM gateway<br><span class="grad">without the enterprise paywall</span></h1>
+    <p class="hero-sub">
+      Phlox-GW is a self-hosted gateway and governance layer between your users, apps, and every LLM provider —
+      cloud or local. <strong>SSO, cost accounting, budget enforcement, guardrails, audit logs, and clustering</strong> —
+      the features other gateways lock behind enterprise licenses are free here, forever.
+    </p>
+    <div class="hero-ctas">
+      <a class="btn btn-primary" href="https://github.com/robert-mcdermott/phlox-gw" target="_blank" rel="noopener">
+        <svg class="gh-icon" viewBox="0 0 16 16"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+        View on GitHub
+      </a>
+      <a class="btn btn-ghost" href="#quickstart">Get running in minutes</a>
+    </div>
+    <div class="hero-note">single Go binary · SQLite or Postgres · macOS / Linux / Windows</div>
+    <figure class="hero-shot reveal">
+      <div class="frame">
+        <div class="frame-bar"><i></i><i></i><i></i><span>phlox-gw · Admin → Operations</span></div>
+        <img src="images/operations.png" alt="Phlox-GW operations dashboard showing 30-day cost, token, request, error, and latency trends" data-zoom>
+      </div>
+    </figure>
+  </div>
+</section>
+
+<!-- ============ PROVIDER STRIP ============ -->
+<div class="strip">
+  <div class="container">
+    <div class="strip-label">One gateway · every provider · cloud or local</div>
+    <div class="chips">
+      <span class="chip">OpenAI</span>
+      <span class="chip">Anthropic</span>
+      <span class="chip">Azure OpenAI</span>
+      <span class="chip">Azure AI Foundry (Claude)</span>
+      <span class="chip">AWS Bedrock</span>
+      <span class="chip">Google Gemini</span>
+      <span class="chip">OpenRouter</span>
+      <span class="chip">LiteLLM</span>
+      <span class="chip local">Ollama</span>
+      <span class="chip local">vLLM</span>
+      <span class="chip local">LM Studio</span>
+      <span class="chip local">any OpenAI-compatible API</span>
+    </div>
+  </div>
+</div>
+
+<!-- ============ PLEDGE ============ -->
+<section class="pledge" id="pledge">
+  <div class="container">
+    <div class="sec-head reveal">
+      <span class="eyebrow">The open-source pledge</span>
+      <h2>“Open source” shouldn’t come with an asterisk</h2>
+      <p>Most open-source LLM gateways publish the proxy and paywall the governance. The features an
+      organization actually needs to run LLMs responsibly end up behind an enterprise license.
+      Phlox-GW ships everything under Apache-2.0.</p>
+    </div>
+    <div class="compare reveal">
+      <table>
+        <thead><tr><th>Capability</th><th>Typical “open-source” gateways</th><th>Phlox-GW</th></tr></thead>
+        <tbody>
+          <tr><td>SSO (Entra ID / OIDC)</td><td class="no">Enterprise license</td><td class="yes">Free, built in</td></tr>
+          <tr><td>Audit logs</td><td class="no">Enterprise license</td><td class="yes">Free, built in</td></tr>
+          <tr><td>Guardrails &amp; PII redaction</td><td class="no">Enterprise license</td><td class="yes">Free, built in</td></tr>
+          <tr><td>Prometheus metrics &amp; OTel traces</td><td class="no">Enterprise license</td><td class="yes">Free, built in</td></tr>
+          <tr><td>Clustering / HA</td><td class="no">Enterprise license</td><td class="yes">Free, built in</td></tr>
+          <tr><td>Budgets &amp; departmental chargeback</td><td class="no">Enterprise license / SaaS tier</td><td class="yes">Free, built in</td></tr>
+          <tr><td>License</td><td class="no">Open core + commercial</td><td class="yes">Apache-2.0, all of it</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="pledge-note"><strong>This is a project principle, not a launch promo:</strong> every feature ships fully
+    open source under Apache-2.0. Capabilities that comparable products gate behind enterprise licenses stay free here — permanently.</p>
+  </div>
+</section>
+
+<!-- ============ FEATURE GRID ============ -->
+<section id="features">
+  <div class="container">
+    <div class="sec-head reveal">
+      <span class="eyebrow">Full-featured by default</span>
+      <h2>Everything between your users and your models</h2>
+      <p>Publish model routes, control who can use them, attach prices, enforce budgets and rate limits,
+      and report usage for chargeback — from one admin console.</p>
+    </div>
+    <div class="grid">
+      <div class="card reveal"><div class="ico">🔐</div><h3>Entra ID &amp; OIDC SSO</h3><p>Browser SSO with any OIDC identity provider. Auto-provisioning on first login, department claim mapping for chargeback, and group-based admin role mapping. Local accounts work too.</p></div>
+      <div class="card reveal"><div class="ico">💰</div><h3>Cost accounting &amp; chargeback</h3><p>Per-user and per-department monthly chargeback from an append-only usage ledger, with per-model USD pricing per million tokens. CSV download for finance, JSON API for automation.</p></div>
+      <div class="card reveal"><div class="ico">⛔</div><h3>Budgets with real enforcement</h3><p>Monthly budgets per user, department, and API key with hard-limit enforcement — not just alerts. Burn-down views show spend, remaining budget, and projected month-end run rate.</p></div>
+      <div class="card reveal"><div class="ico">⏱️</div><h3>Rate limits at every scope</h3><p>RPM and TPM controls by user, department, provider, model, and API key. Blunt one noisy script without throttling the whole org.</p></div>
+      <div class="card reveal"><div class="ico">🔀</div><h3>Smart routing &amp; failover</h3><p>Stable route aliases like <code>chat/default</code>, ordered fallbacks, retries, per-attempt timeouts, health-aware routing, and weighted traffic splits — swap providers without touching clients.</p></div>
+      <div class="card reveal"><div class="ico">🛡️</div><h3>Built-in guardrails</h3><p>Detect emails, phone numbers, SSNs, credit cards, API keys, and custom regex patterns. Redact or block on input and output, with an admin preview tool for testing policies before saving.</p></div>
+      <div class="card reveal"><div class="ico">🔑</div><h3>User-owned API keys</h3><p>Self-service key minting, rotation, and expiration. Admin key inventory with per-key model allowlists, budgets, and rate limits.</p></div>
+      <div class="card reveal"><div class="ico">📈</div><h3>Observability included</h3><p>Operations dashboards for cost, tokens, requests, errors, and latency, plus Prometheus metrics and OpenTelemetry traces for your existing monitoring stack.</p></div>
+      <div class="card reveal"><div class="ico">📜</div><h3>Immutable audit log</h3><p>Every login, admin action, and API-key lifecycle event recorded with actor, target, details, and source IP.</p></div>
+      <div class="card reveal"><div class="ico">🕵️</div><h3>Private by design</h3><p>Request metadata search and CSV export without storing prompt text, response bodies, image bytes, tool contents, or secrets — by default.</p></div>
+      <div class="card reveal"><div class="ico">🧪</div><h3>Admin playground</h3><p>Send test chat messages through any model route to validate providers and models end to end — no API key required.</p></div>
+      <div class="card reveal"><div class="ico">📦</div><h3>Signed config export</h3><p>Ed25519-signed, sanitized configuration export for review, backup, and environment promotion — secrets and credentials never leave the box.</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ COST ACCOUNTING ============ -->
+<section style="padding-top:0">
+  <div class="container">
+
+    <div class="feat-row reveal">
+      <div class="feat-copy">
+        <span class="eyebrow">FinOps for LLMs</span>
+        <h3>Know exactly who spent what — and stop overruns before they happen</h3>
+        <p>Every request lands in an append-only ledger with user, department, model, token counts, and cost.
+        Finance gets a monthly chargeback report; admins get budgets that actually enforce.</p>
+        <ul class="feat-list">
+          <li><strong>Monthly chargeback</strong> by department and user, with CSV download and a JSON API for financial-system integration.</li>
+          <li><strong>Hard budget enforcement</strong> — when a user, department, or key hits its cap, requests stop. No surprise invoices.</li>
+          <li><strong>Burn-down &amp; projections</strong> — current spend, remaining budget, daily average, and projected month-end run rate per scope.</li>
+          <li><strong>Accurate even for local models</strong> — when a provider omits usage data, tokens are estimated in memory so cost never silently drops to zero.</li>
+        </ul>
+      </div>
+      <figure class="feat-media">
+        <div class="frame">
+          <div class="frame-bar"><i></i><i></i><i></i><span>Admin → Budgets · chargeback &amp; burn-down</span></div>
+          <img src="images/budgets.png" alt="Phlox-GW budgets page with monthly chargeback by department and budget burn-down with projections" data-zoom>
+        </div>
+      </figure>
+    </div>
+
+    <div class="feat-row rev reveal">
+      <div class="feat-copy">
+        <span class="eyebrow">Scale when you need it</span>
+        <h3>A single binary that grows into a cluster</h3>
+        <p>Start with one process and SQLite — zero external dependencies. When one node isn’t enough,
+        point multiple gateways at a shared Postgres behind a load balancer and keep going.</p>
+        <ul class="feat-list">
+          <li><strong>Single-binary simplicity</strong> — the dashboard, API, and gateway ship in one Go executable. SQLite is the default.</li>
+          <li><strong>Explicit cluster mode</strong> — <code style="font-family:var(--mono);font-size:.85em;color:var(--violet-bright)">cluster-postgres</code> with migration locking, node heartbeats, and readiness checks.</li>
+          <li><strong>Cluster admin UI</strong> — see every node’s status, heartbeat, and database target at a glance.</li>
+          <li><strong>Load-balancer friendly</strong> — <code style="font-family:var(--mono);font-size:.85em;color:var(--violet-bright)">/health</code> for liveness and <code style="font-family:var(--mono);font-size:.85em;color:var(--violet-bright)">/ready</code> for database-and-heartbeat readiness.</li>
+          <li><strong>Ops-ready</strong> — systemd, macOS, and Windows guidance, reverse-proxy patterns, and a single-host demo cluster script.</li>
+        </ul>
+      </div>
+      <figure class="feat-media">
+        <div class="frame">
+          <div class="frame-bar"><i></i><i></i><i></i><span>Admin → Cluster · node heartbeats &amp; readiness</span></div>
+          <img src="images/cluster.png" alt="Phlox-GW cluster status page showing three healthy postgres-backed nodes with heartbeats" data-zoom>
+        </div>
+      </figure>
+    </div>
+
+  </div>
+</section>
+
+<!-- ============ PROTOCOLS ============ -->
+<section class="proto" id="protocols">
+  <div class="container">
+    <div class="sec-head reveal">
+      <span class="eyebrow">Protocol translation</span>
+      <h2>Any client. Any provider. Phlox-GW translates.</h2>
+      <p>OpenAI-protocol clients can call Claude on Bedrock. Anthropic-protocol clients — including Claude Code —
+      can call GPT on Azure or a local model on Ollama. Streaming, tool calls, and images included.</p>
+    </div>
+
+    <div class="diagram reveal">
+      <div class="d-col">
+        <div class="d-node"><span class="pin"></span><div><b>OpenAI SDKs &amp; apps</b><br>POST /v1/chat/completions</div></div>
+        <div class="d-node"><span class="pin"></span><div><b>Anthropic SDKs &amp; Claude&nbsp;Code</b><br>POST /anthropic/v1/messages</div></div>
+        <div class="d-node"><span class="pin"></span><div><b>curl &amp; anything HTTP</b><br>Bearer pgw-sk-…</div></div>
+      </div>
+      <div class="d-hub">
+        <svg viewBox="0 0 100 100" aria-hidden="true"><g transform="translate(50 50)"><g fill="#c084fc"><ellipse cx="0" cy="-24" rx="13" ry="22"/><ellipse cx="0" cy="-24" rx="13" ry="22" transform="rotate(72)"/><ellipse cx="0" cy="-24" rx="13" ry="22" transform="rotate(144)"/><ellipse cx="0" cy="-24" rx="13" ry="22" transform="rotate(216)"/><ellipse cx="0" cy="-24" rx="13" ry="22" transform="rotate(288)"/></g><circle r="11" fill="#7c3aed"/></g></svg>
+        <b>Phlox-GW</b>
+        <span>auth · budgets · limits · guardrails</span>
+        <em>routing, translation, usage ledger, audit, metrics</em>
+      </div>
+      <div class="d-col">
+        <div class="d-node"><span class="pin g"></span><div><b>OpenAI &amp; Azure OpenAI</b><br>chat completions</div></div>
+        <div class="d-node"><span class="pin g"></span><div><b>Anthropic &amp; Azure AI Foundry</b><br>Messages API</div></div>
+        <div class="d-node"><span class="pin g"></span><div><b>AWS Bedrock</b><br>Converse / ConverseStream</div></div>
+        <div class="d-node"><span class="pin g"></span><div><b>Gemini · Ollama · vLLM · …</b><br>OpenAI-compatible</div></div>
+      </div>
+    </div>
+
+    <div class="proto-table-wrap reveal">
+      <table class="proto-table">
+        <thead>
+          <tr><th>Client protocol ↓ &nbsp;/&nbsp; Provider →</th><th>OpenAI-compatible</th><th>Anthropic / Foundry</th><th>AWS Bedrock</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>/v1/chat/completions</td><td class="ok">pass-through</td><td class="ok">translated</td><td class="ok">translated</td></tr>
+          <tr><td>/anthropic/v1/messages</td><td class="ok">translated</td><td class="ok">pass-through</td><td class="ok">translated</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="proto-caption">All six paths support streaming and non-streaming requests, with tool-call and image mapping,
+    and usage capture for accurate cost accounting. Reasoning-model quirks (like <span style="font-family:var(--mono)">max_completion_tokens</span>
+    and rejected sampling parameters) are detected and retried automatically, so old clients keep working with new models.</p>
+
+    <div class="grid reveal" style="max-width:1020px;margin:48px auto 0">
+      <div class="card"><div class="ico">🤖</div><h3>Claude Code, governed</h3><p>Point Claude Code at the gateway with one <code>ANTHROPIC_BASE_URL</code> — and route it to Claude, GPT, Bedrock, or a local model. Streaming and tool use are fully translated, and <code>anthropic-beta</code> headers are filtered per provider so strict endpoints like Azure AI Foundry don't reject requests.</p></div>
+      <div class="card"><div class="ico">🗝️</div><h3>Bedrock, three ways</h3><p>Authenticate to AWS Bedrock with the SDK credential chain (SSO profiles, instance and task roles), stored access keys, or a Bedrock API key — per provider. No base URL to manage; just pick a region.</p></div>
+      <div class="card"><div class="ico">🔌</div><h3>Drop-in for existing SDKs</h3><p>Any OpenAI or Anthropic SDK works by changing <code>base_url</code> and the API key. Model names are your stable route IDs, so swapping providers never touches application code.</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ GOVERNANCE ============ -->
+<section id="governance">
+  <div class="container">
+    <div class="sec-head reveal">
+      <span class="eyebrow">Governance &amp; safety</span>
+      <h2>Guardrails, limits, and a paper trail</h2>
+      <p>Policy is enforced in the request path — not documented in a wiki and hoped for.</p>
+    </div>
+
+    <div class="feat-row reveal">
+      <div class="feat-copy">
+        <span class="eyebrow">Data protection</span>
+        <h3>PII stops at the gateway</h3>
+        <p>Built-in detectors for email addresses, phone numbers, SSNs, credit cards, and API keys —
+        plus custom RE2 regex patterns for your organization’s identifiers (MRNs, employee IDs, internal tokens).</p>
+        <ul class="feat-list">
+          <li><strong>Redact or block on input</strong> before anything is sent to a provider.</li>
+          <li><strong>Redact or block on output</strong> before a response reaches the client.</li>
+          <li><strong>Preview before you commit</strong> — test draft patterns against sample text right in the admin panel.</li>
+          <li><strong>Inspected in memory</strong> — content is scanned in-flight and never stored.</li>
+        </ul>
+      </div>
+      <figure class="feat-media">
+        <div class="frame">
+          <div class="frame-bar"><i></i><i></i><i></i><span>Admin → Guardrails · PII policy &amp; custom patterns</span></div>
+          <img src="images/guardrails.png" alt="Phlox-GW guardrails page with built-in PII patterns, a custom MRN regex, and a live redaction preview" data-zoom>
+        </div>
+      </figure>
+    </div>
+
+    <div class="feat-row rev reveal">
+      <div class="feat-copy">
+        <span class="eyebrow">Traffic control</span>
+        <h3>Rate limits that match your org chart</h3>
+        <p>Set requests-per-minute and tokens-per-minute ceilings wherever they make sense:
+        a user, a department, a provider, a model route, or an individual API key.</p>
+        <ul class="feat-list">
+          <li><strong>Protect shared capacity</strong> — cap a department’s use of an expensive frontier model.</li>
+          <li><strong>Contain runaways</strong> — one misbehaving script can’t exhaust the provider quota for everyone.</li>
+          <li><strong>Circuit breakers</strong> — providers that keep failing are automatically taken out of rotation until they recover.</li>
+        </ul>
+      </div>
+      <figure class="feat-media">
+        <div class="frame">
+          <div class="frame-bar"><i></i><i></i><i></i><span>Admin → Rate Limits · RPM / TPM by scope</span></div>
+          <img src="images/rate-limits.png" alt="Phlox-GW rate limits page with RPM and TPM limits by department, model, provider, and user" data-zoom>
+        </div>
+      </figure>
+    </div>
+
+    <div class="gallery" style="margin-top:20px">
+      <figure class="shot reveal">
+        <div class="frame">
+          <div class="frame-bar"><i></i><i></i><i></i><span>Admin → Requests · metadata search</span></div>
+          <img src="images/request-logs.png" alt="Phlox-GW request metadata search with filters and export, storing no prompt or response bodies" data-zoom>
+        </div>
+        <figcaption><b>Request search without the snooping.</b> Filter and export operational metadata — prompt and response bodies are never stored.</figcaption>
+      </figure>
+      <figure class="shot reveal">
+        <div class="frame">
+          <div class="frame-bar"><i></i><i></i><i></i><span>Admin → Audit Log · immutable events</span></div>
+          <img src="images/audit-log.png" alt="Phlox-GW immutable audit log of logins, admin actions, and key lifecycle events with source IPs" data-zoom>
+        </div>
+        <figcaption><b>An answer for every auditor.</b> Immutable log of logins, admin changes, and key lifecycle events — with actor, details, and IP.</figcaption>
+      </figure>
+      <figure class="shot reveal" style="grid-column:1 / -1;max-width:820px;margin:0 auto">
+        <div class="frame">
+          <div class="frame-bar"><i></i><i></i><i></i><span>API Keys · self-service mint, rotate, revoke</span></div>
+          <img src="images/api-keys.png" alt="Phlox-GW API keys page where users mint, rotate, expire, and revoke their own keys" data-zoom>
+        </div>
+        <figcaption><b>Keys users manage themselves.</b> Mint, rotate, set expirations, and revoke — while admins keep full inventory with per-key policies.</figcaption>
+      </figure>
+    </div>
+  </div>
+</section>
+
+<!-- ============ QUICKSTART ============ -->
+<section class="qs" id="quickstart">
+  <div class="container">
+    <div class="sec-head reveal">
+      <span class="eyebrow">Quick start</span>
+      <h2>From download to governed LLM traffic in minutes</h2>
+      <p>No Kubernetes, no sidecar fleet, no license key. One binary and a browser.</p>
+    </div>
+    <div class="qs-grid">
+      <div class="term reveal">
+        <div class="term-bar"><i></i><i></i><i></i><span>terminal</span></div>
+        <pre><span class="c"># build and run (SQLite by default)</span>
+<span class="p">$</span> scripts/build-release.sh --skip-frontend
+<span class="p">$</span> scripts/run-local.sh
+<span class="c"># → sign in at http://127.0.0.1:8080</span>
+
+<span class="c"># call it like OpenAI…</span>
+<span class="p">$</span> curl http://127.0.0.1:8080<span class="k">/v1/chat/completions</span> \
+    -H <span class="s">"Authorization: Bearer pgw-sk-your-key"</span> \
+    -d <span class="s">'{"model":"chat/default","messages":
+        [{"role":"user","content":"Hello"}]}'</span>
+
+<span class="c"># …or like Anthropic — same gateway, same key</span>
+<span class="p">$</span> curl http://127.0.0.1:8080<span class="k">/anthropic/v1/messages</span> \
+    -H <span class="s">"x-api-key: pgw-sk-your-key"</span> \
+    -H <span class="s">"anthropic-version: 2023-06-01"</span> \
+    -d <span class="s">'{"model":"chat/default","max_tokens":256,
+        "messages":[{"role":"user","content":"Hello"}]}'</span></pre>
+      </div>
+      <ol class="qs-steps reveal">
+        <li><h4>Run the binary</h4><p>Prebuilt for macOS, Linux, and Windows (amd64 &amp; arm64). SQLite means zero infrastructure to start.</p></li>
+        <li><h4>Add providers &amp; models</h4><p>Point at OpenAI, Anthropic, Azure, Bedrock, Gemini, or your local Ollama/vLLM. Keys can live in env vars — stored secrets are write-only and never returned to the browser.</p></li>
+        <li><h4>Set prices, budgets &amp; limits</h4><p>USD per million tokens per model, monthly caps per user/department/key, RPM &amp; TPM limits at any scope.</p></li>
+        <li><h4>Validate in the playground</h4><p>Test every route from the admin UI before a single client connects — no API key needed.</p></li>
+        <li><h4>Point your apps at it</h4><p>Swap the base URL in any OpenAI or Anthropic SDK. Existing code keeps working; governance turns on.</p></li>
+      </ol>
+    </div>
+    <div class="stats">
+      <div class="stat reveal"><b>1</b><span>Go binary — UI included</span></div>
+      <div class="stat reveal"><b>2</b><span>client protocols, translated to any provider</span></div>
+      <div class="stat reveal"><b>6+</b><span>provider types, plus anything OpenAI-compatible</span></div>
+      <div class="stat reveal"><b>$0</b><span>license cost — Apache-2.0, forever</span></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ CTA ============ -->
+<section class="cta">
+  <div class="container">
+    <span class="eyebrow reveal">Ready when you are</span>
+    <h2 class="reveal">Govern your LLM traffic tonight.<br><span style="background:linear-gradient(100deg,#c084fc,#e879f9);-webkit-background-clip:text;background-clip:text;color:transparent">Keep your budget — and your data.</span></h2>
+    <p class="reveal">Self-hosted, private by default, and free without fine print. If it’s in the product, it’s yours.</p>
+    <div class="hero-ctas reveal">
+      <a class="btn btn-primary" href="https://github.com/robert-mcdermott/phlox-gw" target="_blank" rel="noopener">
+        <svg class="gh-icon" viewBox="0 0 16 16"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+        Star &amp; get started on GitHub
+      </a>
+      <a class="btn btn-ghost" href="https://github.com/robert-mcdermott/phlox-gw#quick-start" target="_blank" rel="noopener">Read the docs</a>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="container foot">
+    <a class="brand" href="#top">
+      <svg viewBox="0 0 100 100" aria-hidden="true" style="width:24px;height:24px"><g transform="translate(50 50)"><g fill="#c084fc"><ellipse cx="0" cy="-24" rx="13" ry="22"/><ellipse cx="0" cy="-24" rx="13" ry="22" transform="rotate(72)"/><ellipse cx="0" cy="-24" rx="13" ry="22" transform="rotate(144)"/><ellipse cx="0" cy="-24" rx="13" ry="22" transform="rotate(216)"/><ellipse cx="0" cy="-24" rx="13" ry="22" transform="rotate(288)"/></g><circle r="11" fill="#7c3aed"/></g></svg>
+      Phlox-GW
+    </a>
+    <nav class="foot-links">
+      <a href="https://github.com/robert-mcdermott/phlox-gw" target="_blank" rel="noopener">GitHub</a>
+      <a href="https://github.com/robert-mcdermott/phlox-gw/blob/main/docs/OPERATIONS.md" target="_blank" rel="noopener">Operator Guide</a>
+      <a href="https://github.com/robert-mcdermott/phlox-gw/blob/main/docs/PROVIDERS.md" target="_blank" rel="noopener">Provider Setup</a>
+      <a href="https://github.com/robert-mcdermott/phlox-gw/blob/main/docs/API_USAGE.md" target="_blank" rel="noopener">API Usage</a>
+      <a href="https://github.com/robert-mcdermott/phlox-gw/blob/main/LICENSE" target="_blank" rel="noopener">Apache-2.0 License</a>
+    </nav>
+    <small>Phlox-GW — a self-hosted enterprise LLM gateway. Fully open source. Every feature free, forever.</small>
+  </div>
+</footer>
+
+<div class="lightbox" id="lightbox" role="dialog" aria-label="Screenshot viewer"><img alt=""></div>
+
+<script>
+// scroll reveal
+const io=new IntersectionObserver(es=>{
+  es.forEach(e=>{if(e.isIntersecting){e.target.classList.add('in');io.unobserve(e.target)}});
+},{threshold:.08,rootMargin:'0px 0px -40px 0px'});
+document.querySelectorAll('.reveal').forEach(el=>io.observe(el));
+
+// lightbox
+const lb=document.getElementById('lightbox'),lbImg=lb.querySelector('img');
+document.querySelectorAll('img[data-zoom]').forEach(img=>{
+  img.addEventListener('click',()=>{lbImg.src=img.src;lbImg.alt=img.alt;lb.classList.add('open');document.body.style.overflow='hidden'});
+});
+function closeLb(){lb.classList.remove('open');document.body.style.overflow=''}
+lb.addEventListener('click',closeLb);
+addEventListener('keydown',e=>{if(e.key==='Escape')closeLb()});
+</script>
+</body>
+</html>
