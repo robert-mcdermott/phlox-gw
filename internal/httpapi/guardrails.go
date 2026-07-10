@@ -34,6 +34,7 @@ type piiGuardrailPlugin struct{}
 
 type piiRule struct {
 	Name    string
+	Token   string
 	Enabled func(store.GuardrailPolicy) bool
 	Pattern *regexp.Regexp
 	Valid   func(string) bool
@@ -50,21 +51,25 @@ const (
 var piiRules = []piiRule{
 	{
 		Name:    "email",
+		Token:   "[EMAIL]",
 		Enabled: func(p store.GuardrailPolicy) bool { return p.DetectEmail },
 		Pattern: regexp.MustCompile(`(?i)\b[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}\b`),
 	},
 	{
 		Name:    "phone",
+		Token:   "[PHONE]",
 		Enabled: func(p store.GuardrailPolicy) bool { return p.DetectPhone },
 		Pattern: regexp.MustCompile(`\b(?:\+?1[\s.\-]?)?(?:\([2-9][0-9]{2}\)|[2-9][0-9]{2})[\s.\-]?[0-9]{3}[\s.\-]?[0-9]{4}\b`),
 	},
 	{
 		Name:    "ssn",
+		Token:   "[SSN]",
 		Enabled: func(p store.GuardrailPolicy) bool { return p.DetectSSN },
 		Pattern: regexp.MustCompile(`\b[0-9]{3}-[0-9]{2}-[0-9]{4}\b`),
 	},
 	{
 		Name:    "credit_card",
+		Token:   "[CREDIT_CARD]",
 		Enabled: func(p store.GuardrailPolicy) bool { return p.DetectCreditCard },
 		Pattern: regexp.MustCompile(`\b(?:[0-9][ -]*?){13,19}\b`),
 		Valid: func(match string) bool {
@@ -74,6 +79,7 @@ var piiRules = []piiRule{
 	},
 	{
 		Name:    "api_key",
+		Token:   "[API_KEY]",
 		Enabled: func(p store.GuardrailPolicy) bool { return p.DetectAPIKey },
 		Pattern: regexp.MustCompile(`(?i)\b(?:pgw-sk-[A-Za-z0-9_\-]{16,}|sk-[A-Za-z0-9_\-]{16,}|xox[baprs]-[A-Za-z0-9\-]{10,}|gh[pousr]_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_\-]{20,}|AKIA[0-9A-Z]{16})\b`),
 	},
@@ -100,7 +106,7 @@ func (piiGuardrailPlugin) ApplyText(text string, policy store.GuardrailPolicy) (
 			}
 			findings[rule.Name] = true
 			mutated = true
-			return policy.RedactionText
+			return builtinRedactionText(rule, policy)
 		})
 	}
 	return redacted, sortedFindingNames(findings), mutated
@@ -153,7 +159,7 @@ func applyGuardrailToText(text string, policy store.GuardrailPolicy, action stri
 			if rule.Valid != nil && !rule.Valid(match) {
 				return match
 			}
-			return policy.RedactionText
+			return builtinRedactionText(rule, policy)
 		})
 	}
 	for _, rule := range customPatterns {
@@ -199,6 +205,9 @@ func compiledCustomGuardrailPatterns(policy store.GuardrailPolicy) []compiledCus
 		}
 		redaction := strings.TrimSpace(pattern.RedactionText)
 		if redaction == "" {
+			redaction = strings.TrimSpace(policy.RedactionText)
+		}
+		if redaction == "" {
 			redaction = defaultCustomRedactionToken
 		}
 		out = append(out, compiledCustomGuardrailPattern{
@@ -243,6 +252,13 @@ func guardrailCustomPatternDisplay(pattern store.GuardrailCustomPattern) string 
 		return strings.TrimSpace(pattern.ID)
 	}
 	return "custom"
+}
+
+func builtinRedactionText(rule piiRule, policy store.GuardrailPolicy) string {
+	if rule.Token != "" {
+		return rule.Token
+	}
+	return policy.RedactionText
 }
 
 func builtinRuleMatches(rule piiRule, text string) bool {

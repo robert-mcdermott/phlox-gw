@@ -597,7 +597,7 @@ func TestOpenAIChatCompletionsGuardrailsRedactInputAndOutput(t *testing.T) {
 			t.Fatalf("decode upstream request: %v", err)
 		}
 		body, _ := json.Marshal(req)
-		if strings.Contains(string(body), "jane@example.com") || !strings.Contains(string(body), "[REDACTED]") {
+		if strings.Contains(string(body), "jane@example.com") || !strings.Contains(string(body), "[EMAIL]") {
 			t.Fatalf("expected redacted upstream request, got %s", body)
 		}
 		return &http.Response{
@@ -622,7 +622,7 @@ func TestOpenAIChatCompletionsGuardrailsRedactInputAndOutput(t *testing.T) {
 	if resp.Code != http.StatusOK {
 		t.Fatalf("status = %d body = %s", resp.Code, resp.Body.String())
 	}
-	if strings.Contains(resp.Body.String(), "jane@example.com") || !strings.Contains(resp.Body.String(), "[REDACTED]") {
+	if strings.Contains(resp.Body.String(), "jane@example.com") || !strings.Contains(resp.Body.String(), "[EMAIL]") {
 		t.Fatalf("expected redacted response, got %s", resp.Body.String())
 	}
 }
