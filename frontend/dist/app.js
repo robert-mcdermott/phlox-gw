@@ -566,7 +566,7 @@ function adminContentView(usage) {
         <div class="form-grid">
           <label class="form-field"><span>Scope</span><select id="rate-scope-type"><option value="user">User</option><option value="department">Department</option><option value="provider">Provider</option><option value="model">Model</option></select></label>
           <label class="form-field"><span>Scope value</span><input id="rate-scope-value" placeholder="User id, department, provider, or model" list="rate-limit-values" /></label>
-          <datalist id="rate-limit-values">${rateLimitValueOptions()}</datalist>
+          <datalist id="rate-limit-values">${scopeValueOptions('user')}</datalist>
           <label class="form-field"><span>Requests/min</span><input id="rate-rpm" aria-label="Requests per minute limit" placeholder="RPM limit" type="number" min="0" step="1" value="0" /></label>
           <label class="form-field"><span>Tokens/min</span><input id="rate-tpm" aria-label="Tokens per minute limit" placeholder="TPM limit" type="number" min="0" step="1" value="0" /></label>
           <button class="btn primary" id="create-rate-limit">${icon('plus', 'btn-icon')}Create limit</button>
@@ -583,7 +583,7 @@ function adminContentView(usage) {
         <div class="form-grid">
           <select id="budget-scope-type"><option value="department">Department</option><option value="user">User</option></select>
           <input id="budget-scope-value" placeholder="Department name or user id" list="budget-values" />
-          <datalist id="budget-values">${budgetValueOptions()}</datalist>
+          <datalist id="budget-values">${scopeValueOptions('department')}</datalist>
           <input id="budget-limit" placeholder="Monthly limit USD" type="number" min="0" step="0.01" />
           <input id="budget-warn" placeholder="Warn %" type="number" min="1" max="100" step="1" value="90" />
           <button class="btn primary" id="create-budget">${icon('plus', 'btn-icon')}Create budget</button>
@@ -1287,7 +1287,7 @@ function budgetRows() {
           ${state.budgets.map(b => `
             <tr data-budget-row="${esc(b.id)}">
               <td><select data-budget-field="scope_type">${option('department', 'Department', b.scope_type)}${option('user', 'User', b.scope_type)}</select></td>
-              <td><input data-budget-field="scope_value" value="${attr(b.scope_value)}" list="budget-values" /></td>
+              <td><input data-budget-field="scope_value" value="${attr(b.scope_value)}" list="budget-values-${esc(b.id)}" /><datalist id="budget-values-${esc(b.id)}">${scopeValueOptions(b.scope_type)}</datalist></td>
               <td><input data-budget-field="limit_usd" type="number" min="0" step="0.01" value="${attr(b.limit_usd)}" /></td>
               <td><input data-budget-field="warn_pct" type="number" min="1" max="100" step="1" value="${attr(b.warn_pct)}" /></td>
               <td><input data-budget-field="is_active" type="checkbox" ${b.is_active ? 'checked' : ''} /></td>
@@ -1310,7 +1310,7 @@ function rateLimitRows() {
           ${state.rateLimits.map(rl => `
             <tr data-rate-limit-row="${esc(rl.id)}">
               <td><select data-rate-limit-field="scope_type">${option('user', 'User', rl.scope_type)}${option('department', 'Department', rl.scope_type)}${option('provider', 'Provider', rl.scope_type)}${option('model', 'Model', rl.scope_type)}</select></td>
-              <td><input data-rate-limit-field="scope_value" value="${attr(rl.scope_value)}" list="rate-limit-values" /></td>
+              <td><input data-rate-limit-field="scope_value" value="${attr(rl.scope_value)}" list="rate-limit-values-${esc(rl.id)}" /><datalist id="rate-limit-values-${esc(rl.id)}">${scopeValueOptions(rl.scope_type)}</datalist></td>
               <td><input data-rate-limit-field="rpm_limit" type="number" min="0" step="1" value="${attr(rl.rpm_limit)}" /></td>
               <td><input data-rate-limit-field="tpm_limit" type="number" min="0" step="1" value="${attr(rl.tpm_limit)}" /></td>
               <td><input data-rate-limit-field="is_active" type="checkbox" ${rl.is_active ? 'checked' : ''} /></td>
@@ -1809,6 +1809,20 @@ function afterRender() {
       await refresh();
     };
   });
+  const rateScopeType = document.getElementById('rate-scope-type');
+  if (rateScopeType) {
+    rateScopeType.onchange = () => {
+      document.getElementById('rate-limit-values').innerHTML = scopeValueOptions(rateScopeType.value);
+      document.getElementById('rate-scope-value').value = '';
+    };
+  }
+  document.querySelectorAll('[data-rate-limit-row]').forEach((row) => {
+    const typeSelect = row.querySelector('[data-rate-limit-field="scope_type"]');
+    const datalist = row.querySelector('datalist');
+    if (typeSelect && datalist) {
+      typeSelect.onchange = () => { datalist.innerHTML = scopeValueOptions(typeSelect.value); };
+    }
+  });
   const createRateLimit = document.getElementById('create-rate-limit');
   if (createRateLimit) {
     createRateLimit.onclick = async () => {
@@ -1839,6 +1853,20 @@ function afterRender() {
       state.notice = 'Rate limit deleted.';
       await refresh();
     };
+  });
+  const budgetScopeType = document.getElementById('budget-scope-type');
+  if (budgetScopeType) {
+    budgetScopeType.onchange = () => {
+      document.getElementById('budget-values').innerHTML = scopeValueOptions(budgetScopeType.value);
+      document.getElementById('budget-scope-value').value = '';
+    };
+  }
+  document.querySelectorAll('[data-budget-row]').forEach((row) => {
+    const typeSelect = row.querySelector('[data-budget-field="scope_type"]');
+    const datalist = row.querySelector('datalist');
+    if (typeSelect && datalist) {
+      typeSelect.onchange = () => { datalist.innerHTML = scopeValueOptions(typeSelect.value); };
+    }
   });
   const createBudget = document.getElementById('create-budget');
   if (createBudget) {
@@ -2235,23 +2263,12 @@ function attr(value) {
   return esc(value ?? '');
 }
 
-function budgetValueOptions() {
+function scopeValueOptions(scopeType) {
   const values = new Set();
-  state.users.forEach(u => {
-    if (u.department) values.add(u.department);
-    values.add(u.id);
-  });
-  return [...values].map(v => `<option value="${attr(v)}"></option>`).join('');
-}
-
-function rateLimitValueOptions() {
-  const values = new Set();
-  state.users.forEach(u => {
-    values.add(u.id);
-    if (u.department) values.add(u.department);
-  });
-  state.providers.forEach(p => values.add(p.id));
-  state.adminModels.forEach(m => values.add(m.route));
+  if (scopeType === 'user') state.users.forEach(u => values.add(u.id));
+  if (scopeType === 'department') state.users.forEach(u => { if (u.department) values.add(u.department); });
+  if (scopeType === 'provider') state.providers.forEach(p => values.add(p.id));
+  if (scopeType === 'model') state.adminModels.forEach(m => values.add(m.route));
   return [...values].map(v => `<option value="${attr(v)}"></option>`).join('');
 }
 
