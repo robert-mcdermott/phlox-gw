@@ -20,6 +20,12 @@ go build -o phlox-gw ./cmd/phlox-gw
 The compiled binary embeds `frontend/dist`, so users do not need a separate web server for
 the dashboard.
 
+At startup the binary prints a Phlox-branded terminal banner with its version, build
+identity, Go/platform runtime, process ID, dashboard address, deployment instance, and
+sanitized database target. ANSI brand colors are used only for an interactive terminal;
+redirected service logs receive the same banner as plain text. Set `NO_COLOR=1` or
+`CLICOLOR=0` to disable terminal color explicitly.
+
 Build the frontend and all release binaries:
 
 ```bash

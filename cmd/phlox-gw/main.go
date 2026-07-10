@@ -64,9 +64,11 @@ func main() {
 		logger.Error("seed database", "error", err)
 		os.Exit(1)
 	}
+	bootstrapPassword := ""
 	if seedResult.AdminCreated {
-		printBootstrapPassword(os.Stdout, temporaryPassword)
+		bootstrapPassword = temporaryPassword
 	}
+	printStartupBanner(os.Stdout, newStartupBanner(cfg, bootstrapPassword), terminalColorsEnabled(os.Stdout))
 
 	tel, err := telemetry.New(context.Background(), cfg.Telemetry, logger)
 	if err != nil {
@@ -132,20 +134,6 @@ func printVersion(args []string, w io.Writer) bool {
 	}
 	_, _ = fmt.Fprintln(w, phloxgw.VersionString())
 	return true
-}
-
-func printBootstrapPassword(w io.Writer, password string) {
-	_, _ = fmt.Fprintln(w, "")
-	_, _ = fmt.Fprintln(w, "+------------------------------------------------------------+")
-	_, _ = fmt.Fprintln(w, "|  PHLOX-GW FIRST-RUN ADMINISTRATOR                          |")
-	_, _ = fmt.Fprintln(w, "+------------------------------------------------------------+")
-	_, _ = fmt.Fprintln(w, "|  Username:           admin                                 |")
-	_, _ = fmt.Fprintf(w, "|  Temporary password: %-36s |\n", password)
-	_, _ = fmt.Fprintln(w, "|                                                            |")
-	_, _ = fmt.Fprintln(w, "|  Sign in and choose a new password before continuing.      |")
-	_, _ = fmt.Fprintln(w, "|  This password is shown once. Store first-run logs safely. |")
-	_, _ = fmt.Fprintln(w, "+------------------------------------------------------------+")
-	_, _ = fmt.Fprintln(w, "")
 }
 
 func applyBuildDefaults(cfg *config.Config) {
