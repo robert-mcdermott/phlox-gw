@@ -52,6 +52,37 @@ The frontend source for the embedded dashboard lives in `frontend/src/static`. `
 build` copies that source into `frontend/dist`, which is what `embed.go` includes in the
 single binary.
 
+### Versioning And Release Builds
+
+The repository-root `VERSION` file is the product-version source of truth. It contains a
+semantic version with a leading `v`, currently:
+
+```text
+v0.1.0
+```
+
+Normal development builds embed that value. `scripts/build-release.sh` and
+`scripts/build-release.ps1` additionally stamp the current Git commit and UTC build date
+into every binary. Inspect a binary without initializing configuration or opening a
+database:
+
+```bash
+./phlox-gw --version
+```
+
+For a new release:
+
+1. Update `VERSION` to the intended version, for example `v0.2.0` or `v0.2.0-rc.1`.
+2. Commit the version change with the release changes.
+3. Run the full release build.
+4. Execute a native artifact with `--version` and confirm version, commit, and build date.
+5. Complete the release checks, then create a Git tag matching `VERSION` exactly.
+
+The release scripts reject invalid version formats. In reproducible build automation,
+set `PHLOX_GW_BUILD_COMMIT` and `PHLOX_GW_BUILD_DATE` explicitly; otherwise they default to
+the current Git commit and current UTC timestamp. If tracked changes are uncommitted, the
+reported commit includes a `-dirty` suffix.
+
 For local runs, copy the environment template and use the run helper:
 
 ```bash
@@ -514,7 +545,7 @@ per-user and per-department chargeback.
 | --- | --- | --- |
 | `PHLOX_GW_OTEL_TRACES_ENABLED` | `false` | Enables OTLP/HTTP trace export. |
 | `PHLOX_GW_OTEL_SERVICE_NAME` | `phlox-gw` | Service name attached to exported traces. |
-| `PHLOX_GW_OTEL_SERVICE_VERSION` | empty | Optional service version label. |
+| `PHLOX_GW_OTEL_SERVICE_VERSION` | binary version | Optional override for the service version label. |
 | `PHLOX_GW_OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` or `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP/HTTP traces endpoint. |
 | `PHLOX_GW_OTEL_EXPORTER_OTLP_INSECURE` | `OTEL_EXPORTER_OTLP_INSECURE` or `false` | Allows insecure OTLP transport. |
 | `PHLOX_GW_OTEL_SAMPLE_RATIO` | `1.0` | Trace sampling ratio from `0.0` to `1.0`. |

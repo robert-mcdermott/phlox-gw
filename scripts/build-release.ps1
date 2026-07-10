@@ -7,6 +7,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 $RootDir = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+$VersionFile = Join-Path $RootDir "VERSION"
 if ([string]::IsNullOrWhiteSpace($DistDir)) {
     $DistDir = Join-Path $RootDir "dist"
 }
@@ -21,6 +22,34 @@ Require-Command "go"
 if (-not $SkipFrontend -and $env:PHLOX_GW_SKIP_FRONTEND_BUILD -ne "1") {
     Require-Command "npm"
 }
+
+if (-not (Test-Path $VersionFile)) {
+    throw "Missing version file: $VersionFile"
+}
+$Version = (Get-Content -Raw -Path $VersionFile).Trim()
+if ($Version -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$') {
+    throw "Invalid version in VERSION: $Version. Expected a semantic version such as v0.1.0 or v0.2.0-rc.1."
+}
+
+$BuildCommit = $env:PHLOX_GW_BUILD_COMMIT
+if ([string]::IsNullOrWhiteSpace($BuildCommit) -and (Get-Command git -ErrorAction SilentlyContinue)) {
+    $DetectedCommit = & git -C $RootDir rev-parse --short=12 HEAD 2>$null
+    if ($LASTEXITCODE -eq 0 -and $null -ne $DetectedCommit) {
+        $BuildCommit = ([string]$DetectedCommit).Trim()
+        & git -C $RootDir diff --quiet --ignore-submodules HEAD --
+        if ($LASTEXITCODE -ne 0) {
+            $BuildCommit = "$BuildCommit-dirty"
+        }
+    }
+}
+if ([string]::IsNullOrWhiteSpace($BuildCommit)) {
+    $BuildCommit = "unknown"
+}
+$BuildDate = $env:PHLOX_GW_BUILD_DATE
+if ([string]::IsNullOrWhiteSpace($BuildDate)) {
+    $BuildDate = [DateTime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
+}
+$LdFlags = "-s -w -X github.com/robert-mcdermott/phlox-gw.BuildVersion=$Version -X github.com/robert-mcdermott/phlox-gw.BuildCommit=$BuildCommit -X github.com/robert-mcdermott/phlox-gw.BuildDate=$BuildDate"
 
 if ($Clean -and (Test-Path $DistDir)) {
     Remove-Item -Recurse -Force $DistDir
@@ -50,6 +79,10 @@ $Targets = @(
 $ChecksumPath = Join-Path $DistDir "checksums.txt"
 Set-Content -Path $ChecksumPath -Value "" -NoNewline
 
+Write-Host "==> Version: $Version"
+Write-Host "==> Commit: $BuildCommit"
+Write-Host "==> Build date: $BuildDate"
+
 $OldGOOS = $env:GOOS
 $OldGOARCH = $env:GOARCH
 $OldCGO = $env:CGO_ENABLED
@@ -61,7 +94,7 @@ try {
         $env:CGO_ENABLED = "0"
         $OutputPath = Join-Path $DistDir $Target.Output
         Write-Host "==> Building $($Target.Output)"
-        go build -trimpath -ldflags="-s -w" -o $OutputPath ./cmd/phlox-gw
+        go build -trimpath -ldflags="$LdFlags" -o $OutputPath ./cmd/phlox-gw
         $Hash = Get-FileHash -Algorithm SHA256 -Path $OutputPath
         Add-Content -Path $ChecksumPath -Value "$($Hash.Hash.ToLowerInvariant())  $($Target.Output)"
     }

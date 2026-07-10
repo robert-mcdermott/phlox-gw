@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST_DIR="${DIST_DIR:-"$ROOT_DIR/dist"}"
+VERSION_FILE="$ROOT_DIR/VERSION"
 SKIP_FRONTEND=0
 CLEAN=0
 
@@ -20,6 +21,8 @@ Environment:
   PHLOX_GW_SKIP_FRONTEND_BUILD=1  Same as --skip-frontend.
   GOFLAGS                     Extra flags passed through to go build by Go.
   GOCACHE                     Optional Go build cache location.
+  PHLOX_GW_BUILD_COMMIT       Commit recorded in binaries. Defaults to the current Git commit.
+  PHLOX_GW_BUILD_DATE         UTC build timestamp recorded in binaries. Defaults to now.
 USAGE
 }
 
@@ -72,6 +75,28 @@ if [[ "$SKIP_FRONTEND" -eq 0 ]]; then
   require_cmd npm
 fi
 
+if [[ ! -f "$VERSION_FILE" ]]; then
+  echo "Missing version file: $VERSION_FILE" >&2
+  exit 1
+fi
+VERSION="$(tr -d '[:space:]' < "$VERSION_FILE")"
+if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+  echo "Invalid version in VERSION: $VERSION" >&2
+  echo "Expected a semantic version such as v0.1.0 or v0.2.0-rc.1" >&2
+  exit 1
+fi
+
+BUILD_COMMIT="${PHLOX_GW_BUILD_COMMIT:-}"
+if [[ -z "$BUILD_COMMIT" ]] && command -v git >/dev/null 2>&1; then
+  BUILD_COMMIT="$(git -C "$ROOT_DIR" rev-parse --short=12 HEAD 2>/dev/null || true)"
+  if [[ -n "$BUILD_COMMIT" ]] && ! git -C "$ROOT_DIR" diff --quiet --ignore-submodules HEAD --; then
+    BUILD_COMMIT="${BUILD_COMMIT}-dirty"
+  fi
+fi
+BUILD_COMMIT="${BUILD_COMMIT:-unknown}"
+BUILD_DATE="${PHLOX_GW_BUILD_DATE:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
+LDFLAGS="-s -w -X github.com/robert-mcdermott/phlox-gw.BuildVersion=$VERSION -X github.com/robert-mcdermott/phlox-gw.BuildCommit=$BUILD_COMMIT -X github.com/robert-mcdermott/phlox-gw.BuildDate=$BUILD_DATE"
+
 if [[ "$CLEAN" -eq 1 ]]; then
   rm -rf "$DIST_DIR"
 fi
@@ -95,12 +120,16 @@ declare -a TARGETS=(
 CHECKSUMS="$DIST_DIR/checksums.txt"
 : > "$CHECKSUMS"
 
+echo "==> Version: $VERSION"
+echo "==> Commit: $BUILD_COMMIT"
+echo "==> Build date: $BUILD_DATE"
+
 for target in "${TARGETS[@]}"; do
   read -r GOOS_VALUE GOARCH_VALUE OUTPUT_NAME <<< "$target"
   OUTPUT_PATH="$DIST_DIR/$OUTPUT_NAME"
   echo "==> Building $OUTPUT_NAME"
   CGO_ENABLED=0 GOOS="$GOOS_VALUE" GOARCH="$GOARCH_VALUE" \
-    go build -trimpath -ldflags="-s -w" -o "$OUTPUT_PATH" ./cmd/phlox-gw
+    go build -trimpath -ldflags="$LDFLAGS" -o "$OUTPUT_PATH" ./cmd/phlox-gw
   checksum_one "$OUTPUT_PATH" >> "$CHECKSUMS"
 done
 
