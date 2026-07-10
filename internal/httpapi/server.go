@@ -271,6 +271,7 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, map[string]any{
 		"status":          "ok",
 		"name":            "phlox-gw",
+		"version":         valueOr(s.cfg.Telemetry.ServiceVersion, "dev"),
 		"time":            time.Now().UTC(),
 		"deployment_mode": s.cfg.Deployment.Mode,
 		"instance_id":     s.cfg.Deployment.InstanceID,

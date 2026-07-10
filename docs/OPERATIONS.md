@@ -850,6 +850,7 @@ Expected response:
 {
   "name": "phlox-gw",
   "status": "ok",
+  "version": "v0.1.0",
   "time": "2026-06-24T00:00:00Z"
 }
 ```

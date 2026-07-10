@@ -1262,6 +1262,7 @@ func TestPrometheusMetricsEndpointRecordsGatewayAndUpstreamMetrics(t *testing.T)
 				MetricsEnabled: true,
 				MetricsPath:    "/metrics",
 				ServiceName:    "phlox-gw-test",
+				ServiceVersion: "v0.1.0-test",
 			},
 		},
 		Store: st,
@@ -1277,6 +1278,13 @@ func TestPrometheusMetricsEndpointRecordsGatewayAndUpstreamMetrics(t *testing.T)
 	handler.ServeHTTP(health, httptest.NewRequest(http.MethodGet, "/api/health", nil))
 	if health.Code != http.StatusOK {
 		t.Fatalf("health status = %d body = %s", health.Code, health.Body.String())
+	}
+	var healthBody struct {
+		Version string `json:"version"`
+	}
+	decodeRecorder(t, health, &healthBody)
+	if healthBody.Version != "v0.1.0-test" {
+		t.Fatalf("health version = %q, want v0.1.0-test", healthBody.Version)
 	}
 	resp := jsonRequest(t, handler, http.MethodPost, "/v1/chat/completions", plain, map[string]any{
 		"model":    model.Route,

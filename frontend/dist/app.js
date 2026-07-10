@@ -209,7 +209,10 @@ function loginView() {
     <div class="login">
       <div class="brand">
         <div class="mark logo-mark"><img src="/phlox-logo.svg" alt="" /></div>
-        <div><h1>Phlox-GW</h1><p>Enterprise LLM gateway</p></div>
+        <div class="brand-copy">
+          <div class="brand-title"><h1>Phlox-GW</h1><span class="version-badge">${productVersion()}</span></div>
+          <p>Enterprise LLM gateway</p>
+        </div>
       </div>
       <p>Sign in with the local admin account to configure models, keys, budgets, and usage reporting.</p>
       <div class="field"><label>Username</label><input id="username" autocomplete="username" value="admin" /></div>
@@ -257,7 +260,10 @@ function shell(content) {
       <aside class="sidebar">
         <div class="brand">
           <div class="mark logo-mark"><img src="/phlox-logo.svg" alt="" /></div>
-          <div><h1>Phlox-GW</h1><p>LLM gateway</p></div>
+          <div class="brand-copy">
+            <div class="brand-title"><h1>Phlox-GW</h1><span class="version-badge">${productVersion()}</span></div>
+            <p>LLM gateway</p>
+          </div>
         </div>
         <nav class="nav">
           ${tabs.map(([id, label, glyph]) => `
@@ -2332,6 +2338,10 @@ function applyTheme(id, persist = true) {
 
 function titleForTab() {
   return { overview: 'Gateway overview', keys: 'API keys', models: 'Model catalog', usage: 'Usage and cost', appearance: 'Appearance', admin: 'Administration' }[state.tab] || 'Gateway';
+}
+
+function productVersion() {
+  return esc(state.health?.version || 'dev');
 }
 
 function subtitleForTab() {
