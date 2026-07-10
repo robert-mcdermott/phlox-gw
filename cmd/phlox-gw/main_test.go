@@ -33,6 +33,17 @@ func TestPrintVersionIgnoresOtherArguments(t *testing.T) {
 	}
 }
 
+func TestPrintBootstrapPassword(t *testing.T) {
+	var output bytes.Buffer
+	printBootstrapPassword(&output, "temporary-password-1234567890")
+	text := output.String()
+	for _, want := range []string{"FIRST-RUN ADMINISTRATOR", "Username:", "admin", "Temporary password:", "temporary-password-1234567890", "shown once", "choose a new password"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("bootstrap output does not contain %q:\n%s", want, text)
+		}
+	}
+}
+
 func TestApplyBuildDefaultsSetsServiceVersion(t *testing.T) {
 	cfg := config.Config{}
 	applyBuildDefaults(&cfg)

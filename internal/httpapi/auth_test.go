@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -9,9 +10,113 @@ import (
 	"testing"
 	"testing/fstest"
 
+	"github.com/robert-mcdermott/phlox-gw/internal/auth"
 	"github.com/robert-mcdermott/phlox-gw/internal/config"
 	"github.com/robert-mcdermott/phlox-gw/internal/store"
 )
+
+func TestTemporaryPasswordMustBeChangedBeforeAccess(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer st.Close()
+	temporaryPassword := "Temporary-Password-123"
+	hash, err := auth.HashPassword(temporaryPassword)
+	if err != nil {
+		t.Fatalf("HashPassword: %v", err)
+	}
+	admin := store.User{
+		ID:                 "user_forced_admin",
+		Username:           "admin",
+		Role:               "admin",
+		PasswordHash:       hash,
+		AuthProvider:       "local",
+		IsActive:           true,
+		MustChangePassword: true,
+	}
+	if err := st.CreateUser(context.Background(), admin); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	handler, err := New(Options{
+		Config: config.Config{SessionSecret: "test-secret"},
+		Store:  st,
+		Frontend: fstest.MapFS{
+			"frontend/dist/index.html": &fstest.MapFile{Data: []byte("<html></html>")},
+		},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	login := jsonRequest(t, handler, http.MethodPost, "/api/auth/login", "", map[string]any{
+		"username": "admin",
+		"password": temporaryPassword,
+	})
+	if login.Code != http.StatusOK {
+		t.Fatalf("login status = %d body = %s", login.Code, login.Body.String())
+	}
+	var loginBody struct {
+		Token string `json:"token"`
+		User  struct {
+			MustChangePassword bool `json:"must_change_password"`
+		} `json:"user"`
+	}
+	decodeRecorder(t, login, &loginBody)
+	if loginBody.Token == "" || !loginBody.User.MustChangePassword {
+		t.Fatalf("unexpected login response: %#v", loginBody)
+	}
+	oldToken := loginBody.Token
+
+	me := jsonRequest(t, handler, http.MethodGet, "/api/auth/me", oldToken, nil)
+	if me.Code != http.StatusOK {
+		t.Fatalf("me status = %d body = %s", me.Code, me.Body.String())
+	}
+	blocked := jsonRequest(t, handler, http.MethodGet, "/api/models", oldToken, nil)
+	if blocked.Code != http.StatusPreconditionRequired || !strings.Contains(blocked.Body.String(), "password change required") {
+		t.Fatalf("protected route status = %d body = %s", blocked.Code, blocked.Body.String())
+	}
+	same := jsonRequest(t, handler, http.MethodPost, "/api/auth/change-password", oldToken, map[string]any{"password": temporaryPassword})
+	if same.Code != http.StatusBadRequest {
+		t.Fatalf("same-password status = %d body = %s", same.Code, same.Body.String())
+	}
+
+	permanentPassword := "A-New-Permanent-Password-456"
+	changed := jsonRequest(t, handler, http.MethodPost, "/api/auth/change-password", oldToken, map[string]any{"password": permanentPassword})
+	if changed.Code != http.StatusOK {
+		t.Fatalf("change status = %d body = %s", changed.Code, changed.Body.String())
+	}
+	var changedBody struct {
+		Token string `json:"token"`
+		User  struct {
+			MustChangePassword bool `json:"must_change_password"`
+		} `json:"user"`
+	}
+	decodeRecorder(t, changed, &changedBody)
+	if changedBody.Token == "" || changedBody.User.MustChangePassword {
+		t.Fatalf("unexpected change response: %#v", changedBody)
+	}
+	if changedBody.Token == oldToken {
+		t.Fatal("password change did not issue a replacement session")
+	}
+
+	stale := jsonRequest(t, handler, http.MethodGet, "/api/auth/me", oldToken, nil)
+	if stale.Code != http.StatusUnauthorized {
+		t.Fatalf("old session status = %d body = %s", stale.Code, stale.Body.String())
+	}
+	allowed := jsonRequest(t, handler, http.MethodGet, "/api/models", changedBody.Token, nil)
+	if allowed.Code != http.StatusOK {
+		t.Fatalf("new session status = %d body = %s", allowed.Code, allowed.Body.String())
+	}
+	oldLogin := jsonRequest(t, handler, http.MethodPost, "/api/auth/login", "", map[string]any{"username": "admin", "password": temporaryPassword})
+	if oldLogin.Code != http.StatusUnauthorized {
+		t.Fatalf("old password login status = %d body = %s", oldLogin.Code, oldLogin.Body.String())
+	}
+	newLogin := jsonRequest(t, handler, http.MethodPost, "/api/auth/login", "", map[string]any{"username": "admin", "password": permanentPassword})
+	if newLogin.Code != http.StatusOK {
+		t.Fatalf("new password login status = %d body = %s", newLogin.Code, newLogin.Body.String())
+	}
+}
 
 func TestOIDCLoginCallbackProvisionsUserAndIssuesSession(t *testing.T) {
 	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))

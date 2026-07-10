@@ -57,15 +57,16 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request, admin store.
 		return
 	}
 	user := store.User{
-		ID:           id,
-		Username:     req.Username,
-		Email:        req.Email,
-		DisplayName:  req.DisplayName,
-		Department:   req.Department,
-		Role:         role,
-		PasswordHash: hash,
-		AuthProvider: "local",
-		IsActive:     true,
+		ID:                 id,
+		Username:           req.Username,
+		Email:              req.Email,
+		DisplayName:        req.DisplayName,
+		Department:         req.Department,
+		Role:               role,
+		PasswordHash:       hash,
+		AuthProvider:       "local",
+		IsActive:           true,
+		MustChangePassword: true,
 	}
 	if err := s.store.CreateUser(r.Context(), user); err != nil {
 		if errors.Is(err, store.ErrConflict) {
@@ -149,7 +150,7 @@ func (s *Server) resetUserPassword(w http.ResponseWriter, r *http.Request, admin
 		respondError(w, http.StatusInternalServerError, "could not hash password")
 		return
 	}
-	if err := s.store.SetUserPassword(r.Context(), r.PathValue("id"), hash); err != nil {
+	if err := s.store.SetUserPassword(r.Context(), r.PathValue("id"), hash, true); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			respondError(w, http.StatusNotFound, "user not found")
 			return
@@ -162,7 +163,7 @@ func (s *Server) resetUserPassword(w http.ResponseWriter, r *http.Request, admin
 	if err == nil {
 		targetDisplay = target.Username
 	}
-	s.audit(r, admin, "user.password_reset", "user", r.PathValue("id"), targetDisplay, nil)
+	s.audit(r, admin, "user.password_reset", "user", r.PathValue("id"), targetDisplay, map[string]any{"must_change_password": true})
 	respondJSON(w, http.StatusOK, map[string]any{"status": "ok"})
 }
 

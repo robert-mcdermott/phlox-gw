@@ -97,6 +97,29 @@ Copy-Item scripts\env.example .env
 scripts\run-local.ps1
 ```
 
+## First-Run Administrator Bootstrap
+
+When Phlox-GW starts with a new, empty database, it creates the local `admin` account with
+a cryptographically random temporary password. The binary prints that password once in a
+first-run banner on standard output. It does not store the plaintext password or print it
+again on later starts.
+
+Sign in as `admin` with the displayed temporary password. The dashboard immediately asks
+for a new password of 12–72 bytes and blocks every other dashboard and administration API
+until the change succeeds. Password rotation invalidates every session issued for the
+temporary password.
+
+Treat first-start output as a secret: restrict service-log access and retention, complete
+the password change promptly, and then remove the bootstrap log if your operational policy
+permits it. If the output is lost before the first login, remove the still-unused database
+and start again. Never remove a database that contains configuration or operational data;
+restore it from backup instead.
+
+Existing databases are never reseeded. Schema migration preserves existing passwords and
+sessions without forcing a password change. Enabling OIDC does not remove the local
+bootstrap account; it remains the initial break-glass path for configuring SSO and can be
+disabled after an OIDC administrator has been verified.
+
 ## Runtime Files
 
 Phlox-GW uses SQLite by default and writes one SQLite database file:
@@ -458,7 +481,15 @@ export PHLOX_GW_CLUSTER_DEMO_DIR=.phlox-gw-cluster-demo
 scripts/run-demo-cluster.sh
 ```
 
-Open the first node and sign in as `admin` / `admin`, then inspect `Admin -> Cluster`.
+For a new shared Postgres database, exactly one node creates the bootstrap administrator.
+Find its one-time password in the protected per-node logs:
+
+```bash
+grep -h "Temporary password:" .phlox-gw-cluster-demo/node-*.log
+```
+
+Open the first node, sign in as `admin` with that temporary password, complete the required
+password change, and then inspect `Admin -> Cluster`.
 
 ### OIDC And Entra ID
 

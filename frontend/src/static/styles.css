@@ -1265,6 +1265,28 @@ td input[type="checkbox"] {
   color: var(--muted);
 }
 
+.forced-password h2 {
+  margin: 24px 0 8px;
+}
+
+.password-requirement {
+  margin: 0 0 18px;
+  padding: 10px 12px;
+  border-left: 3px solid var(--cyan);
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.login-actions {
+  display: flex;
+  gap: 10px;
+}
+
+.login-actions .primary {
+  flex: 1;
+}
+
 .field {
   display: grid;
   gap: 6px;

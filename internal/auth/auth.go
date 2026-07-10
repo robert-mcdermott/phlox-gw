@@ -15,11 +15,12 @@ import (
 )
 
 type Claims struct {
-	Subject  string `json:"sub"`
-	Username string `json:"username"`
-	Role     string `json:"role"`
-	Expires  int64  `json:"exp"`
-	IssuedAt int64  `json:"iat"`
+	Subject        string `json:"sub"`
+	Username       string `json:"username"`
+	Role           string `json:"role"`
+	SessionVersion int64  `json:"session_version,omitempty"`
+	Expires        int64  `json:"exp"`
+	IssuedAt       int64  `json:"iat"`
 }
 
 func HashPassword(password string) (string, error) {
@@ -84,6 +85,17 @@ func NewAPIKey() (plain string, prefix string, hash string, err error) {
 	}
 	hash = HashAPIKey(plain)
 	return plain, prefix, hash, nil
+}
+
+// NewTemporaryPassword returns a URL-safe, high-entropy password for first-run bootstrap.
+// The plaintext value must only be shown to the operator and is never persisted by
+// Phlox-GW.
+func NewTemporaryPassword() (string, error) {
+	buf := make([]byte, 24)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(buf), nil
 }
 
 func HashAPIKey(key string) string {

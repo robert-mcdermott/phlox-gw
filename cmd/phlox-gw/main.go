@@ -49,14 +49,23 @@ func main() {
 	}
 	defer db.Close()
 
-	adminHash, err := auth.HashPassword("admin")
+	temporaryPassword, err := auth.NewTemporaryPassword()
+	if err != nil {
+		logger.Error("generate temporary administrator password", "error", err)
+		os.Exit(1)
+	}
+	adminHash, err := auth.HashPassword(temporaryPassword)
 	if err != nil {
 		logger.Error("hash seed password", "error", err)
 		os.Exit(1)
 	}
-	if err := db.EnsureSeedData(adminHash); err != nil {
+	seedResult, err := db.EnsureBootstrapData(adminHash)
+	if err != nil {
 		logger.Error("seed database", "error", err)
 		os.Exit(1)
+	}
+	if seedResult.AdminCreated {
+		printBootstrapPassword(os.Stdout, temporaryPassword)
 	}
 
 	tel, err := telemetry.New(context.Background(), cfg.Telemetry, logger)
@@ -123,6 +132,20 @@ func printVersion(args []string, w io.Writer) bool {
 	}
 	_, _ = fmt.Fprintln(w, phloxgw.VersionString())
 	return true
+}
+
+func printBootstrapPassword(w io.Writer, password string) {
+	_, _ = fmt.Fprintln(w, "")
+	_, _ = fmt.Fprintln(w, "+------------------------------------------------------------+")
+	_, _ = fmt.Fprintln(w, "|  PHLOX-GW FIRST-RUN ADMINISTRATOR                          |")
+	_, _ = fmt.Fprintln(w, "+------------------------------------------------------------+")
+	_, _ = fmt.Fprintln(w, "|  Username:           admin                                 |")
+	_, _ = fmt.Fprintf(w, "|  Temporary password: %-36s |\n", password)
+	_, _ = fmt.Fprintln(w, "|                                                            |")
+	_, _ = fmt.Fprintln(w, "|  Sign in and choose a new password before continuing.      |")
+	_, _ = fmt.Fprintln(w, "|  This password is shown once. Store first-run logs safely. |")
+	_, _ = fmt.Fprintln(w, "+------------------------------------------------------------+")
+	_, _ = fmt.Fprintln(w, "")
 }
 
 func applyBuildDefaults(cfg *config.Config) {

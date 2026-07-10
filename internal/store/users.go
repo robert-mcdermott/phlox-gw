@@ -8,27 +8,29 @@ import (
 )
 
 type User struct {
-	ID           string     `json:"id"`
-	Username     string     `json:"username"`
-	Email        string     `json:"email"`
-	DisplayName  string     `json:"display_name"`
-	Department   string     `json:"department"`
-	Role         string     `json:"role"`
-	PasswordHash string     `json:"-"`
-	AuthProvider string     `json:"auth_provider"`
-	IsActive     bool       `json:"is_active"`
-	CreatedAt    time.Time  `json:"created_at"`
-	UpdatedAt    time.Time  `json:"updated_at"`
-	LastLoginAt  *time.Time `json:"last_login_at,omitempty"`
+	ID                 string     `json:"id"`
+	Username           string     `json:"username"`
+	Email              string     `json:"email"`
+	DisplayName        string     `json:"display_name"`
+	Department         string     `json:"department"`
+	Role               string     `json:"role"`
+	PasswordHash       string     `json:"-"`
+	AuthProvider       string     `json:"auth_provider"`
+	IsActive           bool       `json:"is_active"`
+	MustChangePassword bool       `json:"must_change_password"`
+	SessionVersion     int64      `json:"-"`
+	CreatedAt          time.Time  `json:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
+	LastLoginAt        *time.Time `json:"last_login_at,omitempty"`
 }
 
 func (s *Store) GetUserByUsername(ctx context.Context, username string) (User, error) {
-	row := s.queryRow(ctx, `SELECT id, username, email, display_name, department, role, password_hash, auth_provider, is_active, created_at, updated_at, last_login_at FROM users WHERE username = ?`, username)
+	row := s.queryRow(ctx, `SELECT `+userColumns+` FROM users WHERE username = ?`, username)
 	return scanUser(row)
 }
 
 func (s *Store) GetUserByID(ctx context.Context, id string) (User, error) {
-	row := s.queryRow(ctx, `SELECT id, username, email, display_name, department, role, password_hash, auth_provider, is_active, created_at, updated_at, last_login_at FROM users WHERE id = ?`, id)
+	row := s.queryRow(ctx, `SELECT `+userColumns+` FROM users WHERE id = ?`, id)
 	return scanUser(row)
 }
 
@@ -38,7 +40,7 @@ func (s *Store) TouchLogin(ctx context.Context, userID string, t time.Time) erro
 }
 
 func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
-	rows, err := s.query(ctx, `SELECT id, username, email, display_name, department, role, password_hash, auth_provider, is_active, created_at, updated_at, last_login_at FROM users ORDER BY username`)
+	rows, err := s.query(ctx, `SELECT `+userColumns+` FROM users ORDER BY username`)
 	if err != nil {
 		return nil, err
 	}
@@ -57,9 +59,9 @@ func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
 func (s *Store) CreateUser(ctx context.Context, u User) error {
 	now := time.Now().UTC()
 	_, err := s.exec(ctx, `
-		INSERT INTO users (id, username, email, display_name, department, role, password_hash, auth_provider, is_active, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		u.ID, u.Username, u.Email, u.DisplayName, u.Department, u.Role, u.PasswordHash, valueOr(u.AuthProvider, "local"), boolInt(u.IsActive), formatTime(now), formatTime(now))
+		INSERT INTO users (id, username, email, display_name, department, role, password_hash, auth_provider, is_active, must_change_password, session_version, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		u.ID, u.Username, u.Email, u.DisplayName, u.Department, u.Role, u.PasswordHash, valueOr(u.AuthProvider, "local"), boolInt(u.IsActive), boolInt(u.MustChangePassword), u.SessionVersion, formatTime(now), formatTime(now))
 	if isUniqueErr(err) {
 		return ErrConflict
 	}
@@ -100,15 +102,35 @@ func (s *Store) UpdateFederatedUser(ctx context.Context, u User) error {
 	return nil
 }
 
-func (s *Store) SetUserPassword(ctx context.Context, userID, passwordHash string) error {
+func (s *Store) SetUserPassword(ctx context.Context, userID, passwordHash string, mustChangePassword bool) error {
 	now := time.Now().UTC()
-	res, err := s.exec(ctx, `UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?`, passwordHash, formatTime(now), userID)
+	res, err := s.exec(ctx, `UPDATE users SET password_hash = ?, must_change_password = ?, session_version = session_version + 1, updated_at = ? WHERE id = ?`, passwordHash, boolInt(mustChangePassword), formatTime(now), userID)
 	if err != nil {
 		return err
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
 		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) CompleteRequiredPasswordChange(ctx context.Context, userID, passwordHash string, expectedSessionVersion int64) error {
+	now := time.Now().UTC()
+	res, err := s.exec(ctx, `
+		UPDATE users
+		SET password_hash = ?, must_change_password = 0, session_version = session_version + 1, updated_at = ?
+		WHERE id = ? AND must_change_password = 1 AND session_version = ?`,
+		passwordHash, formatTime(now), userID, expectedSessionVersion)
+	if err != nil {
+		return err
+	}
+	changed, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed == 0 {
+		return ErrConflict
 	}
 	return nil
 }
@@ -138,10 +160,10 @@ func (s *Store) DeleteUser(ctx context.Context, userID string) error {
 
 func scanUser(row scanner) (User, error) {
 	var u User
-	var active int
+	var active, mustChange int
 	var created, updated string
 	var last sql.NullString
-	err := row.Scan(&u.ID, &u.Username, &u.Email, &u.DisplayName, &u.Department, &u.Role, &u.PasswordHash, &u.AuthProvider, &active, &created, &updated, &last)
+	err := row.Scan(&u.ID, &u.Username, &u.Email, &u.DisplayName, &u.Department, &u.Role, &u.PasswordHash, &u.AuthProvider, &active, &mustChange, &u.SessionVersion, &created, &updated, &last)
 	if errors.Is(err, sql.ErrNoRows) {
 		return User{}, ErrNotFound
 	}
@@ -149,6 +171,7 @@ func scanUser(row scanner) (User, error) {
 		return User{}, err
 	}
 	u.IsActive = active == 1
+	u.MustChangePassword = mustChange == 1
 	u.CreatedAt = parseTime(created)
 	u.UpdatedAt = parseTime(updated)
 	if last.Valid {
@@ -157,3 +180,5 @@ func scanUser(row scanner) (User, error) {
 	}
 	return u, nil
 }
+
+const userColumns = `id, username, email, display_name, department, role, password_hash, auth_provider, is_active, must_change_password, session_version, created_at, updated_at, last_login_at`

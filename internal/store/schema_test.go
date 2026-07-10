@@ -140,3 +140,50 @@ func TestMigrateAzureEraProviderTypeCheckAcceptsGoogle(t *testing.T) {
 		t.Fatalf("CreateProvider google on migrated db: %v", err)
 	}
 }
+
+func TestMigrateExistingUsersPreservesAccess(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "legacy-users.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	_, err = db.ExecContext(ctx, `CREATE TABLE users (
+		id TEXT PRIMARY KEY,
+		username TEXT NOT NULL UNIQUE,
+		email TEXT NOT NULL DEFAULT '',
+		display_name TEXT NOT NULL DEFAULT '',
+		department TEXT NOT NULL DEFAULT '',
+		role TEXT NOT NULL CHECK (role IN ('user', 'admin')),
+		password_hash TEXT NOT NULL,
+		auth_provider TEXT NOT NULL DEFAULT 'local',
+		is_active INTEGER NOT NULL DEFAULT 1,
+		created_at TEXT NOT NULL,
+		updated_at TEXT NOT NULL,
+		last_login_at TEXT
+	)`)
+	if err != nil {
+		t.Fatalf("create legacy users: %v", err)
+	}
+	_, err = db.ExecContext(ctx, `INSERT INTO users (id, username, role, password_hash, created_at, updated_at)
+		VALUES ('existing-admin', 'admin', 'admin', 'existing-hash', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`)
+	if err != nil {
+		t.Fatalf("insert legacy user: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close raw db: %v", err)
+	}
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open migrated database: %v", err)
+	}
+	defer s.Close()
+	admin, err := s.GetUserByUsername(ctx, "admin")
+	if err != nil {
+		t.Fatalf("GetUserByUsername: %v", err)
+	}
+	if admin.PasswordHash != "existing-hash" || admin.MustChangePassword || admin.SessionVersion != 0 {
+		t.Fatalf("legacy user access state changed: %#v", admin)
+	}
+}

@@ -102,15 +102,18 @@ scripts/build-release.sh --skip-frontend
 scripts/run-local.sh
 ```
 
-Open [http://127.0.0.1:8080](http://127.0.0.1:8080) and sign in with the seeded local
-administrator:
+On the first start of a new database, Phlox-GW prints a one-time administrator credential
+banner to the terminal:
 
 ```text
 Username: admin
-Password: admin
+Temporary password: <randomly generated value>
 ```
 
-Change that password before any shared use.
+Open [http://127.0.0.1:8080](http://127.0.0.1:8080), sign in with that credential, and
+choose a permanent password. The dashboard blocks all other actions until the password is
+changed. The temporary password is not printed again on restart, so retain the protected
+first-start terminal or service log until setup is complete.
 
 By default Phlox-GW uses SQLite, stores `phlox-gw.db` in the current working directory,
 and listens on `127.0.0.1:8080`.

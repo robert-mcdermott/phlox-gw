@@ -77,6 +77,8 @@ type columnMigration struct {
 }
 
 var columnMigrations = []columnMigration{
+	{table: "users", column: "must_change_password", spec: "INTEGER NOT NULL DEFAULT 0"},
+	{table: "users", column: "session_version", spec: "INTEGER NOT NULL DEFAULT 0"},
 	{table: "api_keys", column: "budget_usd", spec: "DOUBLE PRECISION NOT NULL DEFAULT 0"},
 	{table: "api_keys", column: "rpm_limit", spec: "INTEGER NOT NULL DEFAULT 0"},
 	{table: "api_keys", column: "tpm_limit", spec: "INTEGER NOT NULL DEFAULT 0"},
@@ -232,21 +234,23 @@ func (s *Store) ensureColumn(ctx context.Context, table, column, spec string) er
 	return err
 }
 
+type SeedResult struct {
+	AdminCreated bool
+}
+
 func (s *Store) EnsureSeedData(adminPasswordHash string) error {
+	return s.ensureSeedData(adminPasswordHash, false, nil)
+}
+
+func (s *Store) EnsureBootstrapData(adminPasswordHash string) (SeedResult, error) {
+	var result SeedResult
+	err := s.ensureSeedData(adminPasswordHash, true, &result)
+	return result, err
+}
+
+func (s *Store) ensureSeedData(adminPasswordHash string, requirePasswordChange bool, result *SeedResult) error {
 	ctx := context.Background()
 	now := time.Now().UTC()
-	var count int
-	if err := s.queryRow(ctx, "SELECT COUNT(*) FROM users").Scan(&count); err != nil {
-		return err
-	}
-	if count == 0 {
-		if _, err := s.exec(ctx, `
-			INSERT INTO users (id, username, email, display_name, department, role, password_hash, auth_provider, is_active, created_at, updated_at)
-			VALUES (?, 'admin', 'admin@localhost', 'Administrator', 'IT', 'admin', ?, 'local', 1, ?, ?)`,
-			"user_admin", adminPasswordHash, formatTime(now), formatTime(now)); err != nil {
-			return err
-		}
-	}
 
 	seeds := []Provider{
 		{ID: "local-ollama", Name: "Ollama (local)", Type: "openai", BaseURL: "http://localhost:11434/v1", Enabled: true},
@@ -277,6 +281,23 @@ func (s *Store) EnsureSeedData(adminPasswordHash string) error {
 			m.ID, m.ProviderID, m.ModelID, m.Route, m.DisplayName, boolInt(m.SupportsStreaming), boolInt(m.Enabled), formatTime(now), formatTime(now)); err != nil {
 			return err
 		}
+	}
+
+	adminInsert, err := s.exec(ctx, `
+		INSERT INTO users (id, username, email, display_name, department, role, password_hash, auth_provider, is_active, must_change_password, session_version, created_at, updated_at)
+		SELECT ?, 'admin', 'admin@localhost', 'Administrator', 'IT', 'admin', ?, 'local', 1, ?, 0, ?, ?
+		WHERE NOT EXISTS (SELECT 1 FROM users)
+		ON CONFLICT DO NOTHING`,
+		"user_admin", adminPasswordHash, boolInt(requirePasswordChange), formatTime(now), formatTime(now))
+	if err != nil {
+		return err
+	}
+	if result != nil {
+		created, err := adminInsert.RowsAffected()
+		if err != nil {
+			return err
+		}
+		result.AdminCreated = created == 1
 	}
 	return nil
 }
@@ -321,6 +342,8 @@ var schema = []string{
 		password_hash TEXT NOT NULL,
 		auth_provider TEXT NOT NULL DEFAULT 'local',
 		is_active INTEGER NOT NULL DEFAULT 1,
+		must_change_password INTEGER NOT NULL DEFAULT 0,
+		session_version INTEGER NOT NULL DEFAULT 0,
 		created_at TEXT NOT NULL,
 		updated_at TEXT NOT NULL,
 		last_login_at TEXT

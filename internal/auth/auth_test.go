@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -8,11 +9,12 @@ import (
 func TestSessionTokenRoundTrip(t *testing.T) {
 	now := time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)
 	claims := Claims{
-		Subject:  "user_123",
-		Username: "alice",
-		Role:     "admin",
-		IssuedAt: now.Unix(),
-		Expires:  now.Add(time.Hour).Unix(),
+		Subject:        "user_123",
+		Username:       "alice",
+		Role:           "admin",
+		SessionVersion: 7,
+		IssuedAt:       now.Unix(),
+		Expires:        now.Add(time.Hour).Unix(),
 	}
 	token, err := SignSession(claims, "test-secret")
 	if err != nil {
@@ -22,11 +24,31 @@ func TestSessionTokenRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("VerifySession: %v", err)
 	}
-	if got.Subject != claims.Subject || got.Username != claims.Username || got.Role != claims.Role {
+	if got.Subject != claims.Subject || got.Username != claims.Username || got.Role != claims.Role || got.SessionVersion != claims.SessionVersion {
 		t.Fatalf("claims mismatch: got %#v want %#v", got, claims)
 	}
 	if _, err := VerifySession(token, "wrong-secret", now); err == nil {
 		t.Fatal("VerifySession accepted a token signed with a different secret")
+	}
+}
+
+func TestTemporaryPasswordIsStrongAndURLSafe(t *testing.T) {
+	first, err := NewTemporaryPassword()
+	if err != nil {
+		t.Fatalf("NewTemporaryPassword: %v", err)
+	}
+	second, err := NewTemporaryPassword()
+	if err != nil {
+		t.Fatalf("NewTemporaryPassword second call: %v", err)
+	}
+	if len(first) != 32 {
+		t.Fatalf("temporary password length = %d, want 32", len(first))
+	}
+	if first == second {
+		t.Fatal("temporary password generator returned a duplicate")
+	}
+	if strings.ContainsAny(first, " \t\r\n") {
+		t.Fatalf("temporary password contains whitespace: %q", first)
 	}
 }
 

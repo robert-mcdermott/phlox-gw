@@ -75,11 +75,12 @@ func jsonRequestWithHeaders(t *testing.T, handler http.Handler, method, path str
 func sessionToken(t *testing.T, user store.User) string {
 	t.Helper()
 	token, err := auth.SignSession(auth.Claims{
-		Subject:  user.ID,
-		Username: user.Username,
-		Role:     user.Role,
-		IssuedAt: time.Now().UTC().Unix(),
-		Expires:  time.Now().UTC().Add(time.Hour).Unix(),
+		Subject:        user.ID,
+		Username:       user.Username,
+		Role:           user.Role,
+		SessionVersion: user.SessionVersion,
+		IssuedAt:       time.Now().UTC().Unix(),
+		Expires:        time.Now().UTC().Add(time.Hour).Unix(),
 	}, "test-secret")
 	if err != nil {
 		t.Fatalf("SignSession: %v", err)
