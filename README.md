@@ -78,7 +78,7 @@ database behind a load balancer.
 
 ## Requirements
 
-- Go matching the version in [go.mod](go.mod). The current module declares Go 1.26.
+- Go matching the version in [go.mod](go.mod). The current module requires Go 1.26.5.
 - Node.js and npm only if you plan to rebuild the frontend from `frontend/src`.
 - Network access from the gateway host to the configured upstream providers.
 - AWS credentials on the gateway host if you use Bedrock.
