@@ -84,6 +84,9 @@ For a new release:
 4. Execute a native artifact with `--version` and confirm version, commit, and build date.
 5. Complete the release checks, then create a Git tag matching `VERSION` exactly.
 
+See the [Release Guide](RELEASING.md) for the complete manual publishing process,
+asset verification, and the proposed tag-triggered GitHub Actions workflow.
+
 The release scripts reject invalid version formats. In reproducible build automation,
 set `PHLOX_GW_BUILD_COMMIT` and `PHLOX_GW_BUILD_DATE` explicitly; otherwise they default to
 the current Git commit and current UTC timestamp. If tracked changes are uncommitted, the

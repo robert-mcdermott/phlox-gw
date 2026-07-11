@@ -191,6 +191,10 @@ Phlox-GW product version. The current release line is `v0.1.0`. Development buil
 that file directly. The release scripts read the same file and stamp the version, current
 Git commit, and UTC build time into every platform binary.
 
+The complete [Release Guide](docs/RELEASING.md) documents both manual GitHub publication
+and the recommended tag-triggered Actions workflow that creates a draft release for human
+review.
+
 To prepare the next release:
 
 1. Change `VERSION` to the next semantic version, including the leading `v`, such as
