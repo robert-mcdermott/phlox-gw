@@ -13,13 +13,14 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  build-and-test:
-    name: Build and test
+  quality:
+    name: Quality
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
       - name: Checkout
@@ -31,6 +32,14 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Verify Go toolchain
+        run: |
+          required="$(awk '$1 == "go" { print $2; exit }' go.mod)"
+          actual="$(go env GOVERSION)"
+          echo "Required: go${required}"
+          echo "Resolved: ${actual}"
+          [[ "$actual" == "go${required}" ]]
+
       - name: Set up Node.js
         uses: actions/setup-node@v6
         with:
@@ -39,13 +48,129 @@ jobs:
       - name: Download Go modules
         run: go mod download
 
+      - name: Check Go formatting
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [[ -n "$unformatted" ]]; then
+            echo "The following Go files need formatting:"
+            echo "$unformatted"
+            exit 1
+          fi
+
       - name: Build frontend
         run: npm run build --prefix frontend
 
-      - name: Test backend
+      - name: Check frontend source and dist parity
+        run: git diff --exit-code -- frontend/dist
+
+      - name: Vet Go code
+        run: go vet ./...
+
+      - name: Run tests
         run: go test ./...
 
-      - name: Build backend binary
+  race:
+    name: Race detector
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Verify Go toolchain
         run: |
-          mkdir -p dist
-          go build -trimpath -o dist/phlox-gw-linux-amd64 ./cmd/phlox-gw
+          required="$(awk '$1 == "go" { print $2; exit }' go.mod)"
+          actual="$(go env GOVERSION)"
+          echo "Required: go${required}"
+          echo "Resolved: ${actual}"
+          [[ "$actual" == "go${required}" ]]
+
+      - name: Download Go modules
+        run: go mod download
+
+      - name: Run tests with race detector
+        run: go test -race ./...
+
+  vulnerability:
+    name: Vulnerability scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GOVULNCHECK_VERSION: v1.6.0
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Verify Go toolchain
+        run: |
+          required="$(awk '$1 == "go" { print $2; exit }' go.mod)"
+          actual="$(go env GOVERSION)"
+          echo "Required: go${required}"
+          echo "Resolved: ${actual}"
+          [[ "$actual" == "go${required}" ]]
+
+      - name: Download Go modules
+        run: go mod download
+
+      - name: Install pinned govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}
+
+      - name: Scan for reachable vulnerabilities
+        run: |
+          "$(go env GOPATH)/bin/govulncheck" ./...
+
+  release-build:
+    name: Release build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Verify Go toolchain
+        run: |
+          required="$(awk '$1 == "go" { print $2; exit }' go.mod)"
+          actual="$(go env GOVERSION)"
+          echo "Required: go${required}"
+          echo "Resolved: ${actual}"
+          [[ "$actual" == "go${required}" ]]
+
+      - name: Download Go modules
+        run: go mod download
+
+      - name: Build all release targets
+        run: scripts/build-release.sh --skip-frontend --clean
+
+      - name: Verify release checksums
+        working-directory: dist
+        run: sha256sum --check checksums.txt
+
+      - name: Verify native binary version
+        run: |
+          expected="phlox-gw $(tr -d '[:space:]' < VERSION)"
+          actual="$(./dist/phlox-gw-linux-amd64 --version)"
+          echo "$actual"
+          [[ "$actual" == "$expected"* ]]

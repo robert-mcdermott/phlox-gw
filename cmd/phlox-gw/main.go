@@ -3,10 +3,13 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -19,12 +22,17 @@ import (
 )
 
 func main() {
+	if printVersion(os.Args[1:], os.Stdout) {
+		return
+	}
+
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	cfg, err := config.Load()
 	if err != nil {
 		logger.Error("load config", "error", err)
 		os.Exit(1)
 	}
+	applyBuildDefaults(&cfg)
 
 	db, err := store.OpenWithOptions(store.OpenOptions{
 		Driver:               cfg.Database.Driver,
@@ -41,15 +49,26 @@ func main() {
 	}
 	defer db.Close()
 
-	adminHash, err := auth.HashPassword("admin")
+	temporaryPassword, err := auth.NewTemporaryPassword()
+	if err != nil {
+		logger.Error("generate temporary administrator password", "error", err)
+		os.Exit(1)
+	}
+	adminHash, err := auth.HashPassword(temporaryPassword)
 	if err != nil {
 		logger.Error("hash seed password", "error", err)
 		os.Exit(1)
 	}
-	if err := db.EnsureSeedData(adminHash); err != nil {
+	seedResult, err := db.EnsureBootstrapData(adminHash)
+	if err != nil {
 		logger.Error("seed database", "error", err)
 		os.Exit(1)
 	}
+	bootstrapPassword := ""
+	if seedResult.AdminCreated {
+		bootstrapPassword = temporaryPassword
+	}
+	printStartupBanner(os.Stdout, newStartupBanner(cfg, bootstrapPassword), terminalColorsEnabled(os.Stdout))
 
 	tel, err := telemetry.New(context.Background(), cfg.Telemetry, logger)
 	if err != nil {
@@ -84,7 +103,7 @@ func main() {
 	}
 
 	go func() {
-		logger.Info("phlox-gw listening", "addr", cfg.Addr, "deployment_mode", cfg.Deployment.Mode, "instance_id", cfg.Deployment.InstanceID, "db_driver", cfg.Database.Driver, "db", databaseLogTarget(cfg))
+		logger.Info("phlox-gw listening", "version", phloxgw.Version(), "commit", valueOrUnknown(phloxgw.BuildCommit), "addr", cfg.Addr, "deployment_mode", cfg.Deployment.Mode, "instance_id", cfg.Deployment.InstanceID, "db_driver", cfg.Database.Driver, "db", databaseLogTarget(cfg))
 		if cfg.UsingDefaultSecret {
 			logger.Warn("using development session secret; set PHLOX_GW_SESSION_SECRET before shared use")
 		}
@@ -107,6 +126,28 @@ func main() {
 	if err := db.DeleteClusterNode(context.Background(), cfg.Deployment.InstanceID); err != nil && !errors.Is(err, store.ErrNotFound) {
 		logger.Warn("release cluster node registration failed", "instance_id", cfg.Deployment.InstanceID, "error", err)
 	}
+}
+
+func printVersion(args []string, w io.Writer) bool {
+	if len(args) != 1 || args[0] != "--version" {
+		return false
+	}
+	_, _ = fmt.Fprintln(w, phloxgw.VersionString())
+	return true
+}
+
+func applyBuildDefaults(cfg *config.Config) {
+	if cfg.Telemetry.ServiceVersion == "" {
+		cfg.Telemetry.ServiceVersion = phloxgw.Version()
+	}
+}
+
+func valueOrUnknown(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "unknown"
+	}
+	return value
 }
 
 func databaseLogTarget(cfg config.Config) string {

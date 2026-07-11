@@ -20,6 +20,12 @@ go build -o phlox-gw ./cmd/phlox-gw
 The compiled binary embeds `frontend/dist`, so users do not need a separate web server for
 the dashboard.
 
+At startup the binary prints a Phlox-branded terminal banner with its version, build
+identity, Go/platform runtime, process ID, dashboard address, deployment instance, and
+sanitized database target. ANSI brand colors are used only for an interactive terminal;
+redirected service logs receive the same banner as plain text. Set `NO_COLOR=1` or
+`CLICOLOR=0` to disable terminal color explicitly.
+
 Build the frontend and all release binaries:
 
 ```bash
@@ -52,6 +58,40 @@ The frontend source for the embedded dashboard lives in `frontend/src/static`. `
 build` copies that source into `frontend/dist`, which is what `embed.go` includes in the
 single binary.
 
+### Versioning And Release Builds
+
+The repository-root `VERSION` file is the product-version source of truth. It contains a
+semantic version with a leading `v`, currently:
+
+```text
+v0.1.0
+```
+
+Normal development builds embed that value. `scripts/build-release.sh` and
+`scripts/build-release.ps1` additionally stamp the current Git commit and UTC build date
+into every binary. Inspect a binary without initializing configuration or opening a
+database:
+
+```bash
+./phlox-gw --version
+```
+
+For a new release:
+
+1. Update `VERSION` to the intended version, for example `v0.2.0` or `v0.2.0-rc.1`.
+2. Commit the version change with the release changes.
+3. Run the full release build.
+4. Execute a native artifact with `--version` and confirm version, commit, and build date.
+5. Complete the release checks, then create a Git tag matching `VERSION` exactly.
+
+See the [Release Guide](RELEASING.md) for the complete manual publishing process,
+asset verification, and the proposed tag-triggered GitHub Actions workflow.
+
+The release scripts reject invalid version formats. In reproducible build automation,
+set `PHLOX_GW_BUILD_COMMIT` and `PHLOX_GW_BUILD_DATE` explicitly; otherwise they default to
+the current Git commit and current UTC timestamp. If tracked changes are uncommitted, the
+reported commit includes a `-dirty` suffix.
+
 For local runs, copy the environment template and use the run helper:
 
 ```bash
@@ -65,6 +105,29 @@ On Windows:
 Copy-Item scripts\env.example .env
 scripts\run-local.ps1
 ```
+
+## First-Run Administrator Bootstrap
+
+When Phlox-GW starts with a new, empty database, it creates the local `admin` account with
+a cryptographically random temporary password. The binary prints that password once in a
+first-run banner on standard output. It does not store the plaintext password or print it
+again on later starts.
+
+Sign in as `admin` with the displayed temporary password. The dashboard immediately asks
+for a new password of 12–72 bytes and blocks every other dashboard and administration API
+until the change succeeds. Password rotation invalidates every session issued for the
+temporary password.
+
+Treat first-start output as a secret: restrict service-log access and retention, complete
+the password change promptly, and then remove the bootstrap log if your operational policy
+permits it. If the output is lost before the first login, remove the still-unused database
+and start again. Never remove a database that contains configuration or operational data;
+restore it from backup instead.
+
+Existing databases are never reseeded. Schema migration preserves existing passwords and
+sessions without forcing a password change. Enabling OIDC does not remove the local
+bootstrap account; it remains the initial break-glass path for configuring SSO and can be
+disabled after an OIDC administrator has been verified.
 
 ## Runtime Files
 
@@ -427,7 +490,15 @@ export PHLOX_GW_CLUSTER_DEMO_DIR=.phlox-gw-cluster-demo
 scripts/run-demo-cluster.sh
 ```
 
-Open the first node and sign in as `admin` / `admin`, then inspect `Admin -> Cluster`.
+For a new shared Postgres database, exactly one node creates the bootstrap administrator.
+Find its one-time password in the protected per-node logs:
+
+```bash
+grep -h "Temporary password:" .phlox-gw-cluster-demo/node-*.log
+```
+
+Open the first node, sign in as `admin` with that temporary password, complete the required
+password change, and then inspect `Admin -> Cluster`.
 
 ### OIDC And Entra ID
 
@@ -514,7 +585,7 @@ per-user and per-department chargeback.
 | --- | --- | --- |
 | `PHLOX_GW_OTEL_TRACES_ENABLED` | `false` | Enables OTLP/HTTP trace export. |
 | `PHLOX_GW_OTEL_SERVICE_NAME` | `phlox-gw` | Service name attached to exported traces. |
-| `PHLOX_GW_OTEL_SERVICE_VERSION` | empty | Optional service version label. |
+| `PHLOX_GW_OTEL_SERVICE_VERSION` | binary version | Optional override for the service version label. |
 | `PHLOX_GW_OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` or `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP/HTTP traces endpoint. |
 | `PHLOX_GW_OTEL_EXPORTER_OTLP_INSECURE` | `OTEL_EXPORTER_OTLP_INSECURE` or `false` | Allows insecure OTLP transport. |
 | `PHLOX_GW_OTEL_SAMPLE_RATIO` | `1.0` | Trace sampling ratio from `0.0` to `1.0`. |
@@ -819,6 +890,7 @@ Expected response:
 {
   "name": "phlox-gw",
   "status": "ok",
+  "version": "v0.1.0",
   "time": "2026-06-24T00:00:00Z"
 }
 ```

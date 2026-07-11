@@ -51,7 +51,8 @@ dashboard so the production artifact can be distributed as one executable.
 
 Core tables:
 
-- `users`: local or OIDC-provisioned users, role, department, auth provider, active flag.
+- `users`: local or OIDC-provisioned users, role, department, auth provider, active flag,
+  required-password-change state, and a session version used for revocation.
 - `api_keys`: user-owned keys, hash, prefix, expiry, active flag, last used timestamp,
   model allowlist, monthly budget, RPM limit, and TPM limit.
 - `providers`: provider type, base URL, API key or environment variable reference,
@@ -89,6 +90,20 @@ is verified, configured claims are mapped into the local `users` table:
 Disabled local users remain blocked even if OIDC authentication succeeds. Existing local
 roles are preserved unless an incoming OIDC admin group grants admin. Auto-provisioning is
 enabled by default and can be disabled for environments that require pre-created users.
+
+On an empty database, startup generates a high-entropy temporary password, atomically
+creates one local `admin` account, and prints the plaintext credential once to standard
+output. The plaintext is never persisted. The account carries a durable
+`must_change_password` flag, and its session may access only the current-user and
+password-change endpoints until rotation succeeds. Rotation clears the flag, increments
+the user's session version, and returns a replacement token; every token issued for the
+temporary password then fails validation. Existing databases default the new fields to
+false and version zero, preserving their prior authentication behavior. In a concurrent
+Postgres startup, conflict-safe insertion ensures only the node that creates the account
+reports the credential.
+
+The local bootstrap administrator is also the initial break-glass path for OIDC-enabled
+deployments. Operators may disable it only after confirming an OIDC-mapped administrator.
 
 ## Request Lifecycle
 
@@ -223,11 +238,25 @@ The dashboard uses the Phlox operational visual language:
 
 - Dark default theme with magenta and cyan accents.
 - Compact cards and tables for administrators.
-- Tokenized CSS variables so React/Vite can grow into full theme switching.
+- Tokenized CSS variables supporting the built-in themes and responsive layouts.
 - First-screen product experience is the working admin console, not a marketing page.
 
-The `frontend/src` tree is a Vite/React scaffold. The current binary embeds
-`frontend/dist` so the server is usable before the richer frontend build pipeline lands.
+The dashboard is a framework-free static application. Its source lives under
+`frontend/src/static`:
+
+- `index.html` provides the document shell and loads the dashboard assets.
+- `styles.css` contains the theme tokens, component styling, and responsive behavior.
+- `app.js` owns client-side state, API requests, rendering, and user interactions.
+
+`npm run build` executes `frontend/build.mjs`, which copies these source assets into
+`frontend/dist`. The build has no runtime or development package dependencies beyond
+Node.js itself. The generated `frontend/dist` assets are checked in and embedded into the
+Go binary by `embed.go`, so end users receive the dashboard and API in one executable and
+do not need Node.js or a separate frontend server.
+
+There is no planned React or Vite migration. A future framework change should be driven by
+a concrete product need and must update this design document, the contributor architecture
+guide, and the release build process in the same change.
 
 ## Security Posture
 

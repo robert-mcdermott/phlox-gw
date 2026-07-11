@@ -48,6 +48,56 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, map[string]any{"token": token, "user": publicUser(user)})
 }
 
+func (s *Server) changePassword(w http.ResponseWriter, r *http.Request, user store.User) {
+	if !user.MustChangePassword {
+		respondError(w, http.StatusConflict, "password change is not required")
+		return
+	}
+	if user.AuthProvider != "local" {
+		respondError(w, http.StatusBadRequest, "password changes are only available for local accounts")
+		return
+	}
+	var req struct {
+		Password string `json:"password"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if size := len([]byte(req.Password)); size < 12 || size > 72 {
+		respondError(w, http.StatusBadRequest, "password must be between 12 and 72 bytes")
+		return
+	}
+	if auth.CheckPassword(user.PasswordHash, req.Password) {
+		respondError(w, http.StatusBadRequest, "new password must differ from the temporary password")
+		return
+	}
+	hash, err := auth.HashPassword(req.Password)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "could not hash password")
+		return
+	}
+	if err := s.store.CompleteRequiredPasswordChange(r.Context(), user.ID, hash, user.SessionVersion); err != nil {
+		if errors.Is(err, store.ErrConflict) {
+			respondError(w, http.StatusConflict, "password was already changed; sign in again")
+			return
+		}
+		respondError(w, http.StatusInternalServerError, "could not update password")
+		return
+	}
+	updated, err := s.store.GetUserByID(r.Context(), user.ID)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "could not reload user")
+		return
+	}
+	token, err := s.issueSessionToken(updated)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "could not sign session")
+		return
+	}
+	s.audit(r, updated, "auth.password_changed", "user", updated.ID, updated.Username, map[string]any{"forced": true})
+	respondJSON(w, http.StatusOK, map[string]any{"status": "ok", "token": token, "user": publicUser(updated)})
+}
+
 func (s *Server) oidcConfig(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, map[string]any{
 		"enabled":      s.cfg.OIDC.Enabled,
@@ -382,11 +432,12 @@ func groupsIntersect(claimGroups, adminGroups []string) bool {
 func (s *Server) issueSessionToken(user store.User) (string, error) {
 	now := time.Now().UTC()
 	claims := auth.Claims{
-		Subject:  user.ID,
-		Username: user.Username,
-		Role:     user.Role,
-		IssuedAt: now.Unix(),
-		Expires:  now.Add(12 * time.Hour).Unix(),
+		Subject:        user.ID,
+		Username:       user.Username,
+		Role:           user.Role,
+		SessionVersion: user.SessionVersion,
+		IssuedAt:       now.Unix(),
+		Expires:        now.Add(12 * time.Hour).Unix(),
 	}
 	return auth.SignSession(claims, s.cfg.SessionSecret)
 }

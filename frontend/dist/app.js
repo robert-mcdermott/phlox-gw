@@ -156,6 +156,10 @@ async function refresh() {
     state.oidcConfig = await api('/api/auth/oidc/config', { headers: {} });
     if (state.token) {
       state.user = await api('/api/auth/me');
+      if (state.user.must_change_password) {
+        render();
+        return;
+      }
       const base = [api('/api/models'), api('/api/api-keys'), api('/api/usage')];
       const [models, keys, usage] = await Promise.all(base);
       state.models = models || [];
@@ -209,11 +213,14 @@ function loginView() {
     <div class="login">
       <div class="brand">
         <div class="mark logo-mark"><img src="/phlox-logo.svg" alt="" /></div>
-        <div><h1>Phlox-GW</h1><p>Enterprise LLM gateway</p></div>
+        <div class="brand-copy">
+          <div class="brand-title"><h1>Phlox-GW</h1><span class="version-badge">${productVersion()}</span></div>
+          <p>Enterprise LLM gateway</p>
+        </div>
       </div>
       <p>Sign in with the local admin account to configure models, keys, budgets, and usage reporting.</p>
       <div class="field"><label>Username</label><input id="username" autocomplete="username" value="admin" /></div>
-      <div class="field"><label>Password</label><input id="password" type="password" autocomplete="current-password" value="admin" /></div>
+      <div class="field"><label>Password</label><input id="password" type="password" autocomplete="current-password" /></div>
       <div class="error" id="login-error"></div>
       <button class="btn primary" id="login-btn">Sign in</button>
       ${state.oidcConfig?.enabled ? `<button class="btn sso" id="oidc-login">Sign in with ${esc(state.oidcConfig.display_name || 'SSO')}</button>` : ''}
@@ -243,6 +250,60 @@ function loginView() {
   }
 }
 
+function passwordChangeView() {
+  app.innerHTML = `
+    <div class="login forced-password">
+      <div class="brand">
+        <div class="mark logo-mark"><img src="/phlox-logo.svg" alt="" /></div>
+        <div class="brand-copy">
+          <div class="brand-title"><h1>Phlox-GW</h1><span class="version-badge">${productVersion()}</span></div>
+          <p>Secure your administrator account</p>
+        </div>
+      </div>
+      <h2>Choose a new password</h2>
+      <p>You signed in with a temporary password. Set a permanent password before accessing the gateway.</p>
+      <div class="password-requirement">Use 12–72 bytes and do not reuse the temporary password.</div>
+      <div class="field"><label>New password</label><input id="new-password" type="password" autocomplete="new-password" /></div>
+      <div class="field"><label>Confirm new password</label><input id="confirm-password" type="password" autocomplete="new-password" /></div>
+      <div class="error" id="password-change-error"></div>
+      <div class="login-actions">
+        <button class="btn primary" id="password-change-btn">Update password</button>
+        <button class="btn" id="password-change-logout">Sign out</button>
+      </div>
+    </div>
+  `;
+  document.getElementById('password-change-btn').onclick = async () => {
+    const error = document.getElementById('password-change-error');
+    const password = document.getElementById('new-password').value;
+    const confirmation = document.getElementById('confirm-password').value;
+    error.textContent = '';
+    if (password !== confirmation) {
+      error.textContent = 'Passwords do not match.';
+      return;
+    }
+    const passwordBytes = new TextEncoder().encode(password).length;
+    if (passwordBytes < 12 || passwordBytes > 72) {
+      error.textContent = 'Password must be between 12 and 72 bytes.';
+      return;
+    }
+    try {
+      const resp = await api('/api/auth/change-password', {
+        method: 'POST',
+        body: JSON.stringify({ password })
+      });
+      state.token = resp.token;
+      state.user = resp.user;
+      localStorage.setItem('phlox_gw_token', state.token);
+      state.notice = 'Password updated.';
+      await refresh();
+    } catch (err) {
+      error.textContent = err.message;
+    }
+  };
+  document.getElementById('password-change-logout').onclick = logout;
+  document.getElementById('new-password').focus();
+}
+
 function shell(content) {
   const tabs = [
     ['overview', 'Overview', 'grid'],
@@ -257,7 +318,10 @@ function shell(content) {
       <aside class="sidebar">
         <div class="brand">
           <div class="mark logo-mark"><img src="/phlox-logo.svg" alt="" /></div>
-          <div><h1>Phlox-GW</h1><p>LLM gateway</p></div>
+          <div class="brand-copy">
+            <div class="brand-title"><h1>Phlox-GW</h1><span class="version-badge">${productVersion()}</span></div>
+            <p>LLM gateway</p>
+          </div>
         </div>
         <nav class="nav">
           ${tabs.map(([id, label, glyph]) => `
@@ -305,6 +369,10 @@ function adminSidebarMenu() {
 function render() {
   if (!state.token || !state.user) {
     loginView();
+    return;
+  }
+  if (state.user.must_change_password) {
+    passwordChangeView();
     return;
   }
   if (state.tab === 'keys') return shell(keysView());
@@ -2332,6 +2400,10 @@ function applyTheme(id, persist = true) {
 
 function titleForTab() {
   return { overview: 'Gateway overview', keys: 'API keys', models: 'Model catalog', usage: 'Usage and cost', appearance: 'Appearance', admin: 'Administration' }[state.tab] || 'Gateway';
+}
+
+function productVersion() {
+  return esc(state.health?.version || 'dev');
 }
 
 function subtitleForTab() {

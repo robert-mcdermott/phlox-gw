@@ -150,7 +150,8 @@ func New(opts Options) (http.Handler, error) {
 	mux.HandleFunc("GET /api/auth/oidc/config", s.oidcConfig)
 	mux.HandleFunc("GET /api/auth/oidc/login", s.oidcLogin)
 	mux.HandleFunc("GET /api/auth/oidc/callback", s.oidcCallback)
-	mux.HandleFunc("GET /api/auth/me", s.requireSession(s.me))
+	mux.HandleFunc("GET /api/auth/me", s.requireSessionAllowPasswordChange(s.me))
+	mux.HandleFunc("POST /api/auth/change-password", s.requireSessionAllowPasswordChange(s.changePassword))
 	mux.HandleFunc("GET /api/models", s.requireSession(s.models))
 	mux.HandleFunc("GET /api/usage", s.requireSession(s.usage))
 	mux.HandleFunc("GET /api/usage/budget", s.requireSession(s.budgetStatus))
@@ -271,6 +272,7 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	respondJSON(w, http.StatusOK, map[string]any{
 		"status":          "ok",
 		"name":            "phlox-gw",
+		"version":         valueOr(s.cfg.Telemetry.ServiceVersion, "dev"),
 		"time":            time.Now().UTC(),
 		"deployment_mode": s.cfg.Deployment.Mode,
 		"instance_id":     s.cfg.Deployment.InstanceID,

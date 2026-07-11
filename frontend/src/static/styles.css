@@ -262,6 +262,34 @@ button {
   font-size: 18px;
 }
 
+.brand-copy {
+  min-width: 0;
+}
+
+.brand-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+
+.version-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 18px;
+  padding: 1px 6px;
+  border: 1px solid color-mix(in srgb, var(--cyan) 38%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--cyan) 9%, transparent);
+  color: var(--cyan);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+}
+
 .brand p {
   margin: 2px 0 0;
   color: var(--sidebar-muted);
@@ -1235,6 +1263,28 @@ td input[type="checkbox"] {
 
 .login p {
   color: var(--muted);
+}
+
+.forced-password h2 {
+  margin: 24px 0 8px;
+}
+
+.password-requirement {
+  margin: 0 0 18px;
+  padding: 10px 12px;
+  border-left: 3px solid var(--cyan);
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.login-actions {
+  display: flex;
+  gap: 10px;
+}
+
+.login-actions .primary {
+  flex: 1;
 }
 
 .field {

@@ -196,7 +196,7 @@ func (s *Store) UpdateAPIKeyControls(ctx context.Context, k APIKey) error {
 func (s *Store) ResolveAPIKey(ctx context.Context, hash string, now time.Time) (User, APIKey, error) {
 	row := s.queryRow(ctx, `
 		SELECT `+apiKeyColumnsAliased+`,
-		       u.id, u.username, u.email, u.display_name, u.department, u.role, u.password_hash, u.auth_provider, u.is_active, u.created_at, u.updated_at, u.last_login_at
+		       u.id, u.username, u.email, u.display_name, u.department, u.role, u.password_hash, u.auth_provider, u.is_active, u.must_change_password, u.session_version, u.created_at, u.updated_at, u.last_login_at
 		FROM api_keys k
 		JOIN users u ON u.id = k.user_id
 		WHERE k.key_hash = ?`, hash)
@@ -290,11 +290,11 @@ func scanAPIKeyAndExtras(row scanner, k *APIKey, extras ...any) error {
 }
 
 func scanAPIKeyAndUser(row scanner, k *APIKey, u *User) error {
-	var uActive int
+	var uActive, uMustChange int
 	var uLast sql.NullString
 	var uCreated, uUpdated string
 	err := scanAPIKeyAndExtras(row, k,
-		&u.ID, &u.Username, &u.Email, &u.DisplayName, &u.Department, &u.Role, &u.PasswordHash, &u.AuthProvider, &uActive, &uCreated, &uUpdated, &uLast)
+		&u.ID, &u.Username, &u.Email, &u.DisplayName, &u.Department, &u.Role, &u.PasswordHash, &u.AuthProvider, &uActive, &uMustChange, &u.SessionVersion, &uCreated, &uUpdated, &uLast)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
 	}
@@ -302,6 +302,7 @@ func scanAPIKeyAndUser(row scanner, k *APIKey, u *User) error {
 		return err
 	}
 	u.IsActive = uActive == 1
+	u.MustChangePassword = uMustChange == 1
 	u.CreatedAt = parseTime(uCreated)
 	u.UpdatedAt = parseTime(uUpdated)
 	if uLast.Valid {

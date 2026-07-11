@@ -48,6 +48,14 @@ func valueOr(value, fallback string) string {
 }
 
 func (s *Server) requireSession(next func(http.ResponseWriter, *http.Request, store.User)) http.HandlerFunc {
+	return s.requireSessionWithPasswordChange(false, next)
+}
+
+func (s *Server) requireSessionAllowPasswordChange(next func(http.ResponseWriter, *http.Request, store.User)) http.HandlerFunc {
+	return s.requireSessionWithPasswordChange(true, next)
+}
+
+func (s *Server) requireSessionWithPasswordChange(allowPasswordChange bool, next func(http.ResponseWriter, *http.Request, store.User)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		token := bearerToken(r)
 		if token == "" {
@@ -62,6 +70,14 @@ func (s *Server) requireSession(next func(http.ResponseWriter, *http.Request, st
 		user, err := s.store.GetUserByID(r.Context(), claims.Subject)
 		if err != nil || !user.IsActive {
 			respondError(w, http.StatusUnauthorized, "invalid session")
+			return
+		}
+		if claims.SessionVersion != user.SessionVersion {
+			respondError(w, http.StatusUnauthorized, "invalid session")
+			return
+		}
+		if user.MustChangePassword && !allowPasswordChange {
+			respondError(w, http.StatusPreconditionRequired, "password change required")
 			return
 		}
 		next(w, r, user)
@@ -201,14 +217,15 @@ func gatewayAuthError(w http.ResponseWriter, r *http.Request, status int, messag
 
 func publicUser(u store.User) map[string]any {
 	return map[string]any{
-		"id":            u.ID,
-		"username":      u.Username,
-		"email":         u.Email,
-		"display_name":  u.DisplayName,
-		"department":    u.Department,
-		"role":          u.Role,
-		"auth_provider": u.AuthProvider,
-		"is_active":     u.IsActive,
+		"id":                   u.ID,
+		"username":             u.Username,
+		"email":                u.Email,
+		"display_name":         u.DisplayName,
+		"department":           u.Department,
+		"role":                 u.Role,
+		"auth_provider":        u.AuthProvider,
+		"is_active":            u.IsActive,
+		"must_change_password": u.MustChangePassword,
 	}
 }
 

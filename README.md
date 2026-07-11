@@ -78,13 +78,19 @@ database behind a load balancer.
 
 ## Requirements
 
-- Go matching the version in [go.mod](go.mod). The current module declares Go 1.26.
+- Go matching the version in [go.mod](go.mod). The current module requires Go 1.26.5.
 - Node.js and npm only if you plan to rebuild the frontend from `frontend/src`.
 - Network access from the gateway host to the configured upstream providers.
 - AWS credentials on the gateway host if you use Bedrock.
 
 The checked-in `frontend/dist` assets are already embedded by `go build`, so a normal
 backend build does not require Node.
+
+Check the running binary's release identity without starting the server:
+
+```bash
+./phlox-gw --version
+```
 
 ## Quick Start
 
@@ -96,15 +102,18 @@ scripts/build-release.sh --skip-frontend
 scripts/run-local.sh
 ```
 
-Open [http://127.0.0.1:8080](http://127.0.0.1:8080) and sign in with the seeded local
-administrator:
+On the first start of a new database, Phlox-GW prints a one-time administrator credential
+banner to the terminal:
 
 ```text
 Username: admin
-Password: admin
+Temporary password: <randomly generated value>
 ```
 
-Change that password before any shared use.
+Open [http://127.0.0.1:8080](http://127.0.0.1:8080), sign in with that credential, and
+choose a permanent password. The dashboard blocks all other actions until the password is
+changed. The temporary password is not printed again on restart, so retain the protected
+first-start terminal or service log until setup is complete.
 
 By default Phlox-GW uses SQLite, stores `phlox-gw.db` in the current working directory,
 and listens on `127.0.0.1:8080`.
@@ -174,6 +183,31 @@ On Windows PowerShell:
 ```powershell
 scripts\build-release.ps1
 ```
+
+### Versioning Releases
+
+The repository-root [`VERSION`](VERSION) file is the single source of truth for the
+Phlox-GW product version. The current release line is `v0.1.0`. Development builds embed
+that file directly. The release scripts read the same file and stamp the version, current
+Git commit, and UTC build time into every platform binary.
+
+The complete [Release Guide](docs/RELEASING.md) documents both manual GitHub publication
+and the recommended tag-triggered Actions workflow that creates a draft release for human
+review.
+
+To prepare the next release:
+
+1. Change `VERSION` to the next semantic version, including the leading `v`, such as
+   `v0.2.0` or `v0.2.0-rc.1`.
+2. Commit the version change with the release changes.
+3. Run `scripts/build-release.sh` or `scripts\build-release.ps1`.
+4. Run the native artifact with `--version` and confirm the version and commit.
+5. After validation, create a Git tag with the exact value from `VERSION`.
+
+The build scripts reject invalid version strings. Automated/reproducible builds may set
+`PHLOX_GW_BUILD_COMMIT` and `PHLOX_GW_BUILD_DATE`; otherwise those values come from Git and
+the current UTC time. Builds made with tracked, uncommitted changes add `-dirty` to the
+reported commit.
 
 Build just the Go binaries when `frontend/dist` is already current:
 
@@ -434,6 +468,7 @@ Phlox-GW is licensed under the [Apache License 2.0](LICENSE).
 ```text
 cmd/phlox-gw/        Binary entry point
 embed.go            Go embed declaration for frontend/dist
+VERSION             Product version source used by development and release builds
 internal/auth/       Password hashing, API key generation, and signed session tokens
 internal/config/     Environment and data path loading
 internal/httpapi/    Browser, admin, API key, provider, and gateway handlers
