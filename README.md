@@ -6,9 +6,75 @@ Phlox-GW is a self-hosted enterprise LLM gateway. It gives administrators one pl
 publish model routes, control who can use them, attach prices, enforce budgets and rate
 limits, and report usage for chargeback.
 
-The product is intentionally narrower than the broader Phlox platform. Phlox-GW is not a
-chat assistant, RAG system, or agent runtime. It is the gateway and governance layer that
-sits between users, applications, local model runtimes, cloud LLM APIs, and AWS Bedrock.
+Phlox-GW is a gateway and governance layer that sits between users, applications, local model runtimes, cloud LLM APIs, and AWS Bedrock.
+
+## Download
+
+Download the [latest stable release](https://github.com/robert-mcdermott/phlox-gw/releases/latest)
+for your platform. These links follow the latest non-prerelease GitHub Release, so they do
+not need to change for every new version.
+
+| Operating system | Architecture | Download |
+| --- | --- | --- |
+| macOS | Apple silicon (ARM64) | [`phlox-gw-darwin-arm64`](https://github.com/robert-mcdermott/phlox-gw/releases/latest/download/phlox-gw-darwin-arm64) |
+| Linux | x86-64 | [`phlox-gw-linux-amd64`](https://github.com/robert-mcdermott/phlox-gw/releases/latest/download/phlox-gw-linux-amd64) |
+| Linux | ARM64 | [`phlox-gw-linux-arm64`](https://github.com/robert-mcdermott/phlox-gw/releases/latest/download/phlox-gw-linux-arm64) |
+| Windows | x86-64 | [`phlox-gw-windows-amd64.exe`](https://github.com/robert-mcdermott/phlox-gw/releases/latest/download/phlox-gw-windows-amd64.exe) |
+| Windows | ARM64 | [`phlox-gw-windows-arm64.exe`](https://github.com/robert-mcdermott/phlox-gw/releases/latest/download/phlox-gw-windows-arm64.exe) |
+
+The [checksum manifest](https://github.com/robert-mcdermott/phlox-gw/releases/latest/download/checksums.txt)
+contains SHA-256 hashes for every binary. Use the
+[v0.1.0 release page](https://github.com/robert-mcdermott/phlox-gw/releases/tag/v0.1.0)
+for the initial release notes and version-pinned downloads.
+
+### macOS
+
+```bash
+ASSET="phlox-gw-darwin-arm64"
+curl -fLO "https://github.com/robert-mcdermott/phlox-gw/releases/latest/download/$ASSET"
+curl -fLO "https://github.com/robert-mcdermott/phlox-gw/releases/latest/download/checksums.txt"
+grep "  $ASSET$" checksums.txt | shasum -a 256 -c -
+chmod +x "$ASSET"
+./"$ASSET" --version
+./"$ASSET"
+```
+
+### Linux
+
+Use `phlox-gw-linux-arm64` instead on an ARM64 system.
+
+```bash
+ASSET="phlox-gw-linux-amd64"
+curl -fLO "https://github.com/robert-mcdermott/phlox-gw/releases/latest/download/$ASSET"
+curl -fLO "https://github.com/robert-mcdermott/phlox-gw/releases/latest/download/checksums.txt"
+grep "  $ASSET$" checksums.txt | sha256sum --check -
+chmod +x "$ASSET"
+./"$ASSET" --version
+./"$ASSET"
+```
+
+### Windows PowerShell
+
+Use `phlox-gw-windows-arm64.exe` instead on a Windows ARM64 system.
+
+```powershell
+$Asset = "phlox-gw-windows-amd64.exe"
+$BaseURL = "https://github.com/robert-mcdermott/phlox-gw/releases/latest/download"
+
+Invoke-WebRequest "$BaseURL/$Asset" -OutFile $Asset
+Invoke-WebRequest "$BaseURL/checksums.txt" -OutFile checksums.txt
+
+$Expected = ((Select-String -Path checksums.txt -Pattern "  $Asset$").Line -split '\s+')[0]
+$Actual = (Get-FileHash -Algorithm SHA256 $Asset).Hash.ToLowerInvariant()
+if ($Actual -ne $Expected) { throw "Checksum verification failed" }
+
+& ".\$Asset" --version
+& ".\$Asset"
+```
+
+Release binaries are not currently code-signed or notarized. macOS Gatekeeper or Windows
+SmartScreen may therefore require confirmation under your organization's security policy.
+Build from source if unsigned binaries are not permitted in your environment.
 
 ## What It Does
 
@@ -78,8 +144,9 @@ database behind a load balancer.
 
 ## Requirements
 
-- Go matching the version in [go.mod](go.mod). The current module requires Go 1.26.5.
-- Node.js and npm only if you plan to rebuild the frontend from `frontend/src`.
+- The prebuilt binaries have no Go or Node.js runtime dependency.
+- Building from source requires Go matching [go.mod](go.mod), currently Go 1.26.5.
+- Node.js and npm are required only to rebuild the frontend from `frontend/src`.
 - Network access from the gateway host to the configured upstream providers.
 - AWS credentials on the gateway host if you use Bedrock.
 
@@ -92,7 +159,7 @@ Check the running binary's release identity without starting the server:
 ./phlox-gw --version
 ```
 
-## Quick Start
+## Quick Start From Source
 
 From the repository root:
 
@@ -445,6 +512,8 @@ draft pattern changes before saving.
 
 ## Documentation
 
+- [Release Guide](docs/RELEASING.md): manual and tag-triggered publication, release
+  ownership, signing, checksums, and post-release verification.
 - [Operator Guide](docs/OPERATIONS.md): build, configuration, SSO, deployment, backups,
   and troubleshooting.
 - [Provider Setup Guide](docs/PROVIDERS.md): field-by-field setup tables for every
