@@ -10,9 +10,39 @@ Phlox-GW is a gateway and governance layer that sits between users, applications
 
 ## Download
 
-Download the [latest stable release](https://github.com/robert-mcdermott/phlox-gw/releases/latest)
-for your platform. These links follow the latest non-prerelease GitHub Release, so they do
-not need to change for every new version.
+### Recommended for macOS and Linux
+
+Install the latest stable release into `$HOME/.local/bin`:
+
+```bash
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://raw.githubusercontent.com/robert-mcdermott/phlox-gw/main/install.sh |
+  sh
+```
+
+The installer detects the supported operating system and architecture, downloads the raw
+release binary and `checksums.txt`, verifies SHA-256, and installs the executable as
+`phlox-gw`. It does not use `sudo`, modify `PATH`, create application data, or start the
+gateway.
+
+To inspect the installer before running it:
+
+```bash
+curl --proto '=https' --tlsv1.2 -fsSLo install-phlox-gw.sh \
+  https://raw.githubusercontent.com/robert-mcdermott/phlox-gw/main/install.sh
+
+less install-phlox-gw.sh
+sh install-phlox-gw.sh
+```
+
+See the [Installation Guide](docs/INSTALLING.md) for version pinning, custom installation
+directories, system-wide installation, checksum scope, first-run guidance, and upgrades.
+
+### Manual downloads
+
+Direct downloads remain available for Windows, environments that prohibit remote shell
+installers, and users who prefer a manual installation. These links follow the latest
+non-prerelease GitHub Release, so they do not need to change for every new version.
 
 | Operating system | Architecture | Download |
 | --- | --- | --- |
@@ -27,7 +57,7 @@ contains SHA-256 hashes for every binary. Use the
 [v0.1.0 release page](https://github.com/robert-mcdermott/phlox-gw/releases/tag/v0.1.0)
 for the initial release notes and version-pinned downloads.
 
-### macOS
+#### macOS
 
 ```bash
 ASSET="phlox-gw-darwin-arm64"
@@ -39,7 +69,7 @@ chmod +x "$ASSET"
 ./"$ASSET"
 ```
 
-### Linux
+#### Linux
 
 Use `phlox-gw-linux-arm64` instead on an ARM64 system.
 
@@ -53,7 +83,7 @@ chmod +x "$ASSET"
 ./"$ASSET"
 ```
 
-### Windows PowerShell
+#### Windows PowerShell
 
 Use `phlox-gw-windows-arm64.exe` instead on a Windows ARM64 system.
 
@@ -512,6 +542,8 @@ draft pattern changes before saving.
 
 ## Documentation
 
+- [Installation Guide](docs/INSTALLING.md): installer usage, manual downloads, first run,
+  checksum scope, and upgrades.
 - [Release Guide](docs/RELEASING.md): manual and tag-triggered publication, release
   ownership, signing, checksums, and post-release verification.
 - [Operator Guide](docs/OPERATIONS.md): build, configuration, SSO, deployment, backups,
@@ -538,6 +570,7 @@ Phlox-GW is licensed under the [Apache License 2.0](LICENSE).
 cmd/phlox-gw/        Binary entry point
 embed.go            Go embed declaration for frontend/dist
 VERSION             Product version source used by development and release builds
+install.sh          Checksum-verifying macOS/Linux release installer
 internal/auth/       Password hashing, API key generation, and signed session tokens
 internal/config/     Environment and data path loading
 internal/httpapi/    Browser, admin, API key, provider, and gateway handlers
@@ -545,6 +578,7 @@ internal/store/      SQLite schema, migrations, and persistence methods
 frontend/dist/       Embedded dashboard assets
 frontend/src/static/ Source dashboard assets used by the frontend build
 docs/                Design, architecture, operator, API, routing, plan, and roadmap docs
+scripts/             Build, run, demo, and installer-validation utilities
 ```
 
 For a deeper code map — the gateway request lifecycle, per-file responsibilities, and
