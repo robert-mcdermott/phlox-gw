@@ -8,6 +8,8 @@ limits, and report usage for chargeback.
 
 Phlox-GW is a gateway and governance layer that sits between users, applications, local model runtimes, cloud LLM APIs, and AWS Bedrock.
 
+![phlox-gw operations ui](https://robert-mcdermott.github.io/phlox-gw/images/operations.png)
+
 ## Download
 
 ### Recommended for macOS and Linux
