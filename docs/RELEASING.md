@@ -31,8 +31,15 @@ Each release contains:
 | `phlox-gw-windows-arm64.exe` | Windows ARM64 |
 | `checksums.txt` | SHA-256 hashes for all five binaries |
 
-The current binaries are not code-signed or notarized. Users downloading raw macOS or Linux binaries may need to make them executable with
-`chmod +x`.
+The asset names are a public compatibility contract for `install.sh`, the README, and the
+product website. Update and test all three consumers before changing a filename.
+
+The repository-root `install.sh` is the stable macOS/Linux bootstrap installer. It is not
+currently a release asset: it selects one of the raw binaries above, verifies it against
+the release checksum manifest, and installs it under the canonical name `phlox-gw`.
+
+The current binaries are not code-signed or notarized. Users downloading raw macOS or
+Linux binaries may need to make them executable with `chmod +x`.
 
 ## Common Preconditions
 
@@ -43,7 +50,9 @@ Complete these steps regardless of which publishing path is used:
 3. Update `VERSION` in a reviewed commit if the release version is changing.
 4. Confirm the Go toolchain matches the exact version declared by `go.mod`.
 5. Complete the release-candidate checklist in `docs/RELEASE_PREFLIGHT.md`.
-6. Prepare release notes using the checklist below.
+6. Run `sh -n install.sh`, `bash -n scripts/test-install.sh`, and
+   `scripts/test-install.sh`.
+7. Prepare release notes using the checklist below.
 
 Do not release from a worktree with tracked or untracked changes. The release build script
 marks tracked changes as `-dirty`, but a separate status check is still required to catch
@@ -405,6 +414,7 @@ also state:
 - Release highlights and important fixes.
 - Supported operating systems and architectures.
 - Installation and `--version` examples.
+- The recommended macOS/Linux installer command and a link to manual downloads.
 - The first-run random administrator password and mandatory rotation behavior.
 - Upgrade steps and the instruction to back up SQLite or Postgres first.
 - Whether database schema changes are backward compatible.
@@ -425,9 +435,11 @@ After publication:
 4. Smoke-test the native artifacts available to the release team.
 5. Confirm the release page and product website links work without authentication.
 6. Confirm the website does not link to a nonexistent platform or filename.
-7. Record the release URL and final validation evidence in
+7. Use `install.sh --version <tag>` with a temporary installation directory on available
+   macOS and Linux runners, then confirm the installed binary's `--version` output.
+8. Record the release URL and final validation evidence in
    `docs/RELEASE_PREFLIGHT.md`.
-8. Announce the release only after these checks pass.
+9. Announce the release only after these checks pass.
 
 For a prerelease such as `v0.2.0-rc.1`, mark the GitHub Release as a prerelease and do not
 make it the latest stable release.

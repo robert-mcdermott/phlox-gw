@@ -69,6 +69,27 @@ jobs:
       - name: Run tests
         run: go test ./...
 
+  installer:
+    name: Installer (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Validate installer
+        run: |
+          sh -n install.sh
+          bash -n scripts/test-install.sh
+          scripts/test-install.sh
+
   race:
     name: Race detector
     runs-on: ubuntu-latest
