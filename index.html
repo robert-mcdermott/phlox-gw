@@ -499,85 +499,6 @@ footer{border-top:1px solid var(--border);padding:44px 0;background:var(--bg-sof
   </div>
 </div>
 
-<!-- ============ DOWNLOADS ============ -->
-<section class="downloads" id="download">
-  <div class="container">
-    <div class="sec-head reveal">
-      <span class="eyebrow">Install Phlox-GW</span>
-      <h2>One binary. Verified before launch.</h2>
-      <p>Use the checksum-verifying shell installer on macOS, Linux, or WSL, or install with PowerShell on native Windows. The dashboard, API, and gateway are bundled together.</p>
-    </div>
-    <div class="install-grid">
-      <article class="installer-card reveal">
-        <div class="platform-head"><span class="platform-mark">Terminal</span><span class="release-channel">Recommended</span></div>
-        <h3>macOS, Linux &amp; WSL</h3>
-        <p>The installer selects the correct release for your operating system and architecture, verifies its checksum, and installs it as <code style="font-family:var(--mono);color:var(--violet-bright)">phlox-gw</code>.</p>
-        <div class="platform-pills" aria-label="Supported installer platforms">
-          <span class="platform-pill">macOS ARM64</span>
-          <span class="platform-pill">Linux AMD64</span>
-          <span class="platform-pill">Linux ARM64</span>
-          <span class="platform-pill">WSL</span>
-        </div>
-        <div class="command-box">
-          <code id="install-command"><span class="prompt">$</span> curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/robert-mcdermott/phlox-gw/main/install.sh | sh</code>
-          <button class="copy-command" type="button" data-copy="curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/robert-mcdermott/phlox-gw/main/install.sh | sh" aria-live="polite">Copy</button>
-        </div>
-        <div class="install-features">
-          <div class="install-feature"><strong>SHA-256 verified</strong>Checked against the published release manifest.</div>
-          <div class="install-feature"><strong>User-local install</strong>Defaults to <code style="font-family:var(--mono)">~/.local/bin</code>.</div>
-          <div class="install-feature"><strong>No hidden setup</strong>No sudo, PATH edits, data creation, or startup.</div>
-        </div>
-        <div class="installer-links">
-          <a href="https://raw.githubusercontent.com/robert-mcdermott/phlox-gw/main/install.sh" target="_blank" rel="noopener">Review installer</a>
-          <a href="https://github.com/robert-mcdermott/phlox-gw/blob/main/docs/INSTALLING.md" target="_blank" rel="noopener">Installation guide</a>
-          <a href="https://github.com/robert-mcdermott/phlox-gw#manual-downloads" target="_blank" rel="noopener">Manual downloads</a>
-        </div>
-      </article>
-      <article class="installer-card reveal">
-        <div class="platform-head"><span class="platform-mark">PowerShell</span><span class="release-channel">Recommended</span></div>
-        <h3>Native Windows</h3>
-        <p>Download the latest native executable, verify it against the published SHA-256 manifest, and launch it from your current directory. This example targets x86-64; on Windows ARM64, change <code style="font-family:var(--mono);color:var(--violet-bright)">amd64</code> to <code style="font-family:var(--mono);color:var(--violet-bright)">arm64</code> in the asset name.</p>
-        <div class="platform-pills" aria-label="Supported Windows architectures">
-          <span class="platform-pill">Windows AMD64</span>
-          <span class="platform-pill">Windows ARM64</span>
-        </div>
-        <div class="command-box multiline">
-          <code id="windows-install-command">$Asset = "phlox-gw-windows-amd64.exe"
-$BaseURL = "https://github.com/robert-mcdermott/phlox-gw/releases/latest/download"
-
-Invoke-WebRequest "$BaseURL/$Asset" -OutFile $Asset
-Invoke-WebRequest "$BaseURL/checksums.txt" -OutFile checksums.txt
-
-$Expected = ((Select-String -Path checksums.txt -Pattern "  $Asset$").Line -split '\s+')[0]
-$Actual = (Get-FileHash -Algorithm SHA256 $Asset).Hash.ToLowerInvariant()
-if ($Actual -ne $Expected) { throw "Checksum verification failed" }
-
-&amp; ".\$Asset" --version
-&amp; ".\$Asset"</code>
-          <button class="copy-command" type="button" data-copy-target="windows-install-command" aria-live="polite">Copy</button>
-        </div>
-        <div class="install-features">
-          <div class="install-feature"><strong>Latest stable release</strong>Uses GitHub's version-independent release URL.</div>
-          <div class="install-feature"><strong>SHA-256 verified</strong>Stops before launch if the binary does not match.</div>
-          <div class="install-feature"><strong>Local &amp; explicit</strong>Saves to and runs from the current directory.</div>
-        </div>
-        <div class="installer-links">
-          <a href="https://github.com/robert-mcdermott/phlox-gw#manual-downloads" target="_blank" rel="noopener">Manual downloads</a>
-          <a href="https://github.com/robert-mcdermott/phlox-gw/blob/main/docs/INSTALLING.md" target="_blank" rel="noopener">Installation guide</a>
-          <a href="https://github.com/robert-mcdermott/phlox-gw/releases" target="_blank" rel="noopener">All releases</a>
-        </div>
-      </article>
-    </div>
-    <div class="download-resources reveal">
-      <a href="https://github.com/robert-mcdermott/phlox-gw/releases/latest/download/checksums.txt">SHA-256 checksums</a>
-      <a href="https://github.com/robert-mcdermott/phlox-gw/releases" target="_blank" rel="noopener">Release notes &amp; previous versions</a>
-      <a href="https://github.com/robert-mcdermott/phlox-gw/blob/main/docs/INSTALLING.md" target="_blank" rel="noopener">Installation &amp; verification</a>
-      <a href="https://github.com/robert-mcdermott/phlox-gw#quick-start-from-source" target="_blank" rel="noopener">Build from source</a>
-    </div>
-    <p class="download-note reveal"><strong>Transparent by design:</strong> both installation paths verify the downloaded binary against the release checksum manifest. The shell installer is readable before execution, and the PowerShell steps are fully shown above. Release binaries are not yet code-signed or notarized.</p>
-  </div>
-</section>
-
 <!-- ============ PLEDGE ============ -->
 <section class="pledge" id="pledge">
   <div class="container">
@@ -809,6 +730,85 @@ if ($Actual -ne $Expected) { throw "Checksum verification failed" }
         <figcaption><b>Keys users manage themselves.</b> Mint, rotate, set expirations, and revoke — while admins keep full inventory with per-key policies.</figcaption>
       </figure>
     </div>
+  </div>
+</section>
+
+<!-- ============ DOWNLOADS ============ -->
+<section class="downloads" id="download">
+  <div class="container">
+    <div class="sec-head reveal">
+      <span class="eyebrow">Install Phlox-GW</span>
+      <h2>One binary. Verified before launch.</h2>
+      <p>Use the checksum-verifying shell installer on macOS, Linux, or WSL, or install with PowerShell on native Windows. The dashboard, API, and gateway are bundled together.</p>
+    </div>
+    <div class="install-grid">
+      <article class="installer-card reveal">
+        <div class="platform-head"><span class="platform-mark">Terminal</span><span class="release-channel">Recommended</span></div>
+        <h3>macOS, Linux &amp; WSL</h3>
+        <p>The installer selects the correct release for your operating system and architecture, verifies its checksum, and installs it as <code style="font-family:var(--mono);color:var(--violet-bright)">phlox-gw</code>.</p>
+        <div class="platform-pills" aria-label="Supported installer platforms">
+          <span class="platform-pill">macOS ARM64</span>
+          <span class="platform-pill">Linux AMD64</span>
+          <span class="platform-pill">Linux ARM64</span>
+          <span class="platform-pill">WSL</span>
+        </div>
+        <div class="command-box">
+          <code id="install-command"><span class="prompt">$</span> curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/robert-mcdermott/phlox-gw/main/install.sh | sh</code>
+          <button class="copy-command" type="button" data-copy="curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/robert-mcdermott/phlox-gw/main/install.sh | sh" aria-live="polite">Copy</button>
+        </div>
+        <div class="install-features">
+          <div class="install-feature"><strong>SHA-256 verified</strong>Checked against the published release manifest.</div>
+          <div class="install-feature"><strong>User-local install</strong>Defaults to <code style="font-family:var(--mono)">~/.local/bin</code>.</div>
+          <div class="install-feature"><strong>No hidden setup</strong>No sudo, PATH edits, data creation, or startup.</div>
+        </div>
+        <div class="installer-links">
+          <a href="https://raw.githubusercontent.com/robert-mcdermott/phlox-gw/main/install.sh" target="_blank" rel="noopener">Review installer</a>
+          <a href="https://github.com/robert-mcdermott/phlox-gw/blob/main/docs/INSTALLING.md" target="_blank" rel="noopener">Installation guide</a>
+          <a href="https://github.com/robert-mcdermott/phlox-gw#manual-downloads" target="_blank" rel="noopener">Manual downloads</a>
+        </div>
+      </article>
+      <article class="installer-card reveal">
+        <div class="platform-head"><span class="platform-mark">PowerShell</span><span class="release-channel">Recommended</span></div>
+        <h3>Native Windows</h3>
+        <p>Download the latest native executable, verify it against the published SHA-256 manifest, and launch it from your current directory. This example targets x86-64; on Windows ARM64, change <code style="font-family:var(--mono);color:var(--violet-bright)">amd64</code> to <code style="font-family:var(--mono);color:var(--violet-bright)">arm64</code> in the asset name.</p>
+        <div class="platform-pills" aria-label="Supported Windows architectures">
+          <span class="platform-pill">Windows AMD64</span>
+          <span class="platform-pill">Windows ARM64</span>
+        </div>
+        <div class="command-box multiline">
+          <code id="windows-install-command">$Asset = "phlox-gw-windows-amd64.exe"
+$BaseURL = "https://github.com/robert-mcdermott/phlox-gw/releases/latest/download"
+
+Invoke-WebRequest "$BaseURL/$Asset" -OutFile $Asset
+Invoke-WebRequest "$BaseURL/checksums.txt" -OutFile checksums.txt
+
+$Expected = ((Select-String -Path checksums.txt -Pattern "  $Asset$").Line -split '\s+')[0]
+$Actual = (Get-FileHash -Algorithm SHA256 $Asset).Hash.ToLowerInvariant()
+if ($Actual -ne $Expected) { throw "Checksum verification failed" }
+
+&amp; ".\$Asset" --version
+&amp; ".\$Asset"</code>
+          <button class="copy-command" type="button" data-copy-target="windows-install-command" aria-live="polite">Copy</button>
+        </div>
+        <div class="install-features">
+          <div class="install-feature"><strong>Latest stable release</strong>Uses GitHub's version-independent release URL.</div>
+          <div class="install-feature"><strong>SHA-256 verified</strong>Stops before launch if the binary does not match.</div>
+          <div class="install-feature"><strong>Local &amp; explicit</strong>Saves to and runs from the current directory.</div>
+        </div>
+        <div class="installer-links">
+          <a href="https://github.com/robert-mcdermott/phlox-gw#manual-downloads" target="_blank" rel="noopener">Manual downloads</a>
+          <a href="https://github.com/robert-mcdermott/phlox-gw/blob/main/docs/INSTALLING.md" target="_blank" rel="noopener">Installation guide</a>
+          <a href="https://github.com/robert-mcdermott/phlox-gw/releases" target="_blank" rel="noopener">All releases</a>
+        </div>
+      </article>
+    </div>
+    <div class="download-resources reveal">
+      <a href="https://github.com/robert-mcdermott/phlox-gw/releases/latest/download/checksums.txt">SHA-256 checksums</a>
+      <a href="https://github.com/robert-mcdermott/phlox-gw/releases" target="_blank" rel="noopener">Release notes &amp; previous versions</a>
+      <a href="https://github.com/robert-mcdermott/phlox-gw/blob/main/docs/INSTALLING.md" target="_blank" rel="noopener">Installation &amp; verification</a>
+      <a href="https://github.com/robert-mcdermott/phlox-gw#quick-start-from-source" target="_blank" rel="noopener">Build from source</a>
+    </div>
+    <p class="download-note reveal"><strong>Transparent by design:</strong> both installation paths verify the downloaded binary against the release checksum manifest. The shell installer is readable before execution, and the PowerShell steps are fully shown above. Release binaries are not yet code-signed or notarized.</p>
   </div>
 </section>
 
