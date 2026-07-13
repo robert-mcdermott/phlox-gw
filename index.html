@@ -154,17 +154,15 @@ h1 .grad{
   background:linear-gradient(180deg,var(--bg-soft),var(--bg));
   border-top:1px solid var(--border);border-bottom:1px solid var(--border);
 }
-.install-grid{display:grid;grid-template-columns:minmax(0,1.55fr) minmax(280px,.85fr);gap:18px;max-width:1040px;margin:0 auto}
-@media(max-width:860px){.install-grid{grid-template-columns:1fr;max-width:680px}}
-.installer-card,.download-card{
-  display:flex;flex-direction:column;padding:28px;
+.install-grid{display:grid;grid-template-columns:minmax(0,1fr);gap:18px;max-width:1040px;margin:0 auto}
+.installer-card{
+  display:flex;flex-direction:column;min-width:0;padding:28px;
   background:linear-gradient(180deg,var(--bg-card-2),var(--bg-card));
   border:1px solid var(--border);border-radius:var(--radius);
   box-shadow:0 14px 38px rgba(0,0,0,.18);
 }
 .installer-card{border-color:var(--border-strong);box-shadow:0 18px 52px rgba(0,0,0,.25),0 0 42px rgba(124,58,237,.08)}
-.download-card{min-height:340px}
-.installer-card:hover,.download-card:hover{border-color:rgba(192,132,252,.42)}
+.installer-card:hover{border-color:rgba(192,132,252,.42)}
 .platform-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:20px}
 .platform-mark{
   display:inline-flex;align-items:center;justify-content:center;min-width:68px;height:34px;padding:0 11px;
@@ -173,8 +171,8 @@ h1 .grad{
 }
 .release-channel{display:flex;align-items:center;gap:7px;color:var(--text-faint);font-size:.76rem;font-weight:600}
 .release-channel::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--green);box-shadow:0 0 7px rgba(74,222,128,.7)}
-.installer-card h3,.download-card h3{font-size:1.2rem;margin-bottom:7px}
-.installer-card>p,.download-card>p{color:var(--text-dim);font-size:.9rem;margin-bottom:22px}
+.installer-card h3{font-size:1.2rem;margin-bottom:7px}
+.installer-card>p{color:var(--text-dim);font-size:.9rem;margin-bottom:22px}
 .platform-pills{display:flex;gap:8px;flex-wrap:wrap;margin:-4px 0 20px}
 .platform-pill{
   display:inline-flex;align-items:center;gap:7px;padding:6px 10px;border-radius:99px;
@@ -191,6 +189,9 @@ h1 .grad{
   flex:1;min-width:0;color:#d8cfef;font-family:var(--mono);font-size:.78rem;line-height:1.65;
   overflow-wrap:anywhere;
 }
+.command-box.multiline{align-items:flex-start;min-width:0;overflow:hidden}
+.command-box.multiline code{display:block;width:100%;max-width:100%;white-space:pre;overflow-x:auto;overflow-wrap:normal}
+.command-box.multiline .copy-command{position:sticky;right:0}
 .command-box .prompt{color:var(--violet-bright);user-select:none}
 .copy-command{
   flex:none;padding:8px 12px;border:1px solid var(--border-strong);border-radius:8px;
@@ -208,18 +209,11 @@ h1 .grad{
 .installer-links{display:flex;gap:16px;flex-wrap:wrap;margin-top:18px;font-size:.8rem}
 .installer-links a{color:var(--text-dim);border-bottom:1px solid var(--border-strong)}
 .installer-links a:hover{color:var(--text)}
-.asset-links{display:flex;flex-direction:column;gap:10px;margin-top:auto}
-.asset-link{
-  display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 13px;
-  border:1px solid var(--border);border-radius:9px;background:rgba(192,132,252,.05);
-  color:var(--text);font-size:.87rem;font-weight:600;transition:background .15s,border-color .15s,transform .15s;
-}
-.asset-link:hover{background:rgba(168,85,247,.13);border-color:var(--border-strong);transform:translateY(-1px)}
-.asset-link span{color:var(--text-faint);font-family:var(--mono);font-size:.7rem;font-weight:500}
-.asset-link::after{content:"↓";color:var(--violet-bright);font-size:1rem}
 @media(max-width:620px){
-  .installer-card,.download-card{padding:22px}
+  .installer-card{padding:22px}
   .command-box{align-items:stretch;flex-direction:column}
+  .command-box code{width:100%;flex:none}
+  .command-box.multiline .copy-command{position:static}
   .copy-command{align-self:flex-start}
   .install-features{grid-template-columns:1fr}
   .install-feature{min-height:0}
@@ -510,8 +504,8 @@ footer{border-top:1px solid var(--border);padding:44px 0;background:var(--bg-sof
   <div class="container">
     <div class="sec-head reveal">
       <span class="eyebrow">Install Phlox-GW</span>
-      <h2>One command. One verified binary.</h2>
-      <p>Use the recommended installer on macOS, Linux, or Windows Subsystem for Linux. The dashboard, API, and gateway are bundled together.</p>
+      <h2>One binary. Verified before launch.</h2>
+      <p>Use the checksum-verifying shell installer on macOS, Linux, or WSL, or install with PowerShell on native Windows. The dashboard, API, and gateway are bundled together.</p>
     </div>
     <div class="install-grid">
       <article class="installer-card reveal">
@@ -539,13 +533,38 @@ footer{border-top:1px solid var(--border);padding:44px 0;background:var(--bg-sof
           <a href="https://github.com/robert-mcdermott/phlox-gw#manual-downloads" target="_blank" rel="noopener">Manual downloads</a>
         </div>
       </article>
-      <article class="download-card reveal">
-        <div class="platform-head"><span class="platform-mark">Windows</span><span class="release-channel">Stable</span></div>
+      <article class="installer-card reveal">
+        <div class="platform-head"><span class="platform-mark">PowerShell</span><span class="release-channel">Recommended</span></div>
         <h3>Native Windows</h3>
-        <p>Using PowerShell rather than WSL? Download the standalone executable for your system.</p>
-        <div class="asset-links">
-          <a class="asset-link" href="https://github.com/robert-mcdermott/phlox-gw/releases/latest/download/phlox-gw-windows-amd64.exe" aria-label="Download Phlox-GW for Windows x86-64">Windows x86-64 <span>AMD64</span></a>
-          <a class="asset-link" href="https://github.com/robert-mcdermott/phlox-gw/releases/latest/download/phlox-gw-windows-arm64.exe" aria-label="Download Phlox-GW for Windows ARM64">Windows ARM <span>ARM64</span></a>
+        <p>Download the latest native executable, verify it against the published SHA-256 manifest, and launch it from your current directory. This example targets x86-64; on Windows ARM64, change <code style="font-family:var(--mono);color:var(--violet-bright)">amd64</code> to <code style="font-family:var(--mono);color:var(--violet-bright)">arm64</code> in the asset name.</p>
+        <div class="platform-pills" aria-label="Supported Windows architectures">
+          <span class="platform-pill">Windows AMD64</span>
+          <span class="platform-pill">Windows ARM64</span>
+        </div>
+        <div class="command-box multiline">
+          <code id="windows-install-command">$Asset = "phlox-gw-windows-amd64.exe"
+$BaseURL = "https://github.com/robert-mcdermott/phlox-gw/releases/latest/download"
+
+Invoke-WebRequest "$BaseURL/$Asset" -OutFile $Asset
+Invoke-WebRequest "$BaseURL/checksums.txt" -OutFile checksums.txt
+
+$Expected = ((Select-String -Path checksums.txt -Pattern "  $Asset$").Line -split '\s+')[0]
+$Actual = (Get-FileHash -Algorithm SHA256 $Asset).Hash.ToLowerInvariant()
+if ($Actual -ne $Expected) { throw "Checksum verification failed" }
+
+&amp; ".\$Asset" --version
+&amp; ".\$Asset"</code>
+          <button class="copy-command" type="button" data-copy-target="windows-install-command" aria-live="polite">Copy</button>
+        </div>
+        <div class="install-features">
+          <div class="install-feature"><strong>Latest stable release</strong>Uses GitHub's version-independent release URL.</div>
+          <div class="install-feature"><strong>SHA-256 verified</strong>Stops before launch if the binary does not match.</div>
+          <div class="install-feature"><strong>Local &amp; explicit</strong>Saves to and runs from the current directory.</div>
+        </div>
+        <div class="installer-links">
+          <a href="https://github.com/robert-mcdermott/phlox-gw#manual-downloads" target="_blank" rel="noopener">Manual downloads</a>
+          <a href="https://github.com/robert-mcdermott/phlox-gw/blob/main/docs/INSTALLING.md" target="_blank" rel="noopener">Installation guide</a>
+          <a href="https://github.com/robert-mcdermott/phlox-gw/releases" target="_blank" rel="noopener">All releases</a>
         </div>
       </article>
     </div>
@@ -555,7 +574,7 @@ footer{border-top:1px solid var(--border);padding:44px 0;background:var(--bg-sof
       <a href="https://github.com/robert-mcdermott/phlox-gw/blob/main/docs/INSTALLING.md" target="_blank" rel="noopener">Installation &amp; verification</a>
       <a href="https://github.com/robert-mcdermott/phlox-gw#quick-start-from-source" target="_blank" rel="noopener">Build from source</a>
     </div>
-    <p class="download-note reveal"><strong>Transparent by design:</strong> the installer is readable before execution and verifies the downloaded binary against the release checksum manifest. Release binaries are not yet code-signed or notarized.</p>
+    <p class="download-note reveal"><strong>Transparent by design:</strong> both installation paths verify the downloaded binary against the release checksum manifest. The shell installer is readable before execution, and the PowerShell steps are fully shown above. Release binaries are not yet code-signed or notarized.</p>
   </div>
 </section>
 
@@ -828,7 +847,7 @@ footer{border-top:1px solid var(--border);padding:44px 0;background:var(--bg-sof
         "messages":[{"role":"user","content":"Hello"}]}'</span></pre>
       </div>
       <ol class="qs-steps reveal">
-        <li><h4>Install and run</h4><p>Use the checksum-verifying installer on macOS, Linux, or WSL. Native Windows executables remain available. SQLite means zero infrastructure to start.</p></li>
+        <li><h4>Install and run</h4><p>Use the checksum-verifying shell installer on macOS, Linux, or WSL, or the PowerShell workflow on native Windows. SQLite means zero infrastructure to start.</p></li>
         <li><h4>Add providers &amp; models</h4><p>Point at OpenAI, Anthropic, Azure, Bedrock, Gemini, or your local Ollama/vLLM. Keys can live in env vars — stored secrets are write-only and never returned to the browser.</p></li>
         <li><h4>Set prices, budgets &amp; limits</h4><p>USD per million tokens per model, monthly caps per user/department/key, RPM &amp; TPM limits at any scope.</p></li>
         <li><h4>Validate in the playground</h4><p>Test every route from the admin UI before a single client connects — no API key needed.</p></li>
@@ -889,7 +908,8 @@ document.querySelectorAll('.reveal').forEach(el=>io.observe(el));
 // installer command copy
 document.querySelectorAll('.copy-command').forEach(btn=>{
   btn.addEventListener('click',()=>{
-    const command=btn.dataset.copy,original=btn.textContent;
+    const target=btn.dataset.copyTarget&&document.getElementById(btn.dataset.copyTarget);
+    const command=target?target.textContent.trim():btn.dataset.copy,original=btn.textContent;
     const showCopied=()=>{
       btn.textContent='Copied';
       setTimeout(()=>{btn.textContent=original},1800);
